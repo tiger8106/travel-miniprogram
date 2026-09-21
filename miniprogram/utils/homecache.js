@@ -106,8 +106,19 @@ function shouldAutoTry(tripId) {
   return Date.now() - autoTriedAt(tripId) >= AUTO_TRY_TTL;
 }
 
+// 换账号登录时全部清空（首页快照、各页快照、节流标记）
+function clearAll() {
+  try {
+    const info = wx.getStorageInfoSync();
+    const kill = (k) => { try { wx.removeStorageSync(k); } catch (e) {} };
+    (info.keys || []).forEach((k) => {
+      if (k === SNAP_KEY || k === ALARM_KEY || k === AUTO_TRY_KEY || k.indexOf(PAGE_PREFIX) === 0) kill(k);
+    });
+  } catch (e) {}
+}
+
 module.exports = {
   read, write, clear, alarmSyncedAt, markAlarmSynced,
-  readPage, writePage, clearPage,
+  readPage, writePage, clearPage, clearAll,
   autoTriedAt, markAutoTried, clearAutoTried, shouldAutoTry,
 };

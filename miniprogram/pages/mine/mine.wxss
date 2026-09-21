@@ -13,6 +13,81 @@
   justify-content: center;
   font-size: 60rpx;
   margin-right: 24rpx;
+  flex-shrink: 0;
+  overflow: hidden;
+  padding: 0;
+  line-height: 1;
+}
+
+/* chooseAvatar 按钮复用头像样式，需重置 button 默认外观 */
+.avatar-btn {
+  border: 2rpx dashed var(--primary);
+}
+
+.avatar-btn::after {
+  border: none;
+}
+
+.avatar-img {
+  width: 100%;
+  height: 100%;
+}
+
+.avatar-off {
+  background: #f0f2f5;
+}
+
+.profile-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.login-btn {
+  flex-shrink: 0;
+  padding: 14rpx 30rpx;
+  border-radius: 32rpx;
+  background: var(--primary);
+  color: #fff;
+  font-size: 26rpx;
+  font-weight: 600;
+}
+
+.login-btn.disabled {
+  opacity: 0.6;
+}
+
+.edit-row {
+  display: flex;
+  align-items: center;
+  gap: 20rpx;
+}
+
+.nick-input {
+  flex: 1;
+  padding: 18rpx 24rpx;
+  border-radius: 16rpx;
+  background: #f7f8fa;
+  font-size: 28rpx;
+}
+
+.save-btn {
+  flex-shrink: 0;
+  padding: 16rpx 36rpx;
+  border-radius: 32rpx;
+  background: var(--primary);
+  color: #fff;
+  font-size: 26rpx;
+  font-weight: 600;
+}
+
+.edit-hint {
+  margin-top: 14rpx;
+  font-size: 22rpx;
+  color: var(--text-placeholder);
+}
+
+.logout-text {
+  color: #e74c3c;
 }
 
 .profile-name {

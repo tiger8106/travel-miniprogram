@@ -1,5 +1,6 @@
 // pages/upload/upload.js
 const api = require('../../services/api');
+const auth = require('../../utils/auth');
 const homeCache = require('../../utils/homecache');
 
 const app = getApp();
@@ -50,6 +51,10 @@ Page({
     }
     this.setData({ uploading: true, progress: 10, errorMsg: '' });
     try {
+      // 0. 确保已登录（未登录先静默微信登录，攻略才落到当前账号名下）
+      await auth.silentLogin().catch((err) => {
+        console.warn('[upload] 静默登录失败，继续尝试上传', err);
+      });
       // 1. 上传到云存储
       const fileID = await api.uploadDoc(this.data.filePath);
       this.setData({ fileID, progress: 40 });
