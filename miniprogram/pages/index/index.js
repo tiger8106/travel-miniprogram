@@ -22,6 +22,7 @@ Page({
     totalTrips: 0,       // 全部行程数量（空态引导用）
     canRemoveFromHome: false, // 当前攻略是否可从首页移出（已结束 + 已置顶）
     tripEnded: false,    // 当前攻略是否已结束
+    tripMenuOpen: false, // 蓝卡右上角 ⋯ 菜单是否展开
   },
 
   onShow() {
@@ -151,9 +152,20 @@ Page({
     const t = this.data.homeTrips[idx];
     if (!t || t._id === app.globalData.currentTripId) return;
     app.globalData.currentTripId = t._id;
-    this.setData({ tripIdx: idx });
+    this.setData({ tripIdx: idx, tripMenuOpen: false });
     this.loadTrip();
   },
+
+  // 蓝卡右上角 ⋯ 菜单
+  onToggleTripMenu() {
+    this.setData({ tripMenuOpen: !this.data.tripMenuOpen });
+  },
+
+  onCloseTripMenu() {
+    if (this.data.tripMenuOpen) this.setData({ tripMenuOpen: false });
+  },
+
+  noop() {},
 
   // "2026-09-30" → 当天本地 00:00 的时间戳
   // 直接 new Date("YYYY-MM-DD") 会被解析成 UTC 零点（北京时间 08:00），导致日期判断错位
@@ -356,6 +368,7 @@ Page({
   onRemoveFromHome() {
     const trip = this.data.trip;
     if (!trip) return;
+    this.setData({ tripMenuOpen: false });
     wx.showModal({
       title: '从首页移出',
       content: `「${trip.title || '该行程'}」已结束，移出后只在「历史行程」中显示，可随时再添加回来。`,
@@ -374,6 +387,7 @@ Page({
   async onDeleteTrip() {
     const trip = this.data.trip;
     if (!trip) return;
+    this.setData({ tripMenuOpen: false });
     const res = await new Promise((resolve) => {
       wx.showModal({
         title: '删除行程',

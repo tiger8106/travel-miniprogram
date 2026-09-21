@@ -14,8 +14,17 @@
 
   <!-- 已加载 -->
   <block wx:else>
+    <!-- ⋯ 菜单展开时：点外面收起 -->
+    <view wx:if="{{tripMenuOpen}}" class="trip-menu-mask" bindtap="onCloseTripMenu" catchtouchmove="noop"></view>
     <!-- 顶部行程概览：点击切换攻略 -->
     <view class="header card">
+      <!-- 右上角 ⋯ 操作菜单 -->
+      <view class="trip-menu-btn" catchtap="onToggleTripMenu">···</view>
+      <view wx:if="{{tripMenuOpen}}" class="trip-menu">
+        <view wx:if="{{canRemoveFromHome}}" class="trip-menu-item" catchtap="onRemoveFromHome">↩️ 移出首页</view>
+        <view class="trip-menu-item danger" catchtap="onDeleteTrip">🗑 删除行程</view>
+      </view>
+
       <view class="card-title">
         {{trip.title || '当前行程'}}
         <text wx:if="{{tripEnded}}" class="tag tag-success" style="margin-left: 12rpx;">已结束</text>
@@ -32,10 +41,6 @@
           <text>▸</text>
         </view>
       </picker>
-      <view class="trip-actions">
-        <view wx:if="{{canRemoveFromHome}}" class="trip-action" bindtap="onRemoveFromHome">↩️ 移出首页</view>
-        <view class="trip-action danger" bindtap="onDeleteTrip">🗑 删除行程</view>
-      </view>
     </view>
 
     <!-- 此刻行程：正在进行 / 即将进行，点卡片直接导航 -->

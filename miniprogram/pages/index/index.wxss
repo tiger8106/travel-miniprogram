@@ -6,6 +6,7 @@
 .header .card-title {
   color: #fff;
   font-size: 36rpx;
+  padding-right: 80rpx; /* 给右上角 ⋯ 按钮留位 */
 }
 
 .header .text-secondary {
@@ -34,29 +35,73 @@
   font-size: 26rpx;
 }
 
-/* 顶部攻略操作：移出首页 / 删除 */
-.trip-actions {
-  display: flex;
-  gap: 16rpx;
-  margin-top: 20rpx;
+/* 顶部攻略操作：右上角 ⋯ 菜单（移出首页 / 删除行程收进去） */
+.header {
+  position: relative;
 }
 
-.trip-action {
-  flex: 1;
+.trip-menu-mask {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 20;
+  background: transparent;
+}
+
+.trip-menu-btn {
+  position: absolute;
+  top: 16rpx;
+  right: 20rpx;
+  width: 60rpx;
+  height: 60rpx;
+  line-height: 54rpx;
   text-align: center;
-  padding: 14rpx 0;
-  border-radius: 32rpx;
-  background: rgba(255, 255, 255, 0.16);
-  border: 1rpx solid rgba(255, 255, 255, 0.45);
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
   color: #fff;
-  font-size: 26rpx;
+  font-size: 34rpx;
+  font-weight: 700;
+  letter-spacing: 2rpx;
+  z-index: 31;
 }
 
-.trip-action.danger {
-  background: linear-gradient(135deg, #ff8f86, #ff5a4d);
-  border-color: transparent;
-  font-weight: 500;
-  box-shadow: 0 4rpx 14rpx rgba(255, 90, 77, 0.35);
+.trip-menu-btn:active {
+  background: rgba(255, 255, 255, 0.34);
+}
+
+.trip-menu {
+  position: absolute;
+  top: 86rpx;
+  right: 20rpx;
+  min-width: 240rpx;
+  background: #fff;
+  border-radius: 20rpx;
+  padding: 8rpx 0;
+  box-shadow: 0 12rpx 36rpx rgba(15, 23, 42, 0.18);
+  z-index: 32;
+  animation: menu-pop 0.18s cubic-bezier(0.2, 0.9, 0.3, 1.15);
+  transform-origin: top right;
+}
+
+@keyframes menu-pop {
+  from { opacity: 0; transform: scale(0.85); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.trip-menu-item {
+  padding: 22rpx 30rpx;
+  font-size: 27rpx;
+  color: #333;
+}
+
+.trip-menu-item:active {
+  background: #f5f7fa;
+}
+
+.trip-menu-item.danger {
+  color: #e74c3c;
 }
 
 .empty-actions {
