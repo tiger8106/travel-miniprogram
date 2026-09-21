@@ -1,0 +1,151 @@
+<view class="container">
+  <view wx:if="{{loading}}" class="loading">加载中…</view>
+
+  <view wx:elif="{{!alarms.length && !editForm}}" class="empty">
+    <text class="empty-icon">⏰</text>
+    <view>暂无闹钟</view>
+    <view class="text-secondary" style="font-size: 24rpx; margin-top: 16rpx;">
+      上传攻略后会自动从文档提取抢票时间
+    </view>
+    <button class="btn-primary" bindtap="onAdd" style="margin-top: 32rpx;">+ 手动添加闹钟</button>
+    <view wx:if="{{devMode}}" class="add-btn" bindtap="onSelfCheck" style="margin-top: 24rpx;">🩺 订阅消息推送自检</view>
+  </view>
+
+  <block wx:else>
+    <!-- ===== 提醒设置（紧凑两行，不再抢视觉） ===== -->
+    <view class="card settings-card">
+      <view class="settings-row">
+        <text class="settings-icon">⏱️</text>
+        <view class="settings-main">
+          <view class="settings-label">提前提醒</view>
+          <view class="settings-sub">小程序内提醒 & 写入日历的提前量</view>
+        </view>
+        <picker mode="selector"
+                range="{{advanceOptionsLabel}}"
+                value="{{advanceIdx}}"
+                bindchange="onAdvanceChange">
+          <view class="settings-value">提前 {{advanceMin}} 分钟 ›</view>
+        </picker>
+      </view>
+
+      <view class="settings-divider"></view>
+
+      <view class="settings-row" bindtap="onSyncAllToCalendar">
+        <text class="settings-icon">📅</text>
+        <view class="settings-main">
+          <view class="settings-label">同步到系统日历</view>
+          <view class="settings-sub">到点锁屏也响铃震动，微信不用开着</view>
+        </view>
+        <view class="settings-value {{pendingCount ? '' : 'muted'}}">
+          {{pendingCount ? pendingCount + ' 个 ›' : '无待同步'}}
+        </view>
+      </view>
+      <view wx:if="{{devMode}}" class="settings-divider"></view>
+
+      <view wx:if="{{devMode}}" class="settings-row" bindtap="onSelfCheck">
+        <text class="settings-icon">🩺</text>
+        <view class="settings-main">
+          <view class="settings-label">推送自检</view>
+          <view class="settings-sub">检查模板 / 云函数版本，不发送消息</view>
+        </view>
+        <view class="settings-value">体检 ›</view>
+      </view>
+    </view>
+
+    <!-- ===== 闹钟列表 ===== -->
+    <view wx:for="{{alarms}}" wx:key="_id" wx:for-item="item">
+      <ticket-alarm item="{{item}}"
+                    devMode="{{devMode}}"
+                    bind:tapcalendar="onTapCalendar"
+                    bind:tapedit="onTapEdit"
+                    bind:tapdelete="onDelete"
+                    bind:taptest="onTapTest" />
+    </view>
+
+    <view wx:if="{{!editForm}}" class="add-btn" bindtap="onAdd">+ 添加闹钟</view>
+  </block>
+
+  <!-- ===== 添加 / 编辑 · 底部抽屉 ===== -->
+  <view wx:if="{{editForm}}" class="sheet-mask" bindtap="onCancelEdit" catchtouchmove="noop">
+    <view class="sheet" catchtap="noop">
+      <view class="sheet-handle"></view>
+
+      <view class="sheet-head">
+        <view class="sheet-head-left">
+          <view class="sheet-title">{{sheetMode === 'new' ? '添加闹钟' : '编辑闹钟'}}</view>
+          <view class="sheet-sub">{{editForm.fireAtDate}} {{editForm.fireAtTime}}</view>
+        </view>
+        <view class="sheet-close" bindtap="onCancelEdit">✕</view>
+      </view>
+
+      <scroll-view scroll-y class="sheet-body">
+        <!-- 标题 -->
+        <view class="field">
+          <view class="field-label">🔔 标题</view>
+          <input class="input-line" placeholder="如：抢 G2249 高铁票" placeholder-class="ph"
+                 value="{{editForm.title}}" data-field="title"
+                 bindinput="onEditInput" maxlength="30" />
+        </view>
+
+        <!-- 提醒时间 -->
+        <view class="field">
+          <view class="field-label">⏰ 提醒时间</view>
+          <view class="time-row-edit">
+            <picker mode="date" value="{{editForm.fireAtDate}}" bindchange="onDateChange" class="time-picker">
+              <view class="time-pill">
+                <text class="time-pill-label">日期</text>
+                <text class="time-pill-value">{{editForm.fireAtDate}}</text>
+              </view>
+            </picker>
+            <text class="time-dash">—</text>
+            <picker mode="time" value="{{editForm.fireAtTime}}" bindchange="onTimeChange" class="time-picker">
+              <view class="time-pill">
+                <text class="time-pill-label">时间</text>
+                <text class="time-pill-value">{{editForm.fireAtTime}}</text>
+              </view>
+            </picker>
+          </view>
+        </view>
+
+        <!-- 类型 -->
+        <view class="field">
+          <view class="field-label">🏷️ 类型</view>
+          <view class="chip-wrap">
+            <view wx:for="{{typeOptions}}" wx:key="value"
+                  class="chip {{editForm.type === item.value ? 'chip-on' : ''}}"
+                  data-value="{{item.value}}" bindtap="onEditType">
+              <text class="chip-icon">{{item.icon}}</text>{{item.label}}
+            </view>
+          </view>
+        </view>
+
+        <!-- 备注 -->
+        <view class="field">
+          <view class="field-label">🗒️ 备注</view>
+          <textarea class="input-area" placeholder="车次、检票口、注意事项等（选填）" placeholder-class="ph"
+                    value="{{editForm.note}}" data-field="note"
+                    bindinput="onEditInput" auto-height maxlength="100" />
+        </view>
+      </scroll-view>
+
+      <view class="sheet-foot">
+        <view class="btn-cancel" bindtap="onCancelEdit">取消</view>
+        <view class="btn-save" bindtap="onSheetSave">{{sheetMode === 'new' ? '添加闹钟' : '保存修改'}}</view>
+      </view>
+    </view>
+  </view>
+
+  <!-- ===== 删除确认 ===== -->
+  <view wx:if="{{delItem}}" class="sheet-mask confirm-mask" bindtap="onCancelDelete" catchtouchmove="noop">
+    <view class="confirm-card" catchtap="noop">
+      <view class="confirm-icon">🗑</view>
+      <view class="confirm-title">删除这个闹钟？</view>
+      <view class="confirm-text">{{delItem.title}}</view>
+      <view class="confirm-hint">删除后将不再提醒</view>
+      <view class="confirm-actions">
+        <view class="btn-cancel" bindtap="onCancelDelete">取消</view>
+        <view class="btn-del" bindtap="onConfirmDelete">删除</view>
+      </view>
+    </view>
+  </view>
+</view>

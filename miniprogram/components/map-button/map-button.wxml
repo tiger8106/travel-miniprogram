@@ -1,0 +1,5 @@
+<view class="map-btn" bindtap="onTap">
+  <text class="map-icon">🗺️</text>
+  <text class="map-text">{{label}}</text>
+  <text class="map-arrow">›</text>
+</view>

@@ -1,0 +1,32 @@
+# 依赖
+node_modules/
+miniprogram_npm/
+
+# 系统 / 编辑器
+.DS_Store
+*.log
+.project
+.idea/
+.vscode/
+
+# 私密配置（含密钥，绝不入库）
+.env
+.env.local
+project.private.config.json
+
+# 小图标等图片资源需要入库（tabbar 依赖），不要忽略
+# miniprogram/images/*.png
+
+# ---- 临时调试产物（脚本跑出来的输出，不入库）----
+.alarm-out*.txt
+.docx-text.txt
+.longji-out*.txt
+.norm-out*.txt
+.test-out.txt
+.ls.txt
+scripts/*-raw.txt
+scripts/*-out*.json
+scripts/llm-out*.json
+scripts/cloudfn-result.json
+scripts/commute-result.json
+scripts/*.log

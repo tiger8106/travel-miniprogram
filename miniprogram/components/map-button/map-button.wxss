@@ -1,0 +1,28 @@
+.map-btn {
+  display: flex;
+  align-items: center;
+  background: var(--primary-light);
+  border-radius: 32rpx;
+  padding: 12rpx 24rpx;
+  max-width: 480rpx;
+}
+
+.map-icon {
+  font-size: 28rpx;
+  margin-right: 8rpx;
+}
+
+.map-text {
+  flex: 1;
+  font-size: 24rpx;
+  color: var(--primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.map-arrow {
+  color: var(--primary);
+  font-size: 28rpx;
+  margin-left: 8rpx;
+}

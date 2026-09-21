@@ -1,0 +1,1060 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>🧳 广西 7 天游 - 小程序预览</title>
+  <style>
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; padding: 0; height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: linear-gradient(135deg, #e8eff7 0%, #d6e2ed 100%);
+      color: #191919;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    /* === 桌面侧边栏 + 手机壳 === */
+    .stage {
+      display: flex;
+      gap: 24px;
+      padding: 24px;
+      max-width: 1200px;
+      margin: 0 auto;
+      align-items: flex-start;
+    }
+    .phone-frame {
+      width: 380px;
+      height: 760px;
+      background: #111;
+      border-radius: 44px;
+      padding: 12px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.25), 0 0 0 1px #222;
+      position: sticky;
+      top: 24px;
+      flex-shrink: 0;
+    }
+    .phone-frame::before {
+      content: "";
+      position: absolute;
+      top: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 100px;
+      height: 24px;
+      background: #000;
+      border-radius: 12px;
+      z-index: 2;
+    }
+    .phone-screen {
+      width: 100%;
+      height: 100%;
+      background: #F7F7F7;
+      border-radius: 32px;
+      overflow: hidden;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* === 顶部状态栏 === */
+    .status-bar {
+      height: 36px;
+      padding: 0 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+      font-weight: 600;
+      color: #191919;
+      background: #F7F7F7;
+      flex-shrink: 0;
+    }
+    .status-bar .icons { display: flex; gap: 4px; align-items: center; }
+    .status-bar .icons::before { content: "📶 📡 🔋"; font-size: 11px; letter-spacing: 1px; }
+
+    /* === 页面标题栏 === */
+    .nav-bar {
+      height: 44px;
+      padding: 0 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 17px;
+      font-weight: 600;
+      background: #F7F7F7;
+      border-bottom: 1px solid #ececec;
+      flex-shrink: 0;
+      position: relative;
+    }
+    .nav-bar .back {
+      position: absolute;
+      left: 12px;
+      font-size: 22px;
+      color: #191919;
+      cursor: pointer;
+      user-select: none;
+    }
+    .nav-bar .action {
+      position: absolute;
+      right: 12px;
+      font-size: 13px;
+      color: #1989FA;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    /* === 内容区 === */
+    .content {
+      flex: 1;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      padding-bottom: 80px;
+    }
+    .content::-webkit-scrollbar { display: none; }
+
+    .tab-page { display: none; }
+    .tab-page.active { display: block; animation: fadeIn 0.3s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+    /* === 通用卡片 === */
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      margin: 12px;
+      padding: 16px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+    }
+    .card-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .card-subtitle {
+      font-size: 12px;
+      color: #888;
+      margin-bottom: 12px;
+    }
+
+    /* === 行程概览 === */
+    .trip-hero {
+      background: linear-gradient(135deg, #1989FA 0%, #0e6fd9 100%);
+      color: #fff;
+      border-radius: 0 0 20px 20px;
+      padding: 20px 16px 24px;
+    }
+    .trip-hero h1 { margin: 0 0 4px; font-size: 20px; font-weight: 700; }
+    .trip-hero .dates { font-size: 13px; opacity: 0.85; margin-bottom: 16px; }
+    .progress-wrap { background: rgba(255,255,255,0.25); border-radius: 8px; height: 8px; overflow: hidden; }
+    .progress-bar { background: #fff; height: 100%; width: 0%; transition: width 1s ease; border-radius: 8px; }
+    .progress-text { margin-top: 6px; font-size: 12px; opacity: 0.9; }
+
+    /* === 日程卡 === */
+    .day-card { padding: 0; overflow: hidden; }
+    .day-header {
+      background: linear-gradient(90deg, #FFE9C7, #FFD27D);
+      padding: 10px 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .day-header .day-label { font-weight: 600; color: #8B5A00; font-size: 13px; }
+    .day-header .day-date { font-size: 12px; color: #8B5A00; }
+    .day-header.today { background: linear-gradient(90deg, #FFE0E0, #FFB6B6); }
+    .day-header.today .day-label,
+    .day-header.today .day-date { color: #B30000; }
+
+    .activity {
+      padding: 12px 16px;
+      border-bottom: 1px solid #f0f0f0;
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .activity:hover { background: #fafafa; }
+    .activity:last-child { border-bottom: none; }
+    .activity-time {
+      flex-shrink: 0;
+      width: 48px;
+      font-size: 12px;
+      color: #1989FA;
+      font-weight: 600;
+      padding-top: 2px;
+    }
+    .activity-body { flex: 1; }
+    .activity-name { font-size: 14px; font-weight: 500; margin-bottom: 2px; }
+    .activity-loc { font-size: 12px; color: #888; }
+    .activity-desc { font-size: 12px; color: #666; margin-top: 4px; }
+    .map-btn {
+      flex-shrink: 0;
+      align-self: center;
+      background: #1989FA;
+      color: #fff;
+      border: none;
+      border-radius: 14px;
+      padding: 5px 10px;
+      font-size: 12px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .map-btn:hover { background: #0e6fd9; }
+
+    /* === 建议卡 === */
+    .suggestion-cat {
+      padding: 0;
+    }
+    .suggestion-cat-header {
+      padding: 10px 16px;
+      font-weight: 600;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: #fafafa;
+      border-bottom: 1px solid #f0f0f0;
+    }
+    .suggestion-item {
+      padding: 10px 16px;
+      font-size: 13px;
+      color: #444;
+      border-bottom: 1px solid #f5f5f5;
+      display: flex;
+      gap: 8px;
+    }
+    .suggestion-item::before { content: "•"; color: #1989FA; font-weight: bold; flex-shrink: 0; }
+    .suggestion-item:last-child { border-bottom: none; }
+
+    /* === 上传 === */
+    .upload-zone {
+      margin: 20px 16px;
+      padding: 40px 16px;
+      background: #fff;
+      border: 2px dashed #1989FA;
+      border-radius: 16px;
+      text-align: center;
+      cursor: pointer;
+    }
+    .upload-zone .icon { font-size: 48px; margin-bottom: 8px; }
+    .upload-zone .text { color: #1989FA; font-weight: 600; }
+    .upload-zone .hint { color: #888; font-size: 12px; margin-top: 4px; }
+    .upload-progress {
+      margin: 16px;
+      background: #fff;
+      border-radius: 12px;
+      padding: 16px;
+      display: none;
+    }
+    .upload-progress.show { display: block; }
+    .upload-progress .bar-wrap {
+      background: #f0f0f0;
+      height: 8px;
+      border-radius: 4px;
+      overflow: hidden;
+      margin-top: 8px;
+    }
+    .upload-progress .bar {
+      background: linear-gradient(90deg, #1989FA, #07C160);
+      height: 100%;
+      width: 0%;
+      transition: width 0.3s ease;
+    }
+    .upload-progress .status {
+      font-size: 12px;
+      color: #888;
+      margin-top: 6px;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .upload-result {
+      margin: 16px;
+      padding: 16px;
+      background: #E8F8EE;
+      border-left: 3px solid #07C160;
+      border-radius: 8px;
+      display: none;
+    }
+    .upload-result.show { display: block; animation: fadeIn 0.5s ease; }
+    .upload-result .title { color: #07C160; font-weight: 600; margin-bottom: 4px; }
+    .upload-result .body { font-size: 13px; color: #444; }
+
+    /* === 闹钟 === */
+    .alarm-card {
+      background: #fff;
+      border-radius: 12px;
+      margin: 10px 12px;
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+    }
+    .alarm-icon {
+      width: 44px;
+      height: 44px;
+      border-radius: 22px;
+      background: linear-gradient(135deg, #FF9500, #FA9D3B);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 22px;
+      flex-shrink: 0;
+    }
+    .alarm-info { flex: 1; }
+    .alarm-title { font-weight: 600; font-size: 14px; margin-bottom: 2px; }
+    .alarm-time { font-size: 12px; color: #888; }
+    .alarm-time .lead { color: #FA9D3B; }
+    .alarm-action {
+      background: none;
+      border: none;
+      color: #1989FA;
+      font-size: 13px;
+      cursor: pointer;
+      padding: 4px 8px;
+    }
+    .fab {
+      position: absolute;
+      right: 20px;
+      bottom: 96px;
+      width: 56px;
+      height: 56px;
+      border-radius: 28px;
+      background: linear-gradient(135deg, #1989FA, #0e6fd9);
+      color: #fff;
+      font-size: 28px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      box-shadow: 0 4px 12px rgba(25,137,250,0.4);
+      z-index: 5;
+    }
+
+    /* === 我的 === */
+    .profile {
+      background: linear-gradient(135deg, #1989FA, #5DA8FA);
+      color: #fff;
+      padding: 32px 16px;
+      text-align: center;
+    }
+    .avatar {
+      width: 72px;
+      height: 72px;
+      border-radius: 36px;
+      background: rgba(255,255,255,0.3);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 36px;
+      margin-bottom: 8px;
+    }
+    .profile .name { font-size: 16px; font-weight: 600; }
+    .profile .meta { font-size: 12px; opacity: 0.8; margin-top: 2px; }
+    .menu-list { background: #fff; margin: 12px; border-radius: 12px; overflow: hidden; }
+    .menu-item {
+      padding: 14px 16px;
+      border-bottom: 1px solid #f0f0f0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+    }
+    .menu-item:last-child { border-bottom: none; }
+    .menu-item .left { display: flex; align-items: center; gap: 8px; }
+    .menu-item .arrow { color: #c0c0c0; }
+
+    /* === TabBar === */
+    .tab-bar {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 60px;
+      background: rgba(247,247,247,0.95);
+      backdrop-filter: blur(10px);
+      border-top: 1px solid #ececec;
+      display: flex;
+      align-items: stretch;
+      padding-bottom: 6px;
+      flex-shrink: 0;
+    }
+    .tab {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      color: #888;
+      cursor: pointer;
+      gap: 2px;
+      user-select: none;
+    }
+    .tab .icon { font-size: 22px; line-height: 1; }
+    .tab.active { color: #1989FA; }
+    .tab.center .icon-wrap {
+      width: 44px;
+      height: 44px;
+      border-radius: 22px;
+      background: linear-gradient(135deg, #1989FA, #0e6fd9);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-top: -12px;
+      box-shadow: 0 4px 10px rgba(25,137,250,0.4);
+    }
+
+    /* === 模态框 === */
+    .modal-bg {
+      position: absolute;
+      inset: 0;
+      background: rgba(0,0,0,0.5);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+    .modal-bg.show { display: flex; }
+    .modal {
+      background: #fff;
+      border-radius: 14px;
+      padding: 24px;
+      margin: 24px;
+      max-width: 320px;
+      animation: popIn 0.3s ease;
+    }
+    @keyframes popIn { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+    .modal .title { font-size: 16px; font-weight: 600; margin-bottom: 12px; text-align: center; }
+    .modal .body { font-size: 13px; color: #666; margin-bottom: 16px; }
+    .modal .actions { display: flex; gap: 12px; }
+    .modal button {
+      flex: 1;
+      padding: 10px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    .modal .btn-secondary { background: #f0f0f0; color: #666; }
+    .modal .btn-primary { background: #1989FA; color: #fff; }
+
+    /* === Toast === */
+    .toast {
+      position: absolute;
+      bottom: 100px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.78);
+      color: #fff;
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      z-index: 200;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s;
+    }
+    .toast.show { opacity: 1; }
+
+    /* === 桌面说明区 === */
+    .preview-note {
+      flex: 1;
+      min-width: 280px;
+      background: #fff;
+      border-radius: 16px;
+      padding: 24px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.06);
+    }
+    .preview-note h2 { margin-top: 0; font-size: 18px; }
+    .preview-note p { color: #555; line-height: 1.7; }
+    .preview-note code {
+      background: #f5f5f5;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 12px;
+      color: #c7254e;
+    }
+    .preview-note ul { padding-left: 20px; color: #555; }
+    .preview-note li { margin-bottom: 6px; line-height: 1.6; }
+    .preview-note .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      background: #FFE9C7;
+      color: #8B5A00;
+      margin-right: 4px;
+    }
+    .preview-note .badge.green { background: #E8F8EE; color: #06A050; }
+    .preview-note .badge.blue { background: #E5F2FE; color: #1989FA; }
+
+    @media (max-width: 720px) {
+      .stage { flex-direction: column; padding: 12px; }
+      .phone-frame { position: relative; margin: 0 auto; }
+      .preview-note { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="stage">
+    <!-- 手机壳 -->
+    <div class="phone-frame">
+      <div class="phone-screen" id="app">
+        <!-- 状态栏 -->
+        <div class="status-bar">
+          <span id="clock">19:43</span>
+          <span class="icons"></span>
+        </div>
+
+        <!-- 导航栏 -->
+        <div class="nav-bar" id="navBar">
+          <span class="back" id="backBtn" style="display:none">‹</span>
+          <span id="navTitle">🧳 我的行程</span>
+          <span class="action" id="navAction" style="display:none"></span>
+        </div>
+
+        <!-- 内容区 -->
+        <div class="content" id="content">
+          <!-- 由 JS 注入 -->
+        </div>
+
+        <!-- 底部 TabBar -->
+        <nav class="tab-bar">
+          <div class="tab active" data-tab="home"><div class="icon">🏠</div><div>首页</div></div>
+          <div class="tab" data-tab="suggestions"><div class="icon">💡</div><div>建议</div></div>
+          <div class="tab center" data-tab="upload"><div class="icon-wrap">📤</div></div>
+          <div class="tab" data-tab="alarms"><div class="icon">⏰</div><div>闹钟</div></div>
+          <div class="tab" data-tab="mine"><div class="icon">👤</div><div>我的</div></div>
+        </nav>
+
+        <!-- 模态框 -->
+        <div class="modal-bg" id="modalBg">
+          <div class="modal">
+            <div class="title" id="modalTitle"></div>
+            <div class="body" id="modalBody"></div>
+            <div class="actions">
+              <button class="btn-secondary" id="modalCancel">取消</button>
+              <button class="btn-primary" id="modalOk">确认</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Toast -->
+        <div class="toast" id="toast"></div>
+      </div>
+    </div>
+
+    <!-- 桌面说明 -->
+    <aside class="preview-note">
+      <h2>🧰 这是浏览器演示版</h2>
+      <p>这是一份<strong>纯前端 H5 演示</strong>，用来预览小程序上线后的样子。所有功能都接了 mock 数据，不需要云开发。</p>
+
+      <h3>🎯 你可以试这些交互</h3>
+      <ul>
+        <li>点底部 5 个 tab 切换页面</li>
+        <li>在<strong>首页</strong>点活动右侧「<span style="color:#1989FA">→ 导航</span>」按钮 —— <strong>会真的跳转到高德地图</strong></li>
+        <li>在<strong>上传</strong>页面点大块区域，模拟上传一份攻略，会自动跑 AI 解析进度条</li>
+        <li>在<strong>闹钟</strong>页面点「+」新增闹钟；点闹钟可模拟触发</li>
+      </ul>
+
+      <h3>📌 区别于正式版</h3>
+      <ul>
+        <li>✅ UI 完全一致：手机壳 + 状态栏 + TabBar + 卡片样式</li>
+        <li>✅ 真实跳转：高德地图按钮是真实链接，能在浏览器打开高德 web 版</li>
+        <li>🔸 Mock 数据：广西 7 天游（来自你提供的 docx 攻略）</li>
+        <li>🔸 无云函数：所有 AI 解析/数据库读写都是前端假数据</li>
+        <li>🔸 无订阅消息：闹钟触发只弹窗，不会真推送</li>
+      </ul>
+
+      <h3>🚀 想看真实版？</h3>
+      <p>安装 <code>微信开发者工具</code> → 导入 <code>travel-miniprogram/</code> 目录 → 按 README 配 AppID + 云开发即可。</p>
+
+      <h3>📂 文件位置</h3>
+      <p><code>D:\on_homework\workbody\代码开发\travel-miniprogram\demo\index.html</code></p>
+      <p style="font-size:12px;color:#888">双击即可在任何现代浏览器打开（Chrome / Edge / Safari）</p>
+    </aside>
+  </div>
+
+  <script>
+  /* ============================================================
+   * 演示数据（基于 Tiger 上传的「国庆七天广西旅游攻略」）
+   * ============================================================ */
+  const MOCK_DATA = {
+    trip: {
+      title: '国庆七天广西游',
+      subtitle: '南宁-桂林-阳朔-北海',
+      startDate: '2026-10-01',
+      endDate: '2026-10-07',
+      todayIndex: 1, // 当前是第几天（演示用）
+    },
+    days: [
+      {
+        label: 'Day 1',
+        date: '10月1日 周四',
+        isToday: true,
+        title: '抵达南宁',
+        activities: [
+          { time: '14:00', name: '抵达南宁吴圩机场', loc: '南宁吴圩国际机场', desc: '出机场后打车去酒店（约 1 小时）', endLoc: '南宁市中心' },
+          { time: '18:00', name: '中山路美食街', loc: '中山路', desc: '老友粉 / 螺蛳粉 / 酸嘢', endLoc: null },
+        ],
+      },
+      {
+        label: 'Day 2',
+        date: '10月2日 周五',
+        isToday: false,
+        title: '南宁 → 桂林',
+        activities: [
+          { time: '08:30', name: '南宁东站 → 桂林北站', loc: '南宁东站', desc: '高铁 D8202，约 2.5 小时', endLoc: '桂林北站' },
+          { time: '13:00', name: '桂林米粉（老牌崇善米粉）', loc: '崇善米粉总店', desc: '必点：卤菜粉 + 锅烧', endLoc: null },
+          { time: '15:00', name: '象鼻山景区', loc: '象山区', desc: '桂林城徽，1.5 小时', endLoc: '桂林市中心' },
+        ],
+      },
+      {
+        label: 'Day 3',
+        date: '10月3日 周六',
+        isToday: false,
+        title: '桂林 → 阳朔',
+        activities: [
+          { time: '09:00', name: '漓江精华段漂流', loc: '杨堤码头', desc: '杨堤 → 兴坪，4 小时', endLoc: '兴坪古镇' },
+          { time: '14:00', name: '兴坪古镇 + 20 元背景', loc: '兴坪古镇', desc: '打卡 20 元人民币背景', endLoc: null },
+          { time: '16:00', name: '阳朔西街', loc: '阳朔西街', desc: '晚饭 + 酒吧街', endLoc: null },
+        ],
+      },
+      {
+        label: 'Day 4',
+        date: '10月4日 周日',
+        isToday: false,
+        title: '阳朔深度游',
+        activities: [
+          { time: '08:00', name: '遇龙河竹筏', loc: '遇龙河', desc: '双人竹筏 1.5 小时', endLoc: null },
+          { time: '13:00', name: '十里画廊骑行', loc: '十里画廊', desc: '租电动车，沿途月亮山 / 大榕树', endLoc: null },
+        ],
+      },
+      {
+        label: 'Day 5',
+        date: '10月5日 周一',
+        isToday: false,
+        title: '阳朔 → 北海',
+        activities: [
+          { time: '09:00', name: '阳朔 → 桂林机场', loc: '阳朔', desc: '包车 2.5 小时', endLoc: '桂林两江国际机场' },
+          { time: '13:00', name: '桂林 → 北海', loc: '桂林两江国际机场', desc: '航班待定', endLoc: '北海福成机场' },
+          { time: '18:00', name: '北海老街', loc: '珠海路老街', desc: '侨港风情街 + 虾饼', endLoc: null },
+        ],
+      },
+      {
+        label: 'Day 6',
+        date: '10月6日 周二',
+        isToday: false,
+        title: '涠洲岛一日游',
+        activities: [
+          { time: '08:00', name: '北海国际客运港', loc: '北海港', desc: '坐船 1.5 小时到涠洲岛', endLoc: '涠洲岛' },
+          { time: '10:00', name: '鳄鱼山火山公园', loc: '涠洲岛', desc: '火山地貌 + 月亮湾', endLoc: null },
+          { time: '15:00', name: '石螺口海滩', loc: '石螺口', desc: '看日落 / 浮潜', endLoc: null },
+        ],
+      },
+      {
+        label: 'Day 7',
+        date: '10月7日 周三',
+        isToday: false,
+        title: '返程',
+        activities: [
+          { time: '10:00', name: '涠洲岛 → 北海', loc: '涠洲岛', desc: '船返北海', endLoc: '北海港' },
+          { time: '14:00', name: '北海机场 → 重庆', loc: '北海福成机场', desc: '航班 3U8XXX', endLoc: '重庆江北机场' },
+        ],
+      },
+    ],
+    alarms: [
+      { id: 'a1', title: '抢南宁→桂林高铁票', time: '09-15 09:00', leadMinutes: 5, triggered: false },
+      { id: 'a2', title: '订涠洲岛船票', time: '09-20 08:00', leadMinutes: 10, triggered: false },
+      { id: 'a3', title: '订涠洲岛民宿', time: '09-22 10:00', leadMinutes: 5, triggered: false },
+      { id: 'a4', title: '值机选座', time: '09-28 14:00', leadMinutes: 30, triggered: false },
+    ],
+    suggestions: {
+      weather: { icon: '🌤️', title: '天气提醒', items: [
+        '10月初广西气温 22-32℃，白天短袖 + 防晒，晚上加薄外套',
+        '桂林/阳朔多雨，备雨伞 + 防滑鞋',
+        '北海海边紫外线强，SPF50+ 必备',
+      ]},
+      gear: { icon: '🎒', title: '装备清单', items: [
+        '充电宝（漂流时手机容易进水，必备）',
+        '防水手机袋（漓江竹筏必带）',
+        '晕船药 / 肠胃药（海鲜吃多了备着）',
+        '凉拖（海边走路方便）',
+      ]},
+      food: { icon: '🍜', title: '必吃清单', items: [
+        '桂林：崇善米粉 / 又益轩米粉',
+        '阳朔：啤酒鱼（谢大姐 / 谢三姐）',
+        '北海：侨港风情街（24栋糖水 / 蟹仔粉）',
+        '南宁：老友粉（舒记 / 北门街）',
+      ]},
+      play: { icon: '🎯', title: '必玩项目', items: [
+        '漓江精华段漂流（必坐！）',
+        '遇龙河双人竹筏',
+        '涠洲岛石螺口看日落',
+        '阳朔西街晚上氛围最好',
+      ]},
+      tips: { icon: '⚠️', title: '注意事项', items: [
+        '国庆游客爆满，**所有门票/船票提前 1 周订**',
+        '阳朔不要住西街边上，吵；建议住十里画廊附近',
+        '涠洲岛船票**最难抢**，开售当天 9:00 准点',
+        '高铁站打车要排队，**提前预约网约车**',
+      ]},
+      cost: { icon: '💰', title: '预算参考', items: [
+        '交通（往返机票+高铁+船票）：约 2500 元',
+        '住宿（6 晚）：约 1800 元',
+        '餐饮：约 800 元',
+        '门票+包车：约 700 元',
+        '**人均：5800 元**',
+      ]},
+    },
+  };
+
+  /* ============================================================
+   * 视图渲染
+   * ============================================================ */
+  function renderHome() {
+    const { trip, days, suggestions } = MOCK_DATA;
+    const totalDays = days.length;
+    const todayIdx = trip.todayIndex;
+    const progressPct = Math.round((todayIdx / totalDays) * 100);
+
+    const today = days.find(d => d.isToday);
+    const nextDays = days.filter(d => !d.isToday).slice(0, 2);
+
+    const html = `
+      <!-- 行程概览 -->
+      <div class="trip-hero">
+        <h1>${trip.title}</h1>
+        <div class="dates">${trip.startDate} ~ ${trip.endDate} · ${trip.subtitle}</div>
+        <div class="progress-wrap"><div class="progress-bar" id="progressBar"></div></div>
+        <div class="progress-text">第 ${todayIdx} 天 / 共 ${totalDays} 天 · 进度 ${progressPct}%</div>
+      </div>
+
+      <!-- 今日行程 -->
+      <div class="card day-card">
+        <div class="day-header today">
+          <span class="day-label">🌟 今日 · ${today.label}</span>
+          <span class="day-date">${today.date}</span>
+        </div>
+        ${today.activities.map(renderActivity).join('')}
+      </div>
+
+      <!-- 接下来 2 天 -->
+      ${nextDays.map(day => `
+        <div class="card day-card">
+          <div class="day-header">
+            <span class="day-label">${day.label} · ${day.title}</span>
+            <span class="day-date">${day.date}</span>
+          </div>
+          ${day.activities.map(renderActivity).join('')}
+        </div>
+      `).join('')}
+
+      <!-- 旅行建议预览 -->
+      <div class="card">
+        <div class="card-title">💡 旅行建议 <span style="margin-left:auto;font-size:12px;color:#1989FA;font-weight:normal">查看全部 →</span></div>
+        <div class="card-subtitle">AI 根据你的行程生成，共 6 类 ${Object.keys(suggestions).length} 类</div>
+        <div style="font-size:13px;color:#666">点底部「建议」tab 查看天气、装备、必吃等实用建议。</div>
+      </div>
+    `;
+
+    setTimeout(() => {
+      const bar = document.getElementById('progressBar');
+      if (bar) bar.style.width = progressPct + '%';
+    }, 100);
+
+    return html;
+  }
+
+  function renderActivity(act) {
+    const mapBtn = act.endLoc
+      ? `<button class="map-btn" onclick="navTo('${escapeAttr(act.loc)}','${escapeAttr(act.endLoc)}')">→ 导航</button>`
+      : '';
+    return `
+      <div class="activity">
+        <div class="activity-time">${act.time}</div>
+        <div class="activity-body">
+          <div class="activity-name">${act.name}</div>
+          ${act.loc ? `<div class="activity-loc">📍 ${act.loc}</div>` : ''}
+          ${act.desc ? `<div class="activity-desc">${act.desc}</div>` : ''}
+        </div>
+        ${mapBtn}
+      </div>
+    `;
+  }
+
+  function renderSuggestions() {
+    const { suggestions } = MOCK_DATA;
+    let html = `
+      <div class="card">
+        <div class="card-title">💡 旅行建议</div>
+        <div class="card-subtitle">AI 根据你的行程生成 · 点击右上角可刷新</div>
+      </div>
+    `;
+    for (const key of Object.keys(suggestions)) {
+      const cat = suggestions[key];
+      html += `
+        <div class="card suggestion-cat">
+          <div class="suggestion-cat-header">${cat.icon} ${cat.title}</div>
+          ${cat.items.map(item => `
+            <div class="suggestion-item">${item}</div>
+          `).join('')}
+        </div>
+      `;
+    }
+    return html;
+  }
+
+  function renderAlarms() {
+    const { alarms } = MOCK_DATA;
+    let html = `
+      <div class="card">
+        <div class="card-title">⏰ 抢票闹钟 <span style="margin-left:auto;font-size:12px;color:#888;font-weight:normal">共 ${alarms.length} 条</span></div>
+        <div class="card-subtitle">到点会震动 + 弹窗提醒；后台时走订阅消息</div>
+      </div>
+    `;
+    alarms.forEach(a => {
+      html += `
+        <div class="alarm-card">
+          <div class="alarm-icon">⏰</div>
+          <div class="alarm-info">
+            <div class="alarm-title">${a.title}</div>
+            <div class="alarm-time">📅 ${a.time} · <span class="lead">提前 ${a.leadMinutes} 分钟提醒</span></div>
+          </div>
+          <button class="alarm-action" onclick="triggerAlarm('${a.id}')">模拟触发</button>
+        </div>
+      `;
+    });
+    html += `<div class="fab" onclick="addAlarm()">+</div>`;
+    return html;
+  }
+
+  function renderUpload() {
+    return `
+      <div class="card">
+        <div class="card-title">📤 上传攻略</div>
+        <div class="card-subtitle">支持 .docx / .doc 文件，AI 自动解析为每日行程</div>
+      </div>
+      <div class="upload-zone" id="uploadZone" onclick="simulateUpload()">
+        <div class="icon">📄</div>
+        <div class="text">点击上传 .docx 攻略</div>
+        <div class="hint">或拖拽文件到这里</div>
+      </div>
+      <div class="upload-progress" id="uploadProgress">
+        <div style="font-weight:600;color:#1989FA" id="uploadStatusText">准备中...</div>
+        <div class="bar-wrap"><div class="bar" id="uploadBar"></div></div>
+        <div class="status">
+          <span id="uploadPct">0%</span>
+          <span id="uploadStep">0 / 4</span>
+        </div>
+      </div>
+      <div class="upload-result" id="uploadResult">
+        <div class="title">✅ 解析完成</div>
+        <div class="body" id="uploadResultBody"></div>
+      </div>
+    `;
+  }
+
+  function renderMine() {
+    return `
+      <div class="profile">
+        <div class="avatar">🐯</div>
+        <div class="name">Tiger</div>
+        <div class="meta">来自重庆 · 国庆广西游</div>
+      </div>
+      <div class="menu-list">
+        <div class="menu-item"><span class="left">🧳 我的行程</span><span class="arrow">›</span></div>
+        <div class="menu-item"><span class="left">⏰ 闹钟管理</span><span class="arrow">›</span></div>
+        <div class="menu-item"><span class="left">💡 建议历史</span><span class="arrow">›</span></div>
+        <div class="menu-item"><span class="left">🌐 语言</span><span style="color:#888">简体中文 ›</span></div>
+        <div class="menu-item"><span class="left">🔔 通知权限</span><span style="color:#07C160">已开启 ›</span></div>
+      </div>
+      <div class="menu-list">
+        <div class="menu-item"><span class="left">⭐ 关于</span><span style="color:#888">v1.0.0</span></div>
+        <div class="menu-item"><span class="left">📝 反馈</span><span class="arrow">›</span></div>
+      </div>
+      <div style="text-align:center;color:#aaa;font-size:12px;padding:20px">Made by 阿稳 🧰</div>
+    `;
+  }
+
+  function escapeAttr(s) { return String(s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;'); }
+
+  /* ============================================================
+   * Tab 切换 + 状态
+   * ============================================================ */
+  let currentTab = 'home';
+
+  function switchTab(name) {
+    currentTab = name;
+    document.querySelectorAll('.tab').forEach(t => {
+      t.classList.toggle('active', t.dataset.tab === name);
+    });
+    render();
+  }
+
+  function render() {
+    const titles = {
+      home: '🧳 我的行程',
+      suggestions: '💡 旅行建议',
+      upload: '📤 上传攻略',
+      alarms: '⏰ 抢票闹钟',
+      mine: '👤 我的',
+    };
+    document.getElementById('navTitle').textContent = titles[currentTab] || '🧳';
+    document.getElementById('backBtn').style.display = 'none';
+
+    let html = '';
+    if (currentTab === 'home') html = renderHome();
+    else if (currentTab === 'suggestions') html = renderSuggestions();
+    else if (currentTab === 'upload') html = renderUpload();
+    else if (currentTab === 'alarms') html = renderAlarms();
+    else if (currentTab === 'mine') html = renderMine();
+
+    const content = document.getElementById('content');
+    content.innerHTML = html;
+    content.scrollTop = 0;
+  }
+
+  /* ============================================================
+   * 交互逻辑
+   * ============================================================ */
+  // 高德地图跳转
+  function navTo(from, to) {
+    const url = `https://uri.amap.com/navigation?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&mode=car&src=mypage&coordinate=gaode`;
+    window.open(url, '_blank');
+    toast(`🗺️ 打开高德：${from} → ${to}`);
+  }
+
+  // 上传模拟
+  function simulateUpload() {
+    const zone = document.getElementById('uploadZone');
+    const prog = document.getElementById('uploadProgress');
+    const bar = document.getElementById('uploadBar');
+    const pct = document.getElementById('uploadPct');
+    const step = document.getElementById('uploadStep');
+    const statusText = document.getElementById('uploadStatusText');
+    const result = document.getElementById('uploadResult');
+    const resultBody = document.getElementById('uploadResultBody');
+
+    zone.style.opacity = '0.5';
+    zone.style.pointerEvents = 'none';
+    prog.classList.add('show');
+    result.classList.remove('show');
+
+    const steps = [
+      { p: 20, s: 1, msg: '上传文件到云存储...' },
+      { p: 50, s: 2, msg: '解析 docx 内容...' },
+      { p: 80, s: 3, msg: 'AI 提取每日行程...' },
+      { p: 100, s: 4, msg: '写入数据库...' },
+    ];
+
+    let i = 0;
+    const tick = () => {
+      if (i >= steps.length) {
+        result.classList.add('show');
+        resultBody.innerHTML = '识别出 <strong>7 天行程</strong> · <strong>15 个活动</strong> · <strong>4 条闹钟</strong>';
+        zone.style.opacity = '1';
+        zone.style.pointerEvents = 'auto';
+        toast('🎉 解析完成！');
+        return;
+      }
+      const cur = steps[i];
+      bar.style.width = cur.p + '%';
+      pct.textContent = cur.p + '%';
+      step.textContent = cur.s + ' / ' + steps.length;
+      statusText.textContent = cur.msg;
+      i++;
+      setTimeout(tick, 700);
+    };
+    tick();
+  }
+
+  // 闹钟模拟触发
+  function triggerAlarm(id) {
+    const a = MOCK_DATA.alarms.find(x => x.id === id);
+    if (!a) return;
+    // 真实小程序里会 wx.vibrateLong，这里用弹窗 + Toast 代替
+    if (navigator.vibrate) {
+      navigator.vibrate([200, 100, 200, 100, 400]);
+    }
+    showModal(`⏰ ${a.title}`, `时间到！<br><br>该抢票了：<strong>${a.time}</strong><br>（提前 ${a.leadMinutes} 分钟提醒）`);
+    toast('🔔 闹钟触发');
+  }
+
+  // 新增闹钟
+  function addAlarm() {
+    showModal('新增闹钟', '演示版暂不支持编辑，下方「点确认」会模拟一个示例闹钟');
+    document.getElementById('modalOk').onclick = () => {
+      MOCK_DATA.alarms.push({
+        id: 'a' + Date.now(),
+        title: '新闹钟 ' + (MOCK_DATA.alarms.length + 1),
+        time: '10-01 09:00',
+        leadMinutes: 5,
+      });
+      closeModal();
+      render();
+      toast('✅ 闹钟已添加（演示）');
+    };
+  }
+
+  /* ============================================================
+   * 模态框 + Toast
+   * ============================================================ */
+  let modalCb = null;
+  function showModal(title, body, onOk) {
+    document.getElementById('modalTitle').textContent = title;
+    document.getElementById('modalBody').innerHTML = body;
+    document.getElementById('modalBg').classList.add('show');
+    document.getElementById('modalOk').onclick = () => {
+      closeModal();
+      if (onOk) onOk();
+    };
+  }
+  function closeModal() {
+    document.getElementById('modalBg').classList.remove('show');
+  }
+  document.getElementById('modalCancel').onclick = closeModal;
+  document.getElementById('modalBg').onclick = (e) => {
+    if (e.target.id === 'modalBg') closeModal();
+  };
+
+  let toastTimer = null;
+  function toast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove('show'), 1800);
+  }
+
+  /* ============================================================
+   * 时钟
+   * ============================================================ */
+  function updateClock() {
+    const d = new Date();
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    const c = document.getElementById('clock');
+    if (c) c.textContent = `${hh}:${mm}`;
+  }
+  setInterval(updateClock, 30000);
+  updateClock();
+
+  /* ============================================================
+   * 初始化
+   * ============================================================ */
+  document.querySelectorAll('.tab').forEach(t => {
+    t.onclick = () => switchTab(t.dataset.tab);
+  });
+  switchTab('home');
+  </script>
+</body>
+</html>

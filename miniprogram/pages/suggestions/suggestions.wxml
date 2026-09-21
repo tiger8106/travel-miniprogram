@@ -1,0 +1,51 @@
+<view class="container">
+  <view wx:if="{{loading}}" class="loading">{{generating ? 'AI 正在生成建议，约需 10-20 秒…' : '加载中…'}}</view>
+
+  <view wx:elif="{{!suggestions}}" class="empty">
+    <text class="empty-icon">💡</text>
+    <view>暂无建议</view>
+    <view class="text-secondary" style="font-size: 24rpx; margin-top: 16rpx;">
+      上传攻略后系统会基于行程智能生成建议
+    </view>
+  </view>
+
+  <block wx:else>
+    <view wx:if="{{suggestions.weather}}" class="card">
+      <view class="card-title">🌤️ 天气与穿着</view>
+      <view style="white-space: pre-wrap;">{{suggestions.weather}}</view>
+    </view>
+
+    <view wx:if="{{suggestions.gear}}" class="card">
+      <view class="card-title">🎒 装备清单</view>
+      <view style="white-space: pre-wrap;">{{suggestions.gear}}</view>
+    </view>
+
+    <view wx:if="{{suggestions.food}}" class="card">
+      <view class="card-title">🍜 必吃推荐</view>
+      <view style="white-space: pre-wrap;">{{suggestions.food}}</view>
+    </view>
+
+    <view wx:if="{{suggestions.tips}}" class="card">
+      <view class="card-title">⚠️ 注意事项</view>
+      <view style="white-space: pre-wrap;">{{suggestions.tips}}</view>
+    </view>
+
+    <view wx:if="{{suggestions.transport}}" class="card">
+      <view class="card-title">🚗 交通贴士</view>
+      <view style="white-space: pre-wrap;">{{suggestions.transport}}</view>
+    </view>
+
+    <view wx:if="{{suggestions.budget}}" class="card">
+      <view class="card-title">💰 预算参考</view>
+      <view style="white-space: pre-wrap;">{{suggestions.budget}}</view>
+    </view>
+
+    <button class="btn-ghost" bindtap="onRefresh" loading="{{refreshing}}" style="margin-top: 24rpx;">
+      🔄 重新生成建议
+    </button>
+
+    <view class="text-secondary" wx:if="{{suggestions.generatedAt}}" style="text-align: center; font-size: 22rpx; margin-top: 16rpx;">
+      生成时间：{{suggestions.generatedAt}}
+    </view>
+  </block>
+</view>

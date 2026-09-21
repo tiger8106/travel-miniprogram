@@ -1,0 +1,56 @@
+<view class="container">
+  <view class="card">
+    <view class="card-title">📤 上传旅游攻略</view>
+    <view class="text-secondary" style="margin-bottom: 24rpx; line-height: 1.6;">
+      支持 .docx / .doc 格式。上传后会自动解析文档内容，生成结构化每日行程、抢票闹钟和旅行建议。
+    </view>
+
+    <view class="upload-area" bindtap="onChooseFile">
+      <block wx:if="{{!fileName}}">
+        <text class="upload-icon">📁</text>
+        <view class="text-secondary">点击选择 Word 文档</view>
+      </block>
+      <block wx:else>
+        <text class="upload-icon">📄</text>
+        <view class="file-name">{{fileName}}</view>
+        <view class="text-secondary" style="font-size: 22rpx;">点击重新选择</view>
+      </block>
+    </view>
+
+    <button class="btn-primary" bindtap="onUpload"
+            disabled="{{!fileName || uploading || parsing}}"
+            style="margin-top: 24rpx;">
+      <block wx:if="{{uploading || parsing}}">{{parsing ? '解析中…' : '上传中…'}}</block>
+      <block wx:else>开始解析</block>
+    </button>
+
+    <view wx:if="{{uploading || parsing}}" class="progress">
+      <view class="progress-bar" style="width: {{progress}}%;"></view>
+    </view>
+
+    <view wx:if="{{errorMsg}}" class="error-tip">
+      ❌ {{errorMsg}}
+      <view class="text-primary" bindtap="onRetry" style="margin-top: 8rpx;">点击重试</view>
+    </view>
+  </view>
+
+  <!-- 结果预览 -->
+  <view wx:if="{{result}}" class="card">
+    <view class="card-title">✅ 解析成功</view>
+    <view class="result-row"><text class="result-label">行程标题：</text>{{result.title}}</view>
+    <view class="result-row"><text class="result-label">日期：</text>{{result.startDate}} → {{result.endDate}}</view>
+    <view class="result-row"><text class="result-label">行程项：</text>{{result.itemCount}} 条</view>
+    <view class="result-row"><text class="result-label">闹钟：</text>{{result.alarmCount}} 条</view>
+    <view wx:if="{{result.version}}" class="result-row"><text class="result-label">引擎版本：</text>{{result.version}}</view>
+  </view>
+
+  <view class="card">
+    <view class="card-title">💡 提示</view>
+    <view class="text-secondary" style="font-size: 26rpx; line-height: 1.8;">
+      1. 建议提前准备好结构清晰的攻略文档（按日期分段更利于解析）<br/>
+      2. 包含交通、住宿、景点、餐饮的描述，AI 会自动归类<br/>
+      3. 抢票时间、车次信息会自动提取为闹钟<br/>
+      4. 解析后可手动修改任何行程
+    </view>
+  </view>
+</view>

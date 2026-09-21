@@ -1,0 +1,474 @@
+// pages/itinerary/itinerary.js
+const api = require('../../services/api');
+const mapUtil = require('../../utils/map');
+
+const app = getApp();
+
+Page({
+  data: {
+    dayIdx: 0,
+    tripId: null,
+    trip: null,
+    dayLabel: '',
+    isToday: false,         // 当前查看的是否是今天
+    readonly: false,        // 只读模式（查看历史行程）
+    items: [],              // 展示顺序：进行中/未开始（按时间升序）→ 已结束（沉底置灰）
+    dayTips: null,          // { tips: [], notices: [] }
+    tipsLoading: false,
+    editingId: '',            // 空串 = 没有正在编辑的条目（不能用 null，WXML 里 null===undefined 恒为 false）
+    editForm: null,           // { key, startTime, endTime, activity, startLocation, endLocation, transportType, category, note }
+    // 全行程展开模式（从「我的行程」进入）：按天顺序一次性展示整份攻略
+    viewAll: false,
+    dayGroups: [],           // [{ dayIndex, label, past, items: [...] }]
+    totalCount: 0,
+  },
+
+  onLoad(opts) {
+    this.setData({
+      dayIdx: parseInt(opts.dayIdx || 0, 10),
+      // 支持 ?tripId=xxx&readonly=1 直接查看指定攻略（历史行程入口），不改动全局当前行程
+      viewTripId: opts.tripId || '',
+      readonly: opts.readonly === '1',
+      // all=1：整份攻略按时间顺序全部展开（只读浏览用）
+      viewAll: opts.all === '1',
+    });
+    this.rawItems = [];     // 按时间排好序的原始列表
+    this.dayStartTs = 0;    // 当天 00:00 的时间戳
+    this.baseDate = null;   // 行程第一天的 00:00（Date）
+  },
+
+  onShow() {
+    this.load();
+    this.startTicker();    // 每分钟刷新一次"进行中/已结束"状态
+  },
+
+  onHide() {
+    this.stopTicker();
+  },
+
+  onUnload() {
+    this.stopTicker();
+  },
+
+  // ============================================================
+  // 时间状态：当下一项的开始时间到达时，上一项自动沉底置灰
+  // ============================================================
+  startTicker() {
+    this.stopTicker();
+    this.tickerId = setInterval(() => {
+      if (this.data.viewAll) this.refreshAllFlags();
+      else this.applyTimeFlags();
+    }, 60 * 1000);
+  },
+
+  stopTicker() {
+    if (this.tickerId) {
+      clearInterval(this.tickerId);
+      this.tickerId = null;
+    }
+  },
+
+  // "09:30" → 当天的时间戳；解析失败返回 null
+  itemTs(timeStr) {
+    if (!timeStr) return null;
+    const m = String(timeStr).match(/^(\d{1,2}):(\d{2})/);
+    if (!m) return null;
+    return this.dayStartTs + (+m[1]) * 3600000 + (+m[2]) * 60000;
+  },
+
+  // 根据当前时间重算每项的 past 标记并重排（不重新拉数据）
+  applyTimeFlags() {
+    if (!this.rawItems.length) return;
+    const now = Date.now();
+    const isToday = this.data.isToday;
+    const dayEndTs = this.dayStartTs + 86400000; // 当天 24:00
+
+    // 找出"最近一个已开始"的项：它的前一项都算已结束
+    let lastStarted = -1;
+    if (!isToday && dayEndTs <= now) {
+      // 查看的是完全过去的某一天 → 全部置灰沉底（保持时间顺序）
+      lastStarted = this.rawItems.length;
+    } else if (isToday) {
+      this.rawItems.forEach((it, i) => {
+        const ts = this.itemTs(it.startTime);
+        if (ts !== null && ts <= now) lastStarted = i;
+      });
+    }
+
+    const active = [];   // 进行中 + 未开始，按时间升序
+    const past = [];     // 已结束，沉底
+    const eid = this.data.editingId || '';
+    this.rawItems.forEach((it, i) => {
+      const o = Object.assign({}, it, {
+        past: i < lastStarted,
+        // 直接把「是否正在编辑」算进条目里，避免 WXML 里做易错的 undefined 比较
+        editing: !!eid && this.itemKeyOf(it) === eid,
+      });
+      (o.past ? past : active).push(o);
+    });
+
+    this.setData({ items: active.concat(past) });
+  },
+
+  // ============================================================
+  // 全行程展开模式：按天顺序 + 天内时间顺序，一次性展示整份攻略
+  // ============================================================
+  tsOn(dayStartTs, timeStr) {
+    if (!timeStr) return null;
+    const m = String(timeStr).match(/^(\d{1,2}):(\d{2})/);
+    if (!m) return null;
+    return dayStartTs + (+m[1]) * 3600000 + (+m[2]) * 60000;
+  },
+
+  parseTripStart(startDate) {
+    const m = startDate ? String(startDate).match(/^(\d{4})-(\d{2})-(\d{2})/) : null;
+    if (!m) return null;
+    return new Date(+m[1], +m[2] - 1, +m[3]);
+  },
+
+  buildAllDays(trip) {
+    const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+    const map = {};
+    (trip.items || []).forEach((it) => {
+      const di = Number(it.dayIndex || 0);
+      (map[di] = map[di] || []).push(it);
+    });
+    const now = Date.now();
+    return Object.keys(map)
+      .map(Number)
+      .sort((a, b) => a - b)
+      .map((di) => {
+        let label = `第 ${di + 1} 天`;
+        let dayStartTs = null;
+        if (this.baseDate) {
+          const d = new Date(this.baseDate.getTime());
+          d.setDate(d.getDate() + di);
+          dayStartTs = d.getTime();
+          label = `${this.formatYMD(d)} ${weekdays[d.getDay()]} · 第 ${di + 1} 天`;
+        }
+        const list = map[di].slice().sort((a, b) =>
+          String(a.startTime || '99:99').localeCompare(String(b.startTime || '99:99'))
+        );
+        const dayPast = dayStartTs !== null && dayStartTs + 86400000 <= now;
+        const eid = this.data.editingId || '';
+        const items = list.map((it) => {
+          let past = dayPast;
+          if (!dayPast && dayStartTs !== null) {
+            const ts = this.tsOn(dayStartTs, it.startTime);
+            past = ts !== null && ts <= now;
+          }
+          return Object.assign({}, it, {
+            past,
+            editing: !!eid && this.itemKeyOf(it) === eid,
+          });
+        });
+        return { dayIndex: di, label, past: dayPast, items };
+      });
+  },
+
+  refreshAllFlags() {
+    if (!this.data.trip) return;
+    this.setData({ dayGroups: this.buildAllDays(this.data.trip) });
+  },
+
+  async load() {
+    try {
+      // 历史行程入口传了 viewTripId 就用它；否则用全局当前行程
+      const tripId = this.data.viewTripId || app.globalData.currentTripId;
+      if (!tripId) {
+        wx.showToast({ title: '请先上传攻略', icon: 'none' });
+        return;
+      }
+      const trip = await api.getItinerary(tripId);
+      // 补齐每条行程的稳定 key（否则编辑/删除拿不到标识）
+      trip.items = this.withItemKeys(trip.items);
+      app.globalData.currentTrip = trip;
+      this.baseDate = this.parseTripStart(trip.startDate);
+
+      // 全行程展开模式：直接按天顺序铺开，不再按单天查看
+      if (this.data.viewAll) {
+        const dayGroups = this.buildAllDays(trip);
+        const s = trip.startDate || '';
+        const e = trip.endDate || '';
+        if (trip.title) wx.setNavigationBarTitle({ title: trip.title });
+        this.setData({
+          tripId,
+          trip,
+          dayGroups,
+          totalCount: (trip.items || []).length,
+          dayLabel: (s || e) ? `${s || '?'} → ${e || '?'}` : '日期未设置',
+          items: [],
+        });
+        return;
+      }
+
+      // 严格按开始时间从早到晚排；没填时间的排最后
+      const sorted = (trip.items || [])
+        .filter((it) => (it.dayIndex || 0) === this.data.dayIdx)
+        .sort((a, b) => {
+          const ta = a.startTime || '99:99';
+          const tb = b.startTime || '99:99';
+          return ta.localeCompare(tb);
+        });
+      this.rawItems = sorted;
+
+      const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+      const m = trip.startDate ? String(trip.startDate).match(/^(\d{4})-(\d{2})-(\d{2})/) : null;
+      const startDate = m ? new Date(+m[1], +m[2] - 1, +m[3]) : new Date();
+      const cur = new Date(startDate);
+      cur.setDate(cur.getDate() + this.data.dayIdx);
+      this.dayStartTs = new Date(cur.getFullYear(), cur.getMonth(), cur.getDate()).getTime();
+
+      const today = new Date();
+      const isToday = cur.getFullYear() === today.getFullYear()
+        && cur.getMonth() === today.getMonth()
+        && cur.getDate() === today.getDate();
+
+      const dayLabel = `${this.formatYMD(cur)} ${weekdays[cur.getDay()]} · 第${this.data.dayIdx + 1}天`;
+
+      this.setData({ tripId, trip, dayLabel, isToday });
+      this.applyTimeFlags();
+      this.loadDayTips();
+    } catch (err) {
+      wx.showToast({ title: err.message || '加载失败', icon: 'none' });
+    }
+  },
+
+  formatYMD(d) {
+    const pad = (n) => (n < 10 ? '0' + n : '' + n);
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  },
+
+  // 行程项稳定 key：云端解析出来的 items 既没有 _id 也没有 id，
+  // 导致「编辑/删除」定位不到具体条目（id 为 undefined 直接 return）。
+  // 这里按「原 _id → 原 id → 天序号+数组下标」生成前端稳定 key，并写回 items，
+  // 保证一次加载内 key 唯一、多次刷新 key 不变。
+  withItemKeys(items) {
+    const used = {};
+    return (items || []).map((it, i) => {
+      if (!it || typeof it !== 'object') return it;
+      let k = it.key || it._id || it.id || `k${Number(it.dayIndex || 0)}_${i}`;
+      while (used[k]) k += '_x';
+      used[k] = 1;
+      if (it.key === k) return it;
+      return Object.assign({}, it, { key: k });
+    });
+  },
+
+  // 统一的条目标识读取（组件内部、编辑、删除共用同一套优先级）
+  itemKeyOf(it) {
+    return (it && (it.key || it._id || it.id)) || '';
+  },
+
+  onTapNav(e) {
+    const { item } = e.currentTarget.dataset;
+    // 只填了一头也能导航：优先目的地，其次出发地（从我的位置出发）
+    const to = item.endLocation || item.startLocation;
+    if (!to) {
+      wx.showToast({ title: '缺少目的地', icon: 'none' });
+      return;
+    }
+    mapUtil.openAmapNav({
+      from: item.startLocation || '',
+      to,
+      mode: item.transportType || 'car',
+      title: item.startLocation && item.endLocation
+        ? `${item.startLocation} → ${item.endLocation}`
+        : `导航到 ${to}`,
+      endLat: item.endLat,
+      endLon: item.endLon,
+    });
+  },
+
+  onTapEdit(e) {
+    if (this.data.readonly) return;
+    // 组件 triggerEvent 的数据在 e.detail
+    const item = (e.detail && e.detail.item) || e.currentTarget.dataset.item;
+    if (!item) return;
+    const key = this.itemKeyOf(item);
+    if (!key) {
+      wx.showToast({ title: '该行程缺少标识，请下拉刷新后再试', icon: 'none' });
+      return;
+    }
+    this.setData({
+      editingId: key,
+      editForm: {
+        id: key,
+        startTime: item.startTime || '',
+        endTime: item.endTime || '',
+        activity: item.activity || '',
+        startLocation: item.startLocation || '',
+        endLocation: item.endLocation || '',
+        transportType: item.transportType || 'car',
+        category: item.category || 'sight',
+        note: item.note || '',
+      },
+    });
+    this.applyTimeFlags();   // 重算 items，让被点的那条带上 editing=true
+  },
+
+  onEditInput(e) {
+    // 组件编辑表单：field 在 e.detail
+    const field = (e.detail && e.detail.field) || e.currentTarget.dataset.field;
+    if (!field) return;
+    this.setData({ [`editForm.${field}`]: e.detail.value });
+  },
+
+  onEditTransport(e) {
+    this.setData({ 'editForm.transportType': e.detail.value });
+  },
+
+  onEditCategory(e) {
+    this.setData({ 'editForm.category': e.detail.value });
+  },
+
+  async onSaveEdit() {
+    if (this.data.readonly) return;
+    const { editForm, tripId, trip } = this.data;
+    if (!editForm.activity) {
+      wx.showToast({ title: '请输入行程内容', icon: 'none' });
+      return;
+    }
+    try {
+      wx.showLoading({ loading: true, title: '保存中' });
+      const items = (trip.items || []).map((it) => {
+        if (this.itemKeyOf(it) !== editForm.id) return it;
+        return {
+          ...it,
+          startTime: editForm.startTime,
+          endTime: editForm.endTime,
+          activity: editForm.activity,
+          startLocation: editForm.startLocation,
+          endLocation: editForm.endLocation,
+          transportType: editForm.transportType,
+          category: editForm.category,
+          note: editForm.note,
+        };
+      });
+      await api.updateItinerary(tripId, { items });
+      this.setData({ editingId: '', editForm: null });
+      await this.load();
+      wx.showToast({ title: '已保存', icon: 'success' });
+    } catch (err) {
+      wx.showToast({ title: err.message || '保存失败', icon: 'none' });
+    } finally {
+      wx.hideLoading();
+    }
+  },
+
+  onCancelEdit() {
+    this.setData({ editingId: '', editForm: null });
+    this.applyTimeFlags();
+  },
+
+  // 交换起终点（编辑抽屉里的 ⇅ 按钮）
+  onSwapLocation() {
+    const f = this.data.editForm;
+    if (!f) return;
+    this.setData({
+      'editForm.startLocation': f.endLocation || '',
+      'editForm.endLocation': f.startLocation || '',
+    });
+  },
+
+  async onDelete(e) {
+    if (this.data.readonly) return;
+    const id = (e.detail && e.detail.id) || e.currentTarget.dataset.id;
+    if (!id) return;
+    // 确认弹层已在 activity-item 组件内完成
+    try {
+      wx.showLoading({ title: '删除中' });
+      const { trip } = this.data;
+      const items = (trip.items || []).filter((it) => this.itemKeyOf(it) !== id);
+      await api.updateItinerary(this.data.tripId, { items });
+      await this.load();
+      wx.showToast({ title: '已删除', icon: 'success' });
+    } catch (err) {
+      wx.showToast({ title: err.message || '删除失败', icon: 'none' });
+    } finally {
+      wx.hideLoading();
+    }
+  },
+
+  // ============================================================
+  // 当天建议与注意事项（suggestions 云函数按天生成并缓存）
+  // ============================================================
+  async loadDayTips() {
+    const { tripId, dayIdx } = this.data;
+    if (!tripId) return;
+    this.setData({ tipsLoading: true, dayTips: null });
+    try {
+      const res = await api.getDayTips(tripId, dayIdx);
+      const d = (res && res.data) || res || {};
+      const tips = {
+        tips: (d.tips || []).slice(0, 6),
+        notices: (d.notices || []).slice(0, 6),
+      };
+      if (!tips.tips.length && !tips.notices.length) {
+        this.setData({ tipsLoading: false, dayTips: null });
+        return;
+      }
+      this.setData({ tipsLoading: false, dayTips: tips });
+    } catch (err) {
+      console.warn('[itinerary] 当天建议加载失败:', err && err.message);
+      this.setData({ tipsLoading: false, dayTips: null });
+    }
+  },
+
+  // 重新生成当天建议
+  async onRetryTips() {
+    const { tripId, dayIdx } = this.data;
+    if (!tripId) return;
+    this.setData({ tipsLoading: true });
+    try {
+      await api.getDayTips(tripId, dayIdx, true); // force = 重新生成
+      await this.loadDayTips();
+    } catch (err) {
+      wx.showToast({ title: err.message || '生成失败', icon: 'none' });
+      this.setData({ tipsLoading: false });
+    }
+  },
+
+  onAddItem() {
+    if (this.data.readonly) {
+      wx.showToast({ title: '历史行程为只读，无法编辑', icon: 'none' });
+      return;
+    }
+    const { tripId, trip, dayIdx } = this.data;
+    const newKey = `new_${Date.now()}`;
+    const newItem = {
+      key: newKey,
+      _id: newKey,
+      dayIndex: dayIdx,
+      startTime: '09:00',
+      endTime: '10:00',
+      activity: '',
+      startLocation: '',
+      endLocation: '',
+      transportType: 'car',
+      category: 'sight',
+      note: '',
+      isNew: true,
+    };
+    wx.showModal({
+      title: '新增行程项',
+      editable: true,
+      placeholderText: '输入行程描述，如：参观象鼻山',
+      success: async (res) => {
+        if (!res.confirm || !res.content) return;
+        newItem.activity = res.content;
+        try {
+          wx.showLoading({ title: '添加中' });
+          const items = [...(trip.items || []), newItem];
+          await api.updateItinerary(tripId, { items });
+          await this.load();
+          wx.showToast({ title: '已添加', icon: 'success' });
+        } catch (err) {
+          wx.showToast({ title: err.message || '添加失败', icon: 'none' });
+        } finally {
+          wx.hideLoading();
+        }
+      },
+    });
+  },
+});

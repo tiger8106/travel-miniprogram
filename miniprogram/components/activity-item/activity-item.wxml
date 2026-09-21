@@ -1,0 +1,151 @@
+<view class="activity-item card {{item.past ? 'item-past' : ''}}">
+  <!-- 显示模式 -->
+  <view>
+    <view class="time-row">
+      <text class="time-icon">{{icon}}</text>
+      <text class="time-text">{{item.startTime || '--:--'}}</text>
+      <text wx:if="{{item.endTime}}" class="text-secondary"> → {{item.endTime}}</text>
+      <text wx:if="{{item.past}}" class="past-tag">已结束</text>
+    </view>
+
+    <view class="activity-title">{{item.activity}}</view>
+
+    <view wx:if="{{item.startLocation || item.endLocation}}" class="location-row">
+      <text wx:if="{{item.startLocation}}">📍 {{item.startLocation}}</text>
+      <text wx:if="{{item.startLocation && item.endLocation}}" class="arrow">→</text>
+      <text wx:if="{{item.endLocation}}">📍 {{item.endLocation}}</text>
+    </view>
+
+    <view wx:if="{{item.note}}" class="note">{{item.note}}</view>
+
+    <!-- 导航：独占一行 -->
+    <view wx:if="{{item.startLocation || item.endLocation}}" class="nav-row">
+      <map-button startLoc="{{item.startLocation}}"
+                  endLoc="{{item.endLocation}}"
+                  mode="{{item.transportType || 'car'}}"
+                  endLat="{{item.endLat || 0}}"
+                  endLon="{{item.endLon || 0}}"
+                  bind:tapnav="onTapNav" />
+    </view>
+
+    <!-- 操作：编辑/删除单独一行，右对齐 -->
+    <view wx:if="{{!readonly}}" class="btn-row">
+      <view class="action-btn" bindtap="onTapEdit">✏️ 编辑</view>
+      <view class="action-btn danger" bindtap="onTapDelete">🗑 删除</view>
+    </view>
+  </view>
+</view>
+
+<!-- ===== 编辑行程 · 底部抽屉 ===== -->
+<view wx:if="{{editing && editForm}}" class="sheet-mask" bindtap="onCancel" catchtouchmove="noop">
+  <view class="sheet" catchtap="noop">
+    <view class="sheet-handle"></view>
+
+    <view class="sheet-head">
+      <view class="sheet-head-left">
+        <view class="sheet-title">编辑行程</view>
+        <view class="sheet-sub">{{item.startTime || '--:--'}}{{item.endTime ? ' — ' + item.endTime : ''}}</view>
+      </view>
+      <view class="sheet-close" bindtap="onCancel">✕</view>
+    </view>
+
+    <scroll-view scroll-y class="sheet-body">
+      <!-- 时间 -->
+      <view class="field">
+        <view class="field-label">⏰ 时间</view>
+        <view class="time-row-edit">
+          <picker mode="time" value="{{editForm.startTime}}" data-field="startTime" bindchange="onPickerChange" class="time-picker">
+            <view class="time-pill">
+              <text class="time-pill-label">开始</text>
+              <text class="time-pill-value">{{editForm.startTime || '--:--'}}</text>
+            </view>
+          </picker>
+          <text class="time-dash">—</text>
+          <picker mode="time" value="{{editForm.endTime}}" data-field="endTime" bindchange="onPickerChange" class="time-picker">
+            <view class="time-pill">
+              <text class="time-pill-label">结束</text>
+              <text class="time-pill-value">{{editForm.endTime || '--:--'}}</text>
+            </view>
+          </picker>
+        </view>
+      </view>
+
+      <!-- 行程内容 -->
+      <view class="field">
+        <view class="field-label">📝 行程内容</view>
+        <textarea class="input-area" placeholder="例如：乘缆车上金佛顶看日落"
+                  placeholder-class="ph" value="{{editForm.activity}}"
+                  data-field="activity" bindinput="onInput" auto-height maxlength="200" />
+      </view>
+
+      <!-- 地点 -->
+      <view class="field">
+        <view class="field-label">📍 地点（填了就显示导航）</view>
+        <view class="place-box">
+          <view class="place-line">
+            <text class="place-dot start">起</text>
+            <input class="place-input" placeholder="出发点，如：龙脊别院" placeholder-class="ph"
+                   value="{{editForm.startLocation}}" data-field="startLocation" bindinput="onInput" />
+          </view>
+          <view class="place-divider"></view>
+          <view class="place-line">
+            <text class="place-dot end">终</text>
+            <input class="place-input" placeholder="目的地，如：金佛顶" placeholder-class="ph"
+                   value="{{editForm.endLocation}}" data-field="endLocation" bindinput="onInput" />
+          </view>
+          <view class="place-swap" bindtap="onSwapLocation">⇅</view>
+        </view>
+      </view>
+
+      <!-- 交通方式 -->
+      <view class="field">
+        <view class="field-label">🚗 交通方式</view>
+        <view class="chip-wrap">
+          <view wx:for="{{transportOptions}}" wx:key="value"
+                class="chip {{editForm.transportType === item.value ? 'chip-on' : ''}}"
+                data-value="{{item.value}}" bindtap="onPickTransport">
+            <text class="chip-icon">{{item.icon}}</text>{{item.label}}
+          </view>
+        </view>
+      </view>
+
+      <!-- 行程类型 -->
+      <view class="field">
+        <view class="field-label">🏷️ 行程类型</view>
+        <view class="chip-wrap">
+          <view wx:for="{{categoryOptions}}" wx:key="value"
+                class="chip {{editForm.category === item.value ? 'chip-on' : ''}}"
+                data-value="{{item.value}}" bindtap="onPickCategory">
+            <text class="chip-icon">{{item.icon}}</text>{{item.label}}
+          </view>
+        </view>
+      </view>
+
+      <!-- 备注 -->
+      <view class="field">
+        <view class="field-label">🗒️ 备注</view>
+        <textarea class="input-area" placeholder="注意事项、门票、联系电话等" placeholder-class="ph"
+                  value="{{editForm.note}}" data-field="note" bindinput="onInput" auto-height maxlength="300" />
+      </view>
+    </scroll-view>
+
+    <view class="sheet-foot">
+      <view class="btn-cancel" bindtap="onCancel">取消</view>
+      <view class="btn-save" bindtap="onSave">保存修改</view>
+    </view>
+  </view>
+</view>
+
+<!-- ===== 删除确认 ===== -->
+<view wx:if="{{showDel}}" class="sheet-mask confirm-mask" bindtap="onCancelDelete" catchtouchmove="noop">
+  <view class="confirm-card" catchtap="noop">
+    <view class="confirm-icon">🗑</view>
+    <view class="confirm-title">删除这条行程？</view>
+    <view class="confirm-text">{{item.activity || '该行程'}}</view>
+    <view class="confirm-hint">删除后不可恢复</view>
+    <view class="confirm-actions">
+      <view class="btn-cancel" bindtap="onCancelDelete">取消</view>
+      <view class="btn-del" bindtap="onConfirmDelete">删除</view>
+    </view>
+  </view>
+</view>

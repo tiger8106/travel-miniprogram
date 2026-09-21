@@ -1,0 +1,42 @@
+<view class="container">
+  <view class="card profile">
+    <view class="avatar">🐯</view>
+    <view class="profile-info">
+      <view class="profile-name">旅行者</view>
+      <view class="profile-openid" bindtap="onCopyOpenid">
+        {{openidShort ? 'openid: ' + openidShort : '未登录'}}
+      </view>
+    </view>
+  </view>
+
+  <view class="card">
+    <view class="card-title">📤 行程管理</view>
+    <view class="menu-item" bindtap="onTapMyTrips">
+      <text>🗂️ 我的行程</text>
+      <text class="text-placeholder">›</text>
+    </view>
+    <view class="menu-item" bindtap="onTapUpload">
+      <text>📤 上传新攻略</text>
+      <text class="text-placeholder">›</text>
+    </view>
+  </view>
+
+  <view class="card">
+    <view class="card-title">⚙️ 设置与帮助</view>
+    <view class="menu-item" bindtap="onTapAbout">
+      <text>关于</text>
+      <text class="text-placeholder">›</text>
+    </view>
+    <view class="menu-item" bindtap="onTapFeedback">
+      <text>问题反馈</text>
+      <text class="text-placeholder">›</text>
+    </view>
+  </view>
+
+  <view class="card" wx:if="{{systemInfo}}">
+    <view class="card-title">📱 系统信息</view>
+    <view class="info-row"><text>设备：</text>{{systemInfo.model}}</view>
+    <view class="info-row"><text>系统：</text>{{systemInfo.system}}</view>
+    <view class="info-row"><text>微信：</text>{{systemInfo.version}}</view>
+  </view>
+</view>

@@ -1,0 +1,38 @@
+<view class="container">
+  <view wx:if="{{loading}}" class="loading">加载中…</view>
+
+  <view wx:elif="{{!trips.length}}" class="empty">
+    <text class="empty-icon">🗺️</text>
+    <view>还没有行程</view>
+    <button class="btn-primary" bindtap="onTapUpload" style="margin-top: 40rpx;">上传攻略文档</button>
+  </view>
+
+  <block wx:else>
+    <view class="text-secondary" style="font-size: 24rpx; margin-bottom: 16rpx;">
+      共 {{trips.length}} 个行程 · 进行中 {{activeCount}} · 已结束 {{endedCount}}（已结束自动沉底）
+    </view>
+
+    <view wx:for="{{trips}}" wx:key="_id" wx:for-item="trip" class="trip-card card {{trip.ended ? 'trip-card-ended' : ''}}">
+      <view class="trip-main" data-id="{{trip._id}}" bindtap="onTapView">
+        <view class="trip-name">
+          {{trip.title}}
+          <text wx:if="{{trip.ended}}" class="tag tag-success">已结束</text>
+          <text wx:else class="tag">进行中</text>
+          <text wx:if="{{trip.pinned}}" class="tag tag-success">已在首页</text>
+        </view>
+        <view class="text-secondary trip-meta">{{trip.dateRange}} · {{trip.itemCount}} 项行程</view>
+      </view>
+      <view class="trip-ops">
+        <view class="op-btn" data-id="{{trip._id}}" catchtap="onTapView">查看</view>
+        <view wx:if="{{trip.ended}}"
+              class="op-btn {{trip.pinned ? 'op-btn-warn' : ''}}"
+              data-id="{{trip._id}}"
+              catchtap="onTogglePin">{{trip.pinned ? '移出首页' : '添加到首页'}}</view>
+        <view class="op-btn op-btn-danger"
+              data-id="{{trip._id}}"
+              data-title="{{trip.title}}"
+              catchtap="onTapDelete">删除</view>
+      </view>
+    </view>
+  </block>
+</view>

@@ -1,0 +1,89 @@
+<view class="container">
+  <!-- ===== 全行程展开模式（从「我的行程」进入）：按时间顺序铺开所有天 ===== -->
+  <block wx:if="{{viewAll}}">
+    <view class="day-header card">
+      <view class="card-title">{{trip.title || '行程安排'}}</view>
+      <view class="text-secondary">
+        {{dayLabel}} · 共 {{totalCount}} 项安排（按行程时间顺序展示）
+      </view>
+    </view>
+
+    <view wx:if="{{!dayGroups.length}}" class="empty">
+      <text class="empty-icon">📭</text>
+      <view>这份攻略还没有行程安排</view>
+    </view>
+
+    <block wx:for="{{dayGroups}}" wx:key="dayIndex" wx:for-item="group">
+      <view class="day-group-header {{group.past ? 'day-group-past' : ''}}">
+        <text class="day-group-title">{{group.label}}</text>
+        <text wx:if="{{group.past}}" class="day-group-tag">已结束</text>
+      </view>
+      <view wx:for="{{group.items}}" wx:key="key" wx:for-item="item">
+        <activity-item item="{{item}}"
+                       readonly="{{true}}" />
+      </view>
+    </block>
+  </block>
+
+  <!-- ===== 单天模式（首页进入） ===== -->
+  <block wx:else>
+    <view class="day-header card">
+      <view class="card-title">
+        {{dayLabel}}
+        <text wx:if="{{readonly}}" class="past-badge">历史行程 · 只读</text>
+      </view>
+      <view class="text-secondary">共 {{items.length}} 项行程</view>
+    </view>
+
+    <view wx:if="{{!items.length}}" class="empty">
+      <text class="empty-icon">📭</text>
+      <view>今天还没有安排</view>
+      <button class="btn-ghost" bindtap="onAddItem" style="margin-top: 32rpx;">+ 添加行程</button>
+    </view>
+
+    <block wx:else>
+      <view wx:for="{{items}}" wx:key="key" wx:for-item="item">
+        <activity-item item="{{item}}"
+                       editing="{{item.editing}}"
+                       editForm="{{item.editing ? editForm : null}}"
+                       readonly="{{readonly}}"
+                       bind:tapnav="onTapNav"
+                       bind:tapedit="onTapEdit"
+                       bind:tapdelete="onDelete"
+                       bind:saveedit="onSaveEdit"
+                       bind:canceledit="onCancelEdit"
+                       bind:editinput="onEditInput"
+                       bind:edittransport="onEditTransport"
+                       bind:editcategory="onEditCategory"
+                       bind:swaplocation="onSwapLocation" />
+      </view>
+
+      <button wx:if="{{!readonly}}" class="btn-ghost" bindtap="onAddItem" style="margin-top: 24rpx;">+ 添加新行程</button>
+    </block>
+
+    <!-- 当天建议与注意事项 -->
+    <view wx:if="{{items.length && !editingId}}" class="card day-tips">
+      <view class="card-title">💡 当天建议与注意事项</view>
+      <view wx:if="{{tipsLoading}}" class="text-secondary" style="font-size: 26rpx;">
+        AI 正在生成当天建议，约需 10 秒…
+      </view>
+      <block wx:elif="{{dayTips}}">
+        <view wx:if="{{dayTips.tips.length}}" class="tips-section">建议</view>
+        <view wx:for="{{dayTips.tips}}" wx:key="*this" class="tip-row">
+          <text class="tip-icon">✅</text>
+          <text class="tip-text">{{item}}</text>
+        </view>
+        <view wx:if="{{dayTips.notices.length}}" class="tips-section">注意事项</view>
+        <view wx:for="{{dayTips.notices}}" wx:key="*this" class="tip-row">
+          <text class="tip-icon">⚠️</text>
+          <text class="tip-text">{{item}}</text>
+        </view>
+        <view class="tips-refresh" bindtap="onRetryTips">🔄 换一批建议</view>
+      </block>
+      <view wx:else class="tips-empty">
+        <view class="text-secondary" style="font-size: 26rpx;">暂无当天建议</view>
+        <view class="tips-refresh" bindtap="onRetryTips">✨ 生成当天建议</view>
+      </view>
+    </view>
+  </block>
+</view>

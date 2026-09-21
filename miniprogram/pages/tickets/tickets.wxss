@@ -1,0 +1,356 @@
+.add-btn {
+  text-align: center;
+  padding: 24rpx;
+  background: var(--bg-card);
+  border-radius: 16rpx;
+  margin-top: 24rpx;
+  color: var(--primary);
+  font-size: 28rpx;
+  border: 2rpx dashed var(--primary);
+}
+
+/* ===== 提醒设置：紧凑两行式 ===== */
+.settings-card {
+  margin-bottom: 24rpx;
+  padding: 8rpx 24rpx;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  padding: 20rpx 0;
+}
+
+.settings-icon {
+  font-size: 34rpx;
+  margin-right: 18rpx;
+}
+
+.settings-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-label {
+  font-size: 28rpx;
+  color: var(--text-color, #333);
+}
+
+.settings-sub {
+  font-size: 22rpx;
+  color: var(--text-secondary);
+  margin-top: 4rpx;
+}
+
+.settings-value {
+  font-size: 24rpx;
+  color: var(--primary);
+  background: var(--primary-light);
+  padding: 10rpx 22rpx;
+  border-radius: 26rpx;
+  flex-shrink: 0;
+}
+
+.settings-value.muted {
+  color: var(--text-secondary);
+  background: #f2f3f5;
+}
+
+.settings-divider {
+  height: 1rpx;
+  background: var(--border-color, #f0f0f0);
+}
+
+/* ===== 底部抽屉 & 确认卡（与行程编辑同款交互） ===== */
+.sheet-mask {
+  position: fixed;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 999;
+  animation: fade-in 0.2s ease-out;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes sheet-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+@keyframes pop-in {
+  from { transform: scale(0.88); opacity: 0; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+.sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: #fff;
+  border-radius: 32rpx 32rpx 0 0;
+  padding-bottom: calc(16rpx + env(safe-area-inset-bottom));
+  box-shadow: 0 -8rpx 40rpx rgba(0, 0, 0, 0.12);
+  animation: sheet-up 0.3s cubic-bezier(0.22, 0.8, 0.3, 1);
+}
+
+.sheet-handle {
+  width: 72rpx;
+  height: 8rpx;
+  border-radius: 8rpx;
+  background: #e0e0e0;
+  margin: 16rpx auto 8rpx;
+}
+
+.sheet-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 12rpx 32rpx 16rpx;
+}
+
+.sheet-head-left {
+  flex: 1;
+}
+
+.sheet-title {
+  font-size: 36rpx;
+  font-weight: 700;
+  color: #1a1a1a;
+  line-height: 1.3;
+}
+
+.sheet-sub {
+  font-size: 24rpx;
+  color: var(--text-secondary);
+  margin-top: 4rpx;
+}
+
+.sheet-close {
+  width: 56rpx;
+  height: 56rpx;
+  border-radius: 50%;
+  background: #f2f3f5;
+  color: #909399;
+  font-size: 28rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.sheet-body {
+  max-height: 62vh;
+  padding: 0 32rpx;
+  box-sizing: border-box;
+}
+
+.field {
+  margin-bottom: 32rpx;
+}
+
+.field-label {
+  font-size: 26rpx;
+  font-weight: 600;
+  color: #4a4a4a;
+  margin-bottom: 14rpx;
+}
+
+/* 时间胶囊 */
+.time-row-edit {
+  display: flex;
+  align-items: center;
+}
+
+.time-picker {
+  flex: 1;
+}
+
+.time-pill {
+  background: #f7f8fa;
+  border-radius: 20rpx;
+  padding: 18rpx 24rpx;
+  display: flex;
+  flex-direction: column;
+  border: 2rpx solid transparent;
+}
+
+.time-pill-label {
+  font-size: 22rpx;
+  color: var(--text-secondary);
+  margin-bottom: 4rpx;
+}
+
+.time-pill-value {
+  font-size: 32rpx;
+  font-weight: 700;
+  color: var(--primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.time-dash {
+  padding: 0 20rpx;
+  color: #c8c9cc;
+}
+
+/* 输入框 */
+.input-line {
+  width: 100%;
+  box-sizing: border-box;
+  background: #f7f8fa;
+  border-radius: 20rpx;
+  padding: 22rpx 24rpx;
+  font-size: 28rpx;
+  color: #1a1a1a;
+}
+
+.input-area {
+  width: 100%;
+  box-sizing: border-box;
+  background: #f7f8fa;
+  border-radius: 20rpx;
+  padding: 22rpx 24rpx;
+  font-size: 28rpx;
+  line-height: 1.6;
+  min-height: 88rpx;
+  color: #1a1a1a;
+}
+
+.ph {
+  color: #c0c4cc;
+  font-size: 26rpx;
+}
+
+/* 类型 chips */
+.chip-wrap {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.chip {
+  display: flex;
+  align-items: center;
+  padding: 14rpx 26rpx;
+  border-radius: 32rpx;
+  background: #f7f8fa;
+  color: #5a5a5a;
+  font-size: 26rpx;
+  margin: 0 16rpx 16rpx 0;
+  border: 2rpx solid transparent;
+  transition: all 0.15s;
+}
+
+.chip-icon {
+  margin-right: 8rpx;
+}
+
+.chip-on {
+  background: var(--primary-light);
+  color: var(--primary);
+  border-color: var(--primary);
+  font-weight: 600;
+}
+
+/* 底部按钮 */
+.sheet-foot {
+  display: flex;
+  padding: 16rpx 32rpx 8rpx;
+  border-top: 1rpx solid #f0f0f0;
+  margin-top: 8rpx;
+}
+
+.btn-cancel {
+  flex: 1;
+  text-align: center;
+  padding: 26rpx 0;
+  border-radius: 44rpx;
+  background: #f2f3f5;
+  color: #5a5a5a;
+  font-size: 30rpx;
+  font-weight: 600;
+}
+
+.btn-save {
+  flex: 2;
+  text-align: center;
+  padding: 26rpx 0;
+  border-radius: 44rpx;
+  margin-left: 24rpx;
+  background: linear-gradient(135deg, #1989fa, #5cb1ff);
+  color: #fff;
+  font-size: 30rpx;
+  font-weight: 600;
+  box-shadow: 0 8rpx 20rpx rgba(25, 137, 250, 0.28);
+}
+
+/* ---------- 删除确认卡 ---------- */
+.confirm-mask {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.confirm-card {
+  width: 560rpx;
+  background: #fff;
+  border-radius: 28rpx;
+  padding: 48rpx 40rpx 32rpx;
+  text-align: center;
+  animation: pop-in 0.22s cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+
+.confirm-icon {
+  width: 104rpx;
+  height: 104rpx;
+  border-radius: 50%;
+  background: #ffebee;
+  font-size: 48rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 24rpx;
+}
+
+.confirm-title {
+  font-size: 34rpx;
+  font-weight: 700;
+  color: #1a1a1a;
+}
+
+.confirm-text {
+  font-size: 27rpx;
+  color: #606266;
+  margin-top: 16rpx;
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.confirm-hint {
+  font-size: 23rpx;
+  color: #c0c4cc;
+  margin-top: 10rpx;
+}
+
+.confirm-actions {
+  display: flex;
+  margin-top: 40rpx;
+}
+
+.btn-del {
+  flex: 2;
+  text-align: center;
+  padding: 26rpx 0;
+  border-radius: 44rpx;
+  margin-left: 24rpx;
+  background: linear-gradient(135deg, #ff6b6b, #e74c3c);
+  color: #fff;
+  font-size: 30rpx;
+  font-weight: 600;
+  box-shadow: 0 8rpx 20rpx rgba(231, 76, 60, 0.28);
+}

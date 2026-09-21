@@ -1,0 +1,41 @@
+.trip-card {
+  margin-bottom: 16rpx;
+}
+
+.trip-card-ended {
+  opacity: 0.6;
+}
+
+.trip-name {
+  font-size: 30rpx;
+  font-weight: 600;
+}
+
+.trip-meta {
+  font-size: 24rpx;
+  margin-top: 8rpx;
+}
+
+.trip-ops {
+  display: flex;
+  gap: 12rpx;
+  margin-top: 16rpx;
+}
+
+.op-btn {
+  padding: 10rpx 24rpx;
+  border-radius: 28rpx;
+  background: var(--primary-light);
+  color: var(--primary);
+  font-size: 24rpx;
+}
+
+.op-btn-warn {
+  background: #fff4e5;
+  color: #e67e22;
+}
+
+.op-btn-danger {
+  background: #fdecea;
+  color: #e74c3c;
+}

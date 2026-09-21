@@ -1,0 +1,9 @@
+# 微信小程序 tabBar 图标占位
+# 需要准备以下 8 张 81x81 PNG 图标：
+#   tab-home.png / tab-home-active.png
+#   tab-ticket.png / tab-ticket-active.png
+#   tab-idea.png / tab-idea-active.png
+#   tab-mine.png / tab-mine-active.png
+#
+# 建议从 iconfont.cn 找免费图标，导出 PNG。
+# 也可以暂时删除 app.json 中的 tabBar 配置跳过这一步。

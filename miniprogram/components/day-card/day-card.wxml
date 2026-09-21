@@ -1,0 +1,15 @@
+<view class="day-card {{isToday ? 'today' : ''}}" bindtap="onTap">
+  <view class="day-date">
+    <text class="day-num">{{day.dayNum}}</text>
+    <text class="day-weekday">{{day.weekday}}</text>
+  </view>
+  <view class="day-content">
+    <view class="day-title">{{day.title}}</view>
+    <view wx:if="{{day.subtitle}}" class="day-subtitle">{{day.subtitle}}</view>
+    <view class="day-meta">
+      <text class="tag">{{day.itemCount}} 项行程</text>
+      <text wx:if="{{isToday}}" class="tag tag-warning">今天</text>
+    </view>
+  </view>
+  <view class="day-arrow">›</view>
+</view>

@@ -1,0 +1,5 @@
+.card view {
+  font-size: 28rpx;
+  line-height: 1.8;
+  color: var(--text-primary);
+}

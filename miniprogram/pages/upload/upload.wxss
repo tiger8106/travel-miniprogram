@@ -1,0 +1,59 @@
+.upload-area {
+  border: 2rpx dashed var(--primary);
+  border-radius: 16rpx;
+  padding: 60rpx 24rpx;
+  text-align: center;
+  background: var(--primary-light);
+}
+
+.upload-icon {
+  display: block;
+  font-size: 80rpx;
+  margin-bottom: 16rpx;
+}
+
+.file-name {
+  font-size: 30rpx;
+  color: var(--text-primary);
+  margin-bottom: 8rpx;
+  word-break: break-all;
+}
+
+.progress {
+  height: 12rpx;
+  background: var(--border-color);
+  border-radius: 6rpx;
+  margin-top: 24rpx;
+  overflow: hidden;
+}
+
+.progress-bar {
+  height: 100%;
+  background: var(--primary);
+  transition: width 0.3s;
+}
+
+.error-tip {
+  margin-top: 24rpx;
+  padding: 16rpx;
+  background: #ffebee;
+  color: var(--danger);
+  border-radius: 12rpx;
+  font-size: 26rpx;
+}
+
+.result-row {
+  padding: 12rpx 0;
+  border-bottom: 1rpx solid var(--border-color);
+  font-size: 26rpx;
+}
+
+.result-row:last-child {
+  border-bottom: none;
+}
+
+.result-label {
+  color: var(--text-secondary);
+  display: inline-block;
+  min-width: 160rpx;
+}

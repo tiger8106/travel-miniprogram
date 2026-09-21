@@ -1,0 +1,74 @@
+<view class="container">
+  <!-- 加载中 -->
+  <view wx:if="{{loading}}" class="loading">加载中…</view>
+
+  <!-- 空状态：没有进行中的攻略 -->
+  <view wx:elif="{{!trip}}" class="empty">
+    <text class="empty-icon">🗺️</text>
+    <view>{{totalTrips ? '进行中的行程都结束了' : '还没有行程，先上传一份攻略吧'}}</view>
+    <view class="empty-actions">
+      <button wx:if="{{totalTrips}}" class="btn-ghost" bindtap="onTapMyTrips">🗂️ 查看我的行程（{{totalTrips}}）</button>
+      <button class="btn-primary" bindtap="onTapUpload" style="margin-top: 24rpx;">上传攻略文档</button>
+    </view>
+  </view>
+
+  <!-- 已加载 -->
+  <block wx:else>
+    <!-- 顶部行程概览：点击切换攻略 -->
+    <view class="header card">
+      <view class="card-title">
+        {{trip.title || '当前行程'}}
+        <text wx:if="{{tripEnded}}" class="tag tag-success" style="margin-left: 12rpx;">已结束</text>
+      </view>
+      <view class="text-secondary">{{dateText}}</view>
+      <view wx:if="{{trip.summary}}" class="trip-summary">{{trip.summary}}</view>
+      <picker wx:if="{{homeTrips.length > 1}}"
+              mode="selector"
+              range="{{homeTripLabels}}"
+              value="{{tripIdx}}"
+              bindchange="onTripChange">
+        <view class="switch-row">
+          <text>🔄 切换攻略（{{tripIdx + 1}}/{{homeTrips.length}}）</text>
+          <text>▸</text>
+        </view>
+      </picker>
+      <view class="trip-actions">
+        <view wx:if="{{canRemoveFromHome}}" class="trip-action" bindtap="onRemoveFromHome">↩️ 移出首页</view>
+        <view class="trip-action danger" bindtap="onDeleteTrip">🗑 删除行程</view>
+      </view>
+    </view>
+
+    <!-- 接下来闹钟 -->
+    <view wx:if="{{nextAlarms.length}}" class="card" bindtap="onTapTicket">
+      <view class="card-title">
+        <text>⏰ 即将到来的闹钟</text>
+        <text class="text-secondary" style="font-size: 24rpx; font-weight: normal;">查看全部</text>
+      </view>
+      <view wx:for="{{nextAlarms}}" wx:key="_id" class="alarm-row">
+        <view class="alarm-time">{{item.friendly}}</view>
+        <view class="alarm-content">
+          <view class="alarm-title">{{item.title}}</view>
+          <view wx:if="{{item.note}}" class="text-secondary" style="font-size: 24rpx;">{{item.note}}</view>
+        </view>
+      </view>
+    </view>
+
+    <!-- 每日行程 -->
+    <view class="card">
+      <view class="card-title">📅 每日安排</view>
+      <block wx:for="{{days}}" wx:key="date" wx:for-index="idx">
+        <view class="day-row {{idx === todayIdx ? 'day-row-active' : ''}} {{item.past ? 'day-row-past' : ''}}"
+              data-idx="{{idx}}"
+              bindtap="onTapDay">
+          <view class="day-label">{{item.label}}</view>
+          <view class="day-meta">
+            <text class="tag">{{item.items.length}} 项</text>
+            <text wx:if="{{idx === todayIdx}}" class="tag tag-warning">今天</text>
+            <text wx:if="{{item.past}}" class="tag">已结束</text>
+            <text class="text-secondary" style="font-size: 22rpx;">查看详情 ›</text>
+          </view>
+        </view>
+      </block>
+    </view>
+  </block>
+</view>

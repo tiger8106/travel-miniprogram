@@ -1,0 +1,102 @@
+.day-header {
+  background: linear-gradient(135deg, #1989fa, #5cb1ff);
+  color: #fff;
+}
+
+.day-header .card-title {
+  color: #fff;
+  font-size: 36rpx;
+}
+
+.day-header .text-secondary {
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 26rpx;
+  margin-top: 8rpx;
+}
+
+/* 历史行程只读徽标 */
+.past-badge {
+  display: inline-block;
+  margin-left: 16rpx;
+  padding: 4rpx 14rpx;
+  border-radius: 20rpx;
+  font-size: 20rpx;
+  font-weight: normal;
+  background: rgba(255, 255, 255, 0.25);
+  color: #fff;
+  vertical-align: middle;
+}
+
+/* ===== 全行程展开模式：按天分组标题 ===== */
+.day-group-header {
+  display: flex;
+  align-items: center;
+  margin: 36rpx 8rpx 12rpx;
+  padding-left: 16rpx;
+  border-left: 8rpx solid var(--primary, #1989fa);
+}
+
+.day-group-title {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: var(--text-color, #333);
+}
+
+.day-group-tag {
+  margin-left: 16rpx;
+  padding: 4rpx 14rpx;
+  border-radius: 20rpx;
+  font-size: 20rpx;
+  background: #e8f5e9;
+  color: #4caf50;
+}
+
+.day-group-past {
+  border-left-color: #c8c9cc;
+}
+
+.day-group-past .day-group-title {
+  color: #969799;
+}
+
+/* ===== 当天建议与注意事项 ===== */
+.day-tips {
+  margin-top: 32rpx;
+}
+
+.tips-section {
+  font-size: 24rpx;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin: 20rpx 0 8rpx;
+}
+
+.tip-row {
+  display: flex;
+  align-items: flex-start;
+  font-size: 26rpx;
+  line-height: 1.6;
+  margin-bottom: 10rpx;
+}
+
+.tip-icon {
+  margin-right: 12rpx;
+  flex-shrink: 0;
+}
+
+.tip-text {
+  flex: 1;
+}
+
+.tips-refresh {
+  margin-top: 20rpx;
+  font-size: 24rpx;
+  color: var(--primary);
+  text-align: center;
+  padding: 12rpx 0;
+}
+
+.tips-empty {
+  text-align: center;
+  padding: 16rpx 0;
+}

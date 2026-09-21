@@ -1,0 +1,69 @@
+.alarm-card {
+  margin-bottom: 16rpx;
+}
+
+/* 已过期：整体置灰 */
+.alarm-past {
+  opacity: 0.5;
+}
+
+.alarm-header {
+  display: flex;
+  align-items: center;
+}
+
+.alarm-icon {
+  font-size: 48rpx;
+  margin-right: 16rpx;
+}
+
+.alarm-info {
+  flex: 1;
+}
+
+.alarm-title {
+  font-size: 30rpx;
+  font-weight: 600;
+  margin-bottom: 8rpx;
+}
+
+.alarm-time {
+  font-size: 26rpx;
+  color: var(--primary);
+  font-weight: 500;
+}
+
+.alarm-note {
+  margin-top: 16rpx;
+  padding: 16rpx;
+  background: #f8f8f8;
+  border-radius: 8rpx;
+  font-size: 26rpx;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.alarm-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16rpx;
+}
+
+.action-btn {
+  padding: 10rpx 24rpx;
+  border-radius: 32rpx;
+  font-size: 24rpx;
+  margin-left: 16rpx;
+  background: var(--primary-light);
+  color: var(--primary);
+}
+
+.action-btn.primary {
+  background: var(--primary);
+  color: #fff;
+}
+
+.action-btn.danger {
+  background: #ffebee;
+  color: var(--danger);
+}
