@@ -79,8 +79,9 @@ ${itemsSummary.slice(0, 4000)}
   "food": "必吃推荐",
   "tips": "注意事项（包含人流/天气/安全/文化）",
   "transport": "交通贴士",
-  "budget": "预算参考"
+  "budget": "预算参考，纯文本，每行一条「项目：金额元」，如「住宿：2500元」"
 }
+硬性要求：所有字段的值必须使用简体中文（包括预算里的项目名和总金额），禁止出现英文；budget 必须是纯文本字符串，不要输出嵌套对象或数组。
 只输出 JSON，不要 markdown 代码块。`;
 
   const resp = await callLLMDirect(promptText);
@@ -102,6 +103,19 @@ ${itemsSummary.slice(0, 4000)}
 
   // LLM 偶尔把字段输出成对象/数组而非字符串（尤其 budget），
   // 入库前统一拍平成可读文本，否则前端会渲染成 [object Object]
+  // 常见英文键名 → 中文（LLM 不听话输出英文键时兜底翻译）
+  const KEY_ZH = {
+    accommodation: '住宿', hotel: '住宿', lodging: '住宿',
+    food: '餐饮', dining: '餐饮', meals: '餐饮', restaurant: '餐饮',
+    transport: '交通', transportation: '交通', traffic: '交通',
+    activities: '门票活动', activity: '门票活动', attractions: '门票活动',
+    tickets: '门票', entertainment: '娱乐',
+    shopping: '购物', total: '总计', sum: '总计', overall: '总计',
+    misc: '其他', other: '其他', others: '其他', insurance: '保险',
+    flight: '机票', flights: '机票', train: '火车', railway: '火车',
+    daily: '每日', 'per day': '每日', budget: '预算', note: '说明', notes: '说明',
+  };
+  const keyZh = (k) => KEY_ZH[String(k).toLowerCase().trim()] || k;
   const flatten = (v, depth) => {
     depth = depth || 0;
     if (v === null || v === undefined) return '';
@@ -111,25 +125,34 @@ ${itemsSummary.slice(0, 4000)}
     if (Array.isArray(v)) return v.map((x) => flatten(x, depth + 1)).filter(Boolean).join('\n');
     return Object.keys(v)
       .map((k) => {
-        const val = flatten(v[k], depth + 1);
+        const raw = v[k];
+        const val = flatten(raw, depth + 1);
         if (!val) return '';
-        const lines = val.split('\n');
-        return lines.length === 1 ? `${k}：${lines[0]}` : `${k}：\n${lines.map((l) => (l ? '  ' + l : l)).join('\n')}`;
+        // 数值型金额补「元」
+        const shown = typeof raw === 'number' ? `${raw} 元` : val;
+        const lines = shown.split('\n');
+        return lines.length === 1 ? `${keyZh(k)}：${lines[0]}` : `${keyZh(k)}：\n${lines.map((l) => (l ? '  ' + l : l)).join('\n')}`;
       })
       .filter(Boolean)
       .join('\n');
   };
 
   const now = Date.now();
+  // LLM 直接输出纯文本时行首也可能是英文键，兜底翻译
+  const zhify = (s) => String(s).split('\n').map((line) => {
+    const m = line.match(/^\s*([A-Za-z][A-Za-z ]{1,24})\s*[:：]\s*/);
+    if (m && KEY_ZH[m[1].toLowerCase().trim()]) return line.replace(m[0], `${KEY_ZH[m[1].toLowerCase().trim()]}：`);
+    return line;
+  }).join('\n');
   const data = {
     _openid: openid,
     tripId,
-    weather: flatten(parsed.weather),
-    gear: flatten(parsed.gear),
-    food: flatten(parsed.food),
-    tips: flatten(parsed.tips),
-    transport: flatten(parsed.transport),
-    budget: flatten(parsed.budget),
+    weather: zhify(flatten(parsed.weather)),
+    gear: zhify(flatten(parsed.gear)),
+    food: zhify(flatten(parsed.food)),
+    tips: zhify(flatten(parsed.tips)),
+    transport: zhify(flatten(parsed.transport)),
+    budget: zhify(flatten(parsed.budget)),
     generatedAt: now,
   };
 

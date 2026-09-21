@@ -7,6 +7,20 @@ const app = getApp();
 // 建议快照缓存 key
 const CACHE_KEY = 'suggestions';
 
+// 常见英文键名 → 中文（LLM 偶尔输出英文键，展示前兜底翻译）
+const KEY_ZH = {
+  accommodation: '住宿', hotel: '住宿', lodging: '住宿',
+  food: '餐饮', dining: '餐饮', meals: '餐饮', restaurant: '餐饮',
+  transport: '交通', transportation: '交通', traffic: '交通',
+  activities: '门票活动', activity: '门票活动', attractions: '门票活动',
+  tickets: '门票', entertainment: '娱乐',
+  shopping: '购物', total: '总计', sum: '总计', overall: '总计',
+  misc: '其他', other: '其他', others: '其他', insurance: '保险',
+  flight: '机票', flights: '机票', train: '火车', railway: '火车',
+  daily: '每日', 'per day': '每日', budget: '预算', note: '说明', notes: '说明',
+};
+const keyZh = (k) => KEY_ZH[String(k).toLowerCase().trim()] || k;
+
 // LLM 偶尔会把某个字段（尤其 budget）输出成对象/数组而不是字符串，
 // 直接渲染会变成 [object Object]。这里统一拍平成可读文本。
 function toText(v, depth) {
@@ -21,23 +35,38 @@ function toText(v, depth) {
   // 普通对象 → 「键：值」逐行
   return Object.keys(v)
     .map((k) => {
-      const val = toText(v[k], depth + 1);
+      const raw = v[k];
+      const val = toText(raw, depth + 1);
       if (!val) return '';
+      const shown = typeof raw === 'number' ? `${raw} 元` : val;
       // 值本身有多行时，首行接在键后面，其余行缩进
-      const lines = val.split('\n');
+      const lines = shown.split('\n');
       return lines.length === 1
-        ? `${k}：${lines[0]}`
-        : `${k}：\n${lines.map((l) => (l ? '  ' + l : l)).join('\n')}`;
+        ? `${keyZh(k)}：${lines[0]}`
+        : `${keyZh(k)}：\n${lines.map((l) => (l ? '  ' + l : l)).join('\n')}`;
     })
     .filter(Boolean)
     .join('\n');
+}
+
+// 已被拍平成纯文本的行（如「accommodation：2500」）也翻译行首英文键
+function zhifyLineKeys(s) {
+  if (!s || typeof s !== 'string') return s;
+  return s.split('\n').map((line) => {
+    const m = line.match(/^\s*([A-Za-z][A-Za-z ]{1,24})\s*[:：]\s*/);
+    if (m) {
+      const zh = KEY_ZH[m[1].toLowerCase().trim()];
+      if (zh) return line.replace(m[0], `${zh}：`);
+    }
+    return line;
+  }).join('\n');
 }
 
 function normalize(list) {
   if (!list || typeof list !== 'object') return list;
   const out = {};
   ['weather', 'gear', 'food', 'tips', 'transport', 'budget'].forEach((k) => {
-    out[k] = toText(list[k]);
+    out[k] = zhifyLineKeys(toText(list[k]));
   });
   out.generatedAt = list.generatedAt || '';
   return out;
