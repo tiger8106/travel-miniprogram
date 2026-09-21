@@ -4,8 +4,12 @@ const alarm = require('../../utils/alarm');
 const timeUtil = require('../../utils/time');
 const config = require('../../config');
 const env = require('../../utils/env');
+const homeCache = require('../../utils/homecache');
 
 const app = getApp();
+
+// 闹钟列表快照缓存 key
+const CACHE_KEY = 'tickets';
 
 // 闹钟类型选项（编辑抽屉里的 chips）
 const TYPE_OPTIONS = [
@@ -61,13 +65,30 @@ Page({
   },
 
   async load() {
-    this.setData({ loading: true });
-    try {
-      const tripId = app.globalData.currentTripId;
-      if (!tripId) {
-        this.setData({ loading: false, alarms: [], pendingCount: 0 });
-        return;
+    const tripId = app.globalData.currentTripId;
+    if (!tripId) {
+      this.setData({ loading: false, alarms: [], pendingCount: 0 });
+      return;
+    }
+
+    // 换了行程 → 旧快照作废
+    if (this._tripId !== tripId) {
+      this._tripId = tripId;
+      this._sig = '';
+    }
+
+    // ① 先用本地快照秒开，有缓存就不转圈
+    if (!this._sig) {
+      const snap = homeCache.readPage(CACHE_KEY);
+      if (snap && snap.tripId === tripId) {
+        this._sig = JSON.stringify(snap);
+        this.setData({ loading: false, alarms: snap.alarms || [], pendingCount: snap.pendingCount || 0 });
+      } else {
+        this.setData({ loading: true });
       }
+    }
+
+    try {
       const list = await api.listAlarms(tripId);
       const items = (list || []).map((a) => {
         const triggerAt = alarm.calcTriggerAt(a.fireAt, a.fireAtStr);
@@ -90,7 +111,17 @@ Page({
       });
       const pendingCount = items.filter((a) => a.triggerAt && a.triggerAt > now).length;
 
-      // 同步本地缓存（带 fireAt/fireAtStr，syncAlarms 会按时区回写云端）
+      // ② 内容没变就不 setData，避免无谓重绘
+      const snap = { tripId, alarms: items, pendingCount };
+      const sig = JSON.stringify(snap);
+      if (sig !== this._sig) {
+        this._sig = sig;
+        this.setData({ alarms: items, pendingCount });
+        homeCache.writePage(CACHE_KEY, snap);
+      }
+      this.setData({ loading: false });
+
+      // ③ 时区校准放后台（fireAt/fireAtStr，syncAlarms 会回写云端），不阻塞渲染
       alarm.syncAlarms(items.map((a) => ({
         _id: a._id,
         title: a.title,
@@ -99,8 +130,6 @@ Page({
         fireAtStr: a.fireAtStr,
         triggerAt: a.triggerAt,
       })));
-
-      this.setData({ loading: false, alarms: items, pendingCount });
     } catch (err) {
       wx.showToast({ title: err.message || '加载失败', icon: 'none' });
       this.setData({ loading: false });
@@ -229,6 +258,7 @@ Page({
       wx.showLoading({ title: '保存中' });
       await api.updateAlarm(editingId, patch);
       this.setData({ editingId: null, editForm: null });
+      this._sig = ''; // 数据已变，强制刷新渲染
       await this.load();
       wx.showToast({ title: '已保存', icon: 'success' });
     } catch (err) {
@@ -247,6 +277,7 @@ Page({
       // 只保存新增的那一条（之前会把整个列表重复插入，导致闹钟翻倍）
       await api.saveAlarms(tripId, [data]);
       this.setData({ editingId: null, editForm: null });
+      this._sig = ''; // 数据已变，强制刷新渲染
       await this.load();
       wx.showToast({ title: '已添加', icon: 'success' });
     } catch (err) {
@@ -283,6 +314,7 @@ Page({
     try {
       wx.showLoading({ title: '删除中' });
       await api.deleteAlarm(item._id);
+      this._sig = ''; // 数据已变，强制刷新渲染
       await this.load();
       wx.showToast({ title: '已删除', icon: 'success' });
     } catch (err) {

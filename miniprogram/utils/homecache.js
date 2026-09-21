@@ -48,4 +48,66 @@ function markAlarmSynced(tripId) {
   } catch (e) {}
 }
 
-module.exports = { read, write, clear, alarmSyncedAt, markAlarmSynced };
+// 闹钟页 / 建议页等也用同一套：按 key 存渲染快照，进页面先秒开再后台刷新
+const PAGE_PREFIX = 'page_snap_';
+
+function readPage(key) {
+  try {
+    const raw = wx.getStorageSync(PAGE_PREFIX + key);
+    return raw && typeof raw === 'object' ? raw : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function writePage(key, data) {
+  try {
+    wx.setStorageSync(PAGE_PREFIX + key, data);
+  } catch (e) {}
+}
+
+function clearPage(key) {
+  try {
+    wx.removeStorageSync(PAGE_PREFIX + key);
+  } catch (e) {}
+}
+
+// 建议页的「自动生成」很慢（10-20s LLM），失败/为空时不能每次进页面都重跑
+const AUTO_TRY_KEY = 'suggestions_autotried_v1';
+const AUTO_TRY_TTL = 12 * 60 * 60 * 1000;
+
+function autoTriedAt(tripId) {
+  try {
+    const m = wx.getStorageSync(AUTO_TRY_KEY);
+    return (m && Number(m[tripId])) || 0;
+  } catch (e) {
+    return 0;
+  }
+}
+
+function markAutoTried(tripId) {
+  try {
+    const m = wx.getStorageSync(AUTO_TRY_KEY) || {};
+    m[tripId] = Date.now();
+    wx.setStorageSync(AUTO_TRY_KEY, m);
+  } catch (e) {}
+}
+
+function clearAutoTried(tripId) {
+  try {
+    const m = wx.getStorageSync(AUTO_TRY_KEY) || {};
+    delete m[tripId];
+    wx.setStorageSync(AUTO_TRY_KEY, m);
+  } catch (e) {}
+}
+
+// 距上次自动尝试是否已超过 TTL（没试过 → true）
+function shouldAutoTry(tripId) {
+  return Date.now() - autoTriedAt(tripId) >= AUTO_TRY_TTL;
+}
+
+module.exports = {
+  read, write, clear, alarmSyncedAt, markAlarmSynced,
+  readPage, writePage, clearPage,
+  autoTriedAt, markAutoTried, clearAutoTried, shouldAutoTry,
+};
