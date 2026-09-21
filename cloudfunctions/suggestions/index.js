@@ -100,16 +100,36 @@ ${itemsSummary.slice(0, 4000)}
     return { code: -1, msg: 'LLM 输出解析失败' };
   }
 
+  // LLM 偶尔把字段输出成对象/数组而非字符串（尤其 budget），
+  // 入库前统一拍平成可读文本，否则前端会渲染成 [object Object]
+  const flatten = (v, depth) => {
+    depth = depth || 0;
+    if (v === null || v === undefined) return '';
+    if (typeof v === 'string') return v.trim();
+    if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+    if (depth > 3) return '';
+    if (Array.isArray(v)) return v.map((x) => flatten(x, depth + 1)).filter(Boolean).join('\n');
+    return Object.keys(v)
+      .map((k) => {
+        const val = flatten(v[k], depth + 1);
+        if (!val) return '';
+        const lines = val.split('\n');
+        return lines.length === 1 ? `${k}：${lines[0]}` : `${k}：\n${lines.map((l) => (l ? '  ' + l : l)).join('\n')}`;
+      })
+      .filter(Boolean)
+      .join('\n');
+  };
+
   const now = Date.now();
   const data = {
     _openid: openid,
     tripId,
-    weather: parsed.weather || '',
-    gear: parsed.gear || '',
-    food: parsed.food || '',
-    tips: parsed.tips || '',
-    transport: parsed.transport || '',
-    budget: parsed.budget || '',
+    weather: flatten(parsed.weather),
+    gear: flatten(parsed.gear),
+    food: flatten(parsed.food),
+    tips: flatten(parsed.tips),
+    transport: flatten(parsed.transport),
+    budget: flatten(parsed.budget),
     generatedAt: now,
   };
 

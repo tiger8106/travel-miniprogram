@@ -7,6 +7,42 @@ const app = getApp();
 // 建议快照缓存 key
 const CACHE_KEY = 'suggestions';
 
+// LLM 偶尔会把某个字段（尤其 budget）输出成对象/数组而不是字符串，
+// 直接渲染会变成 [object Object]。这里统一拍平成可读文本。
+function toText(v, depth) {
+  depth = depth || 0;
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'string') return v.trim();
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  if (depth > 3) return ''; // 防御：异常深层嵌套直接丢弃
+  if (Array.isArray(v)) {
+    return v.map((it) => toText(it, depth + 1)).filter(Boolean).join('\n');
+  }
+  // 普通对象 → 「键：值」逐行
+  return Object.keys(v)
+    .map((k) => {
+      const val = toText(v[k], depth + 1);
+      if (!val) return '';
+      // 值本身有多行时，首行接在键后面，其余行缩进
+      const lines = val.split('\n');
+      return lines.length === 1
+        ? `${k}：${lines[0]}`
+        : `${k}：\n${lines.map((l) => (l ? '  ' + l : l)).join('\n')}`;
+    })
+    .filter(Boolean)
+    .join('\n');
+}
+
+function normalize(list) {
+  if (!list || typeof list !== 'object') return list;
+  const out = {};
+  ['weather', 'gear', 'food', 'tips', 'transport', 'budget'].forEach((k) => {
+    out[k] = toText(list[k]);
+  });
+  out.generatedAt = list.generatedAt || '';
+  return out;
+}
+
 Page({
   data: {
     loading: true,
@@ -36,15 +72,16 @@ Page({
     if (!this._sig) {
       const snap = homeCache.readPage(CACHE_KEY);
       if (snap && snap.tripId === tripId && snap.suggestions) {
-        this._sig = JSON.stringify(snap);
-        this.setData({ loading: false, suggestions: snap.suggestions });
+        const cached = normalize(snap.suggestions);
+        this._sig = JSON.stringify({ tripId, suggestions: cached });
+        this.setData({ loading: false, suggestions: cached });
       } else {
         this.setData({ loading: true });
       }
     }
 
     try {
-      let list = await api.getSuggestions(tripId);
+      let list = normalize(await api.getSuggestions(tripId));
       // 没有建议时自动生成一次（约 10-20 秒，带生成中提示）
       // 注意：这是最慢的一步，同一个行程 12 小时内只自动尝试一次，
       // 否则每次切到这个 tab 都要重跑一遍大模型
@@ -53,7 +90,7 @@ Page({
         homeCache.markAutoTried(tripId);
         this.setData({ loading: true, generating: true });
         try {
-          list = await api.refreshSuggestions(tripId);
+          list = normalize(await api.refreshSuggestions(tripId));
         } catch (e) {
           // 生成失败就用原来的空结果，页面会显示空态 + 手动刷新按钮
           console.warn('[suggestions] 自动生成失败:', e.message);
