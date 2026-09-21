@@ -38,17 +38,48 @@
       </view>
     </view>
 
-    <!-- 接下来闹钟 -->
-    <view wx:if="{{nextAlarms.length}}" class="card" bindtap="onTapTicket">
-      <view class="card-title">
-        <text>⏰ 即将到来的闹钟</text>
-        <text class="text-secondary" style="font-size: 24rpx; font-weight: normal;">查看全部</text>
+    <!-- 此刻行程：正在进行 / 即将进行，点卡片直接导航 -->
+    <view wx:if="{{nowItems.length}}" class="card now-card">
+      <view class="now-head-bar">
+        <view class="now-head-title">
+          <text class="now-emoji">🧭</text>
+          <text>{{nowTitle}}</text>
+        </view>
+        <text class="now-more" data-idx="0" catchtap="onTapNowDetail">查看当天 ›</text>
       </view>
-      <view wx:for="{{nextAlarms}}" wx:key="_id" class="alarm-row">
-        <view class="alarm-time">{{item.friendly}}</view>
-        <view class="alarm-content">
-          <view class="alarm-title">{{item.title}}</view>
-          <view wx:if="{{item.note}}" class="text-secondary" style="font-size: 24rpx;">{{item.note}}</view>
+
+      <view class="now-list">
+        <view wx:for="{{nowItems}}" wx:key="key"
+              class="now-item {{item.ongoing ? 'live' : ''}}"
+              data-idx="{{index}}"
+              bindtap="onTapNowNav">
+          <!-- 左侧时间轴 -->
+          <view class="now-rail">
+            <view class="now-dot {{item.ongoing ? 'live' : ''}}"></view>
+            <view wx:if="{{index !== nowItems.length - 1}}" class="now-line"></view>
+          </view>
+
+          <view class="now-body">
+            <view class="now-line1">
+              <text class="now-time">{{item.timeText}}</text>
+              <text wx:if="{{item.endText}}" class="now-end">→ {{item.endText}}</text>
+              <text class="now-status {{item.ongoing ? 'live' : ''}}">{{item.statusText}}</text>
+              <text class="now-day">{{item.dayLabel}}</text>
+            </view>
+
+            <view class="now-title-text">{{item.title}}</view>
+
+            <view wx:if="{{item.routeText}}" class="now-route">
+              <text class="now-route-icon">📍</text>
+              <text class="now-route-text">{{item.routeText}}</text>
+            </view>
+
+            <view class="now-actions">
+              <text wx:if="{{item.hasNav}}" class="now-hint">🧭 点卡片一键导航</text>
+              <text wx:else class="now-hint dim">该安排未填地点</text>
+              <text class="now-detail" data-idx="{{index}}" catchtap="onTapNowDetail">详情 ›</text>
+            </view>
+          </view>
         </view>
       </view>
     </view>

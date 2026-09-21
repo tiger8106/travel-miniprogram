@@ -97,6 +97,12 @@ node scripts/check-bindings.js
 - 一句话里多段移动（`8:00 桂林站→金坑大寨 10:30 抵达…`）要**拆成多条顺序导航项**。
 - 跨天：下一天的起点 = 上一天最后一个有位置的项。
 
+### 🧭 从首页跳到某一天：必须传原始 `dayIndex`，不是数组下标
+
+- `pages/index` 的 `days` 数组会**重排**（过期天沉到末尾），所以数组下标 ≠ 第几天。
+- `itinerary` 页按 `(it.dayIndex||0) === dayIdx` 过滤，首页必须传 `days[idx].dayIndex`，
+  传错就会打开错误的一天。统一走 `gotoDay(dayIndex)`，别再手写 navigateTo。
+
 ### 🧠 LLM 提取闹钟的三条硬规则（写在 prompt 里）
 
 1. **标题必须用原文语言**，不许翻译成英文。
