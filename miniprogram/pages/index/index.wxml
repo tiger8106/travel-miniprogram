@@ -98,7 +98,7 @@
               bindtap="onTapDay">
           <view class="day-label">{{item.label}}</view>
           <view class="day-meta">
-            <text class="tag">{{item.items.length}} 项</text>
+            <text class="tag">{{item.count}} 项</text>
             <text wx:if="{{idx === todayIdx}}" class="tag tag-warning">今天</text>
             <text wx:if="{{item.past}}" class="tag">已结束</text>
             <text class="text-secondary" style="font-size: 22rpx;">查看详情 ›</text>

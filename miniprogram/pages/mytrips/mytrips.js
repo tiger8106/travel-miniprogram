@@ -2,6 +2,7 @@
 // 我的行程：全部攻略的统一管理页（进行中在前、已过期沉底置灰）
 const api = require('../../services/api');
 const tripUtil = require('../../utils/trip');
+const homeCache = require('../../utils/homecache');
 
 const app = getApp();
 
@@ -91,6 +92,7 @@ Page({
       await api.deleteItinerary(id);
       if (tripUtil.getPinnedIds().indexOf(id) >= 0) tripUtil.togglePinned(id);
       if (app.globalData.currentTripId === id) app.globalData.currentTripId = null;
+      homeCache.clear(); // 首页快照可能正好是这条，直接失效
       wx.hideLoading();
       wx.showToast({ title: '已删除', icon: 'success' });
       await this.load();

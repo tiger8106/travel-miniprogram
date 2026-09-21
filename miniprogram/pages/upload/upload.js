@@ -1,5 +1,6 @@
 // pages/upload/upload.js
 const api = require('../../services/api');
+const homeCache = require('../../utils/homecache');
 
 const app = getApp();
 
@@ -58,8 +59,9 @@ Page({
       this.setData({ progress: 100, result });
       // 3. 提示成功
       wx.showToast({ title: '导入成功', icon: 'success' });
-      // 4. 跳转首页
+      // 4. 跳转首页（清掉首页快照缓存，避免先闪一下旧行程）
       app.globalData.currentTripId = result.tripId;
+      homeCache.clear();
       setTimeout(() => {
         wx.switchTab({ url: '/pages/index/index' });
       }, 800);

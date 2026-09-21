@@ -1,6 +1,7 @@
 // pages/itinerary/itinerary.js
 const api = require('../../services/api');
 const mapUtil = require('../../utils/map');
+const homeCache = require('../../utils/homecache');
 
 const app = getApp();
 
@@ -346,6 +347,7 @@ Page({
         };
       });
       await api.updateItinerary(tripId, { items });
+      homeCache.clear();
       this.setData({ editingId: '', editForm: null });
       await this.load();
       wx.showToast({ title: '已保存', icon: 'success' });
@@ -381,6 +383,7 @@ Page({
       const { trip } = this.data;
       const items = (trip.items || []).filter((it) => this.itemKeyOf(it) !== id);
       await api.updateItinerary(this.data.tripId, { items });
+      homeCache.clear();
       await this.load();
       wx.showToast({ title: '已删除', icon: 'success' });
     } catch (err) {
@@ -461,6 +464,7 @@ Page({
           wx.showLoading({ title: '添加中' });
           const items = [...(trip.items || []), newItem];
           await api.updateItinerary(tripId, { items });
+          homeCache.clear();
           await this.load();
           wx.showToast({ title: '已添加', icon: 'success' });
         } catch (err) {

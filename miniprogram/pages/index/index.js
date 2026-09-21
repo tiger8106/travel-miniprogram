@@ -4,8 +4,12 @@ const alarm = require('../../utils/alarm');
 const timeUtil = require('../../utils/time');
 const tripUtil = require('../../utils/trip');
 const mapUtil = require('../../utils/map');
+const homeCache = require('../../utils/homecache');
 
 const app = getApp();
+
+// 同一行程的闹钟时区校准节流窗口（毫秒）
+const ALARM_SYNC_TTL = 10 * 60 * 1000;
 
 Page({
   data: {
@@ -23,6 +27,14 @@ Page({
     canRemoveFromHome: false, // 当前攻略是否可从首页移出（已结束 + 已置顶）
     tripEnded: false,    // 当前攻略是否已结束
     tripMenuOpen: false, // 蓝卡右上角 ⋯ 菜单是否展开
+  },
+
+  onLoad() {
+    // 完整攻略数据放实例上，不进 data —— 避免 setData 反复序列化大数组
+    this._trips = null;     // 完整攻略列表
+    this._homeList = null;  // 首页可展示的完整攻略
+    this._trip = null;      // 当前完整攻略（含 items）
+    this._snapSig = '';     // 上一次渲染快照的签名（用于跳过无变化的 setData）
   },
 
   onShow() {
@@ -51,7 +63,7 @@ Page({
   },
 
   refreshNow() {
-    const trip = this.data.trip;
+    const trip = this._trip || this.data.trip;
     if (!trip) return;
     const nowItems = this.buildNowItems(trip);
     // 内容没变就别 setData，避免无谓的渲染
@@ -67,17 +79,40 @@ Page({
     this.loadTrip().then(() => wx.stopPullDownRefresh());
   },
 
+  // 加载流程（性能优化后的版本）：
+  //   ① 冷启动先用本地快照秒开（不转圈），有数据就不显示 loading
+  //   ② 只调一次 listItineraries —— 它返回的已经是完整文档，不再单独 get 一次
+  //   ③ 闹钟时区校准挪到后台跑，且同一行程 10 分钟内只做一次，不再阻塞首屏
+  //   ④ setData 只传渲染需要的精简字段（items 数组不再重复序列化两次）
   async loadTrip() {
-    this.setData({ loading: true });
+    // ① 先渲染本地快照
+    if (!this._snapSig) {
+      const snap = homeCache.read();
+      if (snap) {
+        // 记下签名：网络回来后如果内容一样就不重复 setData
+        this._snapSig = JSON.stringify(snap);
+        this.setData(Object.assign({ loading: false }, snap));
+      } else {
+        this.setData({ loading: true });
+      }
+    }
+
     try {
-      // 1. 拿当前用户的所有攻略，分组：进行中 / 历史
+      // ② 拿当前用户的所有攻略（一次云调用）
       const trips = await api.listItineraries();
+      this._trips = trips || [];
       if (!trips || !trips.length) {
-        this.setData({ loading: false, trip: null, days: [], nowItems: [], homeTrips: [], totalTrips: 0 });
+        homeCache.clear();
+        this.applySnapshot({
+          trip: null, days: [], nowItems: [], nowTitle: '',
+          homeTrips: [], homeTripLabels: [], tripIdx: 0, totalTrips: 0,
+          dateText: '', canRemoveFromHome: false, tripEnded: false, todayIdx: -1,
+        });
         return;
       }
       // 首页可展示 = 进行中的 + 置顶的历史攻略
       const homeList = tripUtil.homeTrips(trips);
+      this._homeList = homeList;
 
       // 当前攻略不在首页列表（比如已结束且未置顶）→ 自动切到第一个
       let tripId = app.globalData.currentTripId;
@@ -90,60 +125,95 @@ Page({
 
       // 没有任何可展示的攻略（全结束且都没置顶）
       if (!tripId) {
-        this.setData({
-          loading: false, trip: null, days: [], nowItems: [], nowTitle: '',
+        homeCache.clear();
+        this.applySnapshot({
+          trip: null, days: [], nowItems: [], nowTitle: '',
           homeTrips: [], homeTripLabels: [], tripIdx: 0, totalTrips: trips.length,
+          dateText: '', canRemoveFromHome: false, tripEnded: false, todayIdx: -1,
         });
         return;
       }
 
-      const trip = await api.getItinerary(tripId);
+      // list 返回的已经是完整文档，直接用；只在极少数没命中的情况下才补一次 get
+      let trip = (this._trips || []).find((t) => t._id === tripId);
+      if (!trip) trip = await api.getItinerary(tripId);
+      this._trip = trip;
       app.globalData.currentTripId = tripId;
       app.globalData.currentTrip = trip;
 
-      // 顶部日期文案：无效日期显示"日期未设置"，绝不能显示 "null → null"
-      const dateText = this.hasValidDate(trip.startDate)
-        ? `${trip.startDate} → ${trip.endDate}`
-        : '日期未设置';
-      // 已结束且被置顶到首页的攻略 → 首页可直接"移出"
-      const tripEnded = tripUtil.isEnded(trip);
-      const canRemoveFromHome = tripEnded && tripUtil.getPinnedIds().indexOf(tripId) >= 0;
-
-      // 2. 拼装每日行程 + 标记今天是哪一天
-      const days = this.buildDays(trip);
-      const todayIdx = this.findTodayIdx(days);
-      // 正在进行 / 即将进行的行程（首页直接导航用）
-      const nowItems = this.buildNowItems(trip);
-
-      // 3. 闹钟：不再在首页展示，但仍拉一次做时区校准（syncAlarms 会回写云端）
-      const alarms = await api.listAlarms(tripId).catch(() => []);
-      const localAlarms = (alarms || []).map((a) => ({
-        ...a,
-        triggerAt: alarm.calcTriggerAt(a.fireAt, a.fireAtStr),
-      }));
-      alarm.syncAlarms(localAlarms);
-
-      this.setData({
-        loading: false,
-        trip,
-        dateText,
-        canRemoveFromHome,
-        tripEnded,
-        days,
-        todayIdx,
-        nowItems,
-        nowTitle: this.nowTitleOf(nowItems),
-        homeTrips: homeList,
-        homeTripLabels: homeList.map((t) => t.title || '未命名行程'),
-        tripIdx: idx,
-        totalTrips: trips.length,
-      });
+      this.applySnapshot(this.buildSnapshot(trip, homeList, idx, trips.length));
       this.startTicker();
+      // ③ 后台校准闹钟时区（不 await）
+      this.syncAlarmsOnce(tripId);
     } catch (err) {
       console.error(err);
       this.setData({ loading: false });
       wx.showToast({ title: err.message || '加载失败', icon: 'none' });
     }
+  },
+
+  // 组装一次渲染需要的全部字段（精简版：不把 items 大数组塞进 setData）
+  buildSnapshot(trip, homeList, idx, total) {
+    const days = this.buildDays(trip);
+    const nowItems = this.buildNowItems(trip);
+    const tripEnded = tripUtil.isEnded(trip);
+    return {
+      trip: {
+        _id: trip._id,
+        title: trip.title || '',
+        summary: trip.summary || '',
+        startDate: trip.startDate,
+        endDate: trip.endDate,
+      },
+      // 顶部日期文案：无效日期显示"日期未设置"，绝不能显示 "null → null"
+      dateText: this.hasValidDate(trip.startDate)
+        ? `${trip.startDate} → ${trip.endDate}`
+        : '日期未设置',
+      tripEnded,
+      // 已结束且被置顶到首页的攻略 → 首页可直接"移出"
+      canRemoveFromHome: tripEnded && tripUtil.getPinnedIds().indexOf(trip._id) >= 0,
+      days,
+      todayIdx: this.findTodayIdx(days),
+      nowItems,
+      nowTitle: this.nowTitleOf(nowItems),
+      homeTrips: homeList.map((t) => ({
+        _id: t._id,
+        title: t.title,
+        startDate: t.startDate,
+        endDate: t.endDate,
+      })),
+      homeTripLabels: homeList.map((t) => t.title || '未命名行程'),
+      tripIdx: idx,
+      totalTrips: total,
+    };
+  },
+
+  // 内容没变化就不 setData，避免无谓的视图层重绘
+  applySnapshot(snap) {
+    const sig = JSON.stringify(snap);
+    if (sig === this._snapSig) {
+      this.setData({ loading: false });
+      return;
+    }
+    this._snapSig = sig;
+    this.setData(Object.assign({}, snap, { loading: false }));
+    if (snap.trip) homeCache.write(snap);
+  },
+
+  // 闹钟时区校准：后台跑 + 节流，不再拖慢首屏
+  syncAlarmsOnce(tripId) {
+    if (!tripId) return;
+    if (Date.now() - homeCache.alarmSyncedAt(tripId) < ALARM_SYNC_TTL) return;
+    api.listAlarms(tripId)
+      .then((alarms) => {
+        const localAlarms = (alarms || []).map((a) => ({
+          ...a,
+          triggerAt: alarm.calcTriggerAt(a.fireAt, a.fireAtStr),
+        }));
+        alarm.syncAlarms(localAlarms);
+        homeCache.markAlarmSynced(tripId);
+      })
+      .catch(() => {});
   },
 
   // 切换当前展示的攻略
@@ -153,6 +223,15 @@ Page({
     if (!t || t._id === app.globalData.currentTripId) return;
     app.globalData.currentTripId = t._id;
     this.setData({ tripIdx: idx, tripMenuOpen: false });
+
+    // 本地已有一份完整数据 → 先秒切渲染，再后台校准，不等网络
+    const full = (this._trips || []).find((x) => x._id === t._id);
+    const homeList = this._homeList || [];
+    if (full) {
+      this._trip = full;
+      app.globalData.currentTrip = full;
+      this.applySnapshot(this.buildSnapshot(full, homeList, idx, this.data.totalTrips));
+    }
     this.loadTrip();
   },
 
@@ -188,14 +267,13 @@ Page({
     const startTs = startOk ? this.parseLocalDate(trip.startDate) : null;
     const endTs = startOk && this.hasValidDate(trip.endDate) ? this.parseLocalDate(trip.endDate) : startTs;
 
-    // 按 dayIndex 分组
+    // 按 dayIndex 分组，只统计条数（不再把 items 整包塞进 setData）
     const map = {};
     (trip.items || []).forEach((it) => {
       const idx = it.dayIndex || 0;
-      if (!map[idx]) map[idx] = [];
-      map[idx].push(it);
+      map[idx] = (map[idx] || 0) + 1;
     });
-    const sortItems = (arr) => (arr || []).sort((a, b) => (a.startTime || '').localeCompare(b.startTime || ''));
+    const countOf = (i) => map[i] || 0;
 
     // 没有有效起始日期 → 只按天数生成卡片，不显示具体日期，也不标"今天"
     // （绝不能用"当天"冒充第 1 天——那会复现"通勤行程显示成 9 月 21 日"的 bug）
@@ -203,7 +281,7 @@ Page({
       const maxDi = (trip.items || []).reduce((m, it) => Math.max(m, it.dayIndex || 0), 0);
       const days = [];
       for (let i = 0; i <= maxDi; i++) {
-        days.push({ date: 'day-' + i, dayIndex: i, label: `第${i + 1}天`, items: sortItems(map[i]), past: false });
+        days.push({ date: 'day-' + i, dayIndex: i, label: `第${i + 1}天`, count: countOf(i), past: false });
       }
       return days;
     }
@@ -214,7 +292,7 @@ Page({
       date: timeUtil.fmtDate(d),
       dayIndex: i, // 原始第几天（列表重排后仍能对应回 itinerary 页）
       label: this.formatLabel(d, i),
-      items: sortItems(map[i]),
+      count: countOf(i),
       past: d.getTime() < todayTs, // 已过期的天
     }));
     // 已过期的天数沉到列表末尾（保持原有相对顺序，第X天编号不变）
@@ -378,6 +456,8 @@ Page({
         tripUtil.togglePinned(trip._id);
         app.globalData.currentTripId = null; // 触发首页自动回退到其他攻略
         wx.showToast({ title: '已移出首页', icon: 'none' });
+        this._trips = null; // 本地数据已失效，重新拉
+        homeCache.clear();
         this.loadTrip();
       },
     });
@@ -404,6 +484,8 @@ Page({
       // 同步清理本地置顶状态与当前选中
       if (tripUtil.getPinnedIds().indexOf(trip._id) >= 0) tripUtil.togglePinned(trip._id);
       app.globalData.currentTripId = null;
+      this._trips = null;
+      homeCache.clear();
       wx.hideLoading();
       wx.showToast({ title: '已删除', icon: 'success' });
       await this.loadTrip();
