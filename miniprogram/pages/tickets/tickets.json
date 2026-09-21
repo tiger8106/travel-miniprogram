@@ -1,6 +1,7 @@
 {
   "navigationBarTitleText": "抢票闹钟",
   "usingComponents": {
-    "ticket-alarm": "/components/ticket-alarm/ticket-alarm"
+    "ticket-alarm": "/components/ticket-alarm/ticket-alarm",
+    "login-gate": "/components/login-gate/login-gate"
   }
 }

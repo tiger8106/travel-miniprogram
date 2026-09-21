@@ -9,6 +9,7 @@ Page({
   data: {
     uploading: false,
     parsing: false,
+    needLogin: false,   // 未登录 → 只显示登录门禁卡
     progress: 0,
     fileName: '',
     fileID: null,
@@ -44,17 +45,30 @@ Page({
     });
   },
 
+  onShow() {
+    // 未登录 → 不能制定行程，只显示登录门禁卡
+    if (!auth.isLoggedIn()) {
+      this.setData({ needLogin: true, fileName: '' });
+      return;
+    }
+    this.setData({ needLogin: false });
+  },
+
+  // 登录成功后由门禁组件回调
+  onLoginSuccess() {
+    this.setData({ needLogin: false });
+  },
+
   async onUpload() {
     if (!this.data.filePath) {
       wx.showToast({ title: '请先选择文件', icon: 'none' });
       return;
     }
+    // 未登录先提醒登录，登录成功后再继续
+    const ok = await auth.ensureLogin('上传攻略');
+    if (!ok) return;
     this.setData({ uploading: true, progress: 10, errorMsg: '' });
     try {
-      // 0. 确保已登录（未登录先静默微信登录，攻略才落到当前账号名下）
-      await auth.silentLogin().catch((err) => {
-        console.warn('[upload] 静默登录失败，继续尝试上传', err);
-      });
       // 1. 上传到云存储
       const fileID = await api.uploadDoc(this.data.filePath);
       this.setData({ fileID, progress: 40 });

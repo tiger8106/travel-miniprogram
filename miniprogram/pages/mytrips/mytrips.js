@@ -3,12 +3,14 @@
 const api = require('../../services/api');
 const tripUtil = require('../../utils/trip');
 const homeCache = require('../../utils/homecache');
+const auth = require('../../utils/auth');
 
 const app = getApp();
 
 Page({
   data: {
     loading: true,
+    needLogin: false,    // 未登录 → 只显示登录门禁卡
     trips: [],       // [{ _id, title, dateRange, itemCount, ended, pinned }]
     activeCount: 0,  // 进行中数量
     endedCount: 0,   // 已过期数量
@@ -18,11 +20,22 @@ Page({
     this.load();
   },
 
+  // 登录成功后由门禁组件回调
+  onLoginSuccess() {
+    this.setData({ needLogin: false });
+    this.load();
+  },
+
   onPullDownRefresh() {
     this.load().then(() => wx.stopPullDownRefresh());
   },
 
   async load() {
+    // 未登录 → 不展示任何行程，只显示登录门禁卡
+    if (!auth.isLoggedIn()) {
+      this.setData({ loading: false, needLogin: true, trips: [], activeCount: 0, endedCount: 0 });
+      return;
+    }
     this.setData({ loading: true });
     try {
       const list = await api.listItineraries();

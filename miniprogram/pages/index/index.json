@@ -3,6 +3,7 @@
   "enablePullDownRefresh": true,
   "backgroundTextStyle": "dark",
   "usingComponents": {
-    "day-card": "/components/day-card/day-card"
+    "day-card": "/components/day-card/day-card",
+    "login-gate": "/components/login-gate/login-gate"
   }
 }

@@ -5,6 +5,7 @@ const timeUtil = require('../../utils/time');
 const config = require('../../config');
 const env = require('../../utils/env');
 const homeCache = require('../../utils/homecache');
+const auth = require('../../utils/auth');
 
 const app = getApp();
 
@@ -50,6 +51,7 @@ Page({
       advanceIdx: Math.max(0, this.data.advanceOptions.indexOf(adv)),
       // 正式版自动隐藏调试入口（受 config.js 的 SHOW_DEV_TOOLS 控制）
       devMode: env.showDevTools(),
+      needLogin: !auth.isLoggedIn(),
     });
     this.load();
   },
@@ -64,7 +66,21 @@ Page({
     wx.showToast({ title: `已设为提前 ${minutes} 分钟提醒`, icon: 'none' });
   },
 
+  // 登录成功后由门禁组件回调
+  onLoginSuccess() {
+    this.setData({ needLogin: false });
+    this.load();
+  },
+
   async load() {
+    // 未登录 → 不展示闹钟，只显示登录门禁卡
+    if (!auth.isLoggedIn()) {
+      this.setData({
+        loading: false, needLogin: true,
+        alarms: [], pendingCount: 0, editForm: null, delItem: null,
+      });
+      return;
+    }
     const tripId = app.globalData.currentTripId;
     if (!tripId) {
       this.setData({ loading: false, alarms: [], pendingCount: 0 });

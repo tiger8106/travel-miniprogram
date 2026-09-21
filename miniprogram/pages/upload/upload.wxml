@@ -1,4 +1,8 @@
 <view class="container">
+  <!-- 未登录：不能制定行程，先登录 -->
+  <login-gate wx:if="{{needLogin}}" tip="登录后制定行程" desc="登录后上传的攻略会保存在你自己的账号下" bind:success="onLoginSuccess" />
+
+  <block wx:else>
   <view class="card">
     <view class="card-title">📤 上传旅游攻略</view>
     <view class="text-secondary" style="margin-bottom: 24rpx; line-height: 1.6;">
@@ -53,4 +57,5 @@
       4. 解析后可手动修改任何行程
     </view>
   </view>
+  </block>
 </view>

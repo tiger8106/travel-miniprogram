@@ -1,4 +1,8 @@
 <view class="container">
+  <!-- 未登录：不展示闹钟 -->
+  <login-gate wx:if="{{needLogin}}" tip="登录后查看和管理闹钟" bind:success="onLoginSuccess" />
+
+  <block wx:else>
   <view wx:if="{{loading}}" class="loading">加载中…</view>
 
   <view wx:elif="{{!alarms.length && !editForm}}" class="empty">
@@ -34,7 +38,7 @@
         <text class="settings-icon">📅</text>
         <view class="settings-main">
           <view class="settings-label">同步到系统日历</view>
-          <view class="settings-sub">到点锁屏也响铃震动，微信不用开着</view>
+          <view class="settings-sub">系统日历提醒，微信不用打开</view>
         </view>
         <view class="settings-value {{pendingCount ? '' : 'muted'}}">
           {{pendingCount ? pendingCount + ' 个 ›' : '无待同步'}}
@@ -63,6 +67,7 @@
     </view>
 
     <view wx:if="{{!editForm}}" class="add-btn" bindtap="onAdd">+ 添加闹钟</view>
+  </block>
   </block>
 
   <!-- ===== 添加 / 编辑 · 底部抽屉 ===== -->

@@ -101,6 +101,33 @@ function relogin() {
   return silentLogin(true);
 }
 
+/**
+ * 操作前守卫：未登录弹窗提醒，用户确认后登录
+ * @param {string} action 动作描述，如「上传攻略」
+ * @returns {Promise<boolean>} true = 可以继续操作
+ */
+async function ensureLogin(action) {
+  if (isLoggedIn()) return true;
+  const goOn = await new Promise((resolve) => {
+    wx.showModal({
+      title: '需要先登录',
+      content: `${action || '这个操作'}需要先微信登录，数据会保存在你自己的账号下。`,
+      confirmText: '登录',
+      cancelText: '取消',
+      success: (res) => resolve(!!res.confirm),
+      fail: () => resolve(false),
+    });
+  });
+  if (!goOn) return false;
+  try {
+    await silentLogin(true);
+    return true;
+  } catch (err) {
+    wx.showToast({ title: err.message || '登录失败，请重试', icon: 'none' });
+    return false;
+  }
+}
+
 module.exports = {
   silentLogin,
   isLoggedIn,
@@ -108,6 +135,7 @@ module.exports = {
   getProfile,
   setProfile,
   updateProfile,
+  ensureLogin,
   logout,
   relogin,
 };

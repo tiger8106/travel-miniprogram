@@ -2,11 +2,13 @@
 const api = require('../../services/api');
 const mapUtil = require('../../utils/map');
 const homeCache = require('../../utils/homecache');
+const auth = require('../../utils/auth');
 
 const app = getApp();
 
 Page({
   data: {
+    needLogin: false,       // 未登录 → 只显示登录门禁卡
     dayIdx: 0,
     tripId: null,
     trip: null,
@@ -172,8 +174,20 @@ Page({
     this.setData({ dayGroups: this.buildAllDays(this.data.trip) });
   },
 
+  // 登录成功后由门禁组件回调
+  onLoginSuccess() {
+    this.setData({ needLogin: false });
+    this.load();
+  },
+
   async load() {
     try {
+      // 未登录 → 不展示行程内容，只显示登录门禁卡
+      if (!auth.isLoggedIn()) {
+        this.setData({ needLogin: true, loading: false, trip: null, items: [], dayGroups: [] });
+        return;
+      }
+      this.setData({ needLogin: false });
       // 历史行程入口传了 viewTripId 就用它；否则用全局当前行程
       const tripId = this.data.viewTripId || app.globalData.currentTripId;
       if (!tripId) {

@@ -1,4 +1,8 @@
 <view class="container">
+  <!-- 未登录：不展示行程内容 -->
+  <login-gate wx:if="{{needLogin}}" tip="登录后查看行程安排" bind:success="onLoginSuccess" />
+
+  <block wx:else>
   <!-- ===== 全行程展开模式（从「我的行程」进入）：按时间顺序铺开所有天 ===== -->
   <block wx:if="{{viewAll}}">
     <view class="day-header card">
@@ -85,5 +89,6 @@
         <view class="tips-refresh" bindtap="onRetryTips">✨ 生成当天建议</view>
       </view>
     </view>
+  </block>
   </block>
 </view>

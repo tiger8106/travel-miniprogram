@@ -1,0 +1,8 @@
+<view class="gate">
+  <view class="gate-icon">🔒</view>
+  <view class="gate-tip">{{tip}}</view>
+  <view class="gate-desc">{{desc}}</view>
+  <view class="gate-btn {{loggingIn ? 'disabled' : ''}}" bindtap="onLogin">
+    {{loggingIn ? '登录中…' : '微信登录'}}
+  </view>
+</view>

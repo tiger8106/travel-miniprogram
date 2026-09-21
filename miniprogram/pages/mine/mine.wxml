@@ -19,7 +19,6 @@
           <text class="avatar-emoji">🐯</text>
         </view>
         <button class="avatar-cover" open-type="chooseAvatar" bindchooseavatar="onChooseAvatar"></button>
-        <view class="avatar-edit-tag">换</view>
       </view>
       <view class="profile-info">
         <!-- 昵称行内直接编辑（微信官方 nickname 输入框） -->

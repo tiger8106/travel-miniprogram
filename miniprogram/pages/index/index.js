@@ -5,6 +5,7 @@ const timeUtil = require('../../utils/time');
 const tripUtil = require('../../utils/trip');
 const mapUtil = require('../../utils/map');
 const homeCache = require('../../utils/homecache');
+const auth = require('../../utils/auth');
 
 const app = getApp();
 
@@ -14,6 +15,7 @@ const ALARM_SYNC_TTL = 10 * 60 * 1000;
 Page({
   data: {
     loading: true,
+    needLogin: false,    // 未登录 → 只显示登录门禁卡
     trip: null,
     dateText: '',        // 顶部日期文案（无效日期显示"日期未设置"）
     days: [],            // [{ date, label, items: [...] }]
@@ -79,12 +81,37 @@ Page({
     this.loadTrip().then(() => wx.stopPullDownRefresh());
   },
 
+  // 登录成功后由门禁组件回调：清标记重新加载
+  onLoginSuccess() {
+    this.setData({ needLogin: false });
+    this._snapSig = '';
+    this.loadTrip();
+  },
+
   // 加载流程（性能优化后的版本）：
   //   ① 冷启动先用本地快照秒开（不转圈），有数据就不显示 loading
   //   ② 只调一次 listItineraries —— 它返回的已经是完整文档，不再单独 get 一次
   //   ③ 闹钟时区校准挪到后台跑，且同一行程 10 分钟内只做一次，不再阻塞首屏
   //   ④ setData 只传渲染需要的精简字段（items 数组不再重复序列化两次）
   async loadTrip() {
+    // ⓪ 未登录 → 不展示任何行程，只显示登录门禁卡
+    if (!auth.isLoggedIn()) {
+      this.stopTicker();
+      homeCache.clear();
+      this.setData({
+        loading: false,
+        needLogin: true,
+        trip: null,
+        days: [],
+        nowItems: [],
+        nowTitle: '',
+        homeTrips: [],
+        homeTripLabels: [],
+        totalTrips: 0,
+      });
+      return;
+    }
+
     // ① 先渲染本地快照
     if (!this._snapSig) {
       const snap = homeCache.read();

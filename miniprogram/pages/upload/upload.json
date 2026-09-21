@@ -1,3 +1,6 @@
 {
-  "navigationBarTitleText": "上传攻略"
+  "navigationBarTitleText": "上传攻略",
+  "usingComponents": {
+    "login-gate": "/components/login-gate/login-gate"
+  }
 }

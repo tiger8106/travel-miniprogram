@@ -1,4 +1,8 @@
 <view class="container">
+  <!-- 未登录：不展示任何行程信息 -->
+  <login-gate wx:if="{{needLogin}}" tip="登录后查看你的行程" bind:success="onLoginSuccess" />
+
+  <block wx:else>
   <view wx:if="{{loading}}" class="loading">加载中…</view>
 
   <view wx:elif="{{!trips.length}}" class="empty">
@@ -34,5 +38,6 @@
               catchtap="onTapDelete">删除</view>
       </view>
     </view>
+  </block>
   </block>
 </view>

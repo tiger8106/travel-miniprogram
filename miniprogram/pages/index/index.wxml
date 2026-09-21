@@ -1,4 +1,8 @@
 <view class="container">
+  <!-- 未登录：不展示任何行程信息，只显示登录门禁卡 -->
+  <login-gate wx:if="{{needLogin}}" tip="登录后查看和管理你的行程" bind:success="onLoginSuccess" />
+
+  <block wx:else>
   <!-- 加载中 -->
   <view wx:if="{{loading}}" class="loading">加载中…</view>
 
@@ -106,5 +110,6 @@
         </view>
       </block>
     </view>
+  </block>
   </block>
 </view>

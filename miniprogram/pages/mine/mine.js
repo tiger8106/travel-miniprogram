@@ -1,6 +1,7 @@
 // pages/mine/mine.js
 const auth = require('../../utils/auth');
 const { uploadFile } = require('../../utils/request');
+const homeCache = require('../../utils/homecache');
 
 const app = getApp();
 
@@ -49,6 +50,8 @@ Page({
       success: (res) => {
         if (!res.confirm) return;
         auth.logout();
+        // 清掉本地所有页面快照，退出后立即看不到任何行程信息
+        homeCache.clearAll();
         app.globalData.openid = null;
         app.globalData.currentTripId = null;
         app.globalData.currentTrip = null;

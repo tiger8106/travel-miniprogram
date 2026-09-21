@@ -1,4 +1,7 @@
 {
   "navigationBarTitleText": "我的行程",
-  "enablePullDownRefresh": true
+  "enablePullDownRefresh": true,
+  "usingComponents": {
+    "login-gate": "/components/login-gate/login-gate"
+  }
 }

@@ -58,23 +58,6 @@
   line-height: 1;
 }
 
-/* 右下角「换」小角标，提示头像可点击更换 */
-.avatar-edit-tag {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 36rpx;
-  height: 36rpx;
-  border-radius: 50%;
-  background: var(--primary);
-  color: #fff;
-  font-size: 20rpx;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 3;
-}
-
 .avatar-off {
   background: #f0f2f5;
 }
