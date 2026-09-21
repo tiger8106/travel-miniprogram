@@ -12,14 +12,15 @@
       </view>
     </block>
     <block wx:else>
-      <!-- 点头像直接换头像（微信官方 chooseAvatar 能力） -->
-      <button class="avatar avatar-btn" open-type="chooseAvatar" bindchooseavatar="onChooseAvatar">
+      <!-- 可见的圆是固定尺寸 view；chooseAvatar 按钮透明覆盖，不受 button 默认样式影响 -->
+      <view class="avatar">
         <image wx:if="{{profile.avatarUrl}}" src="{{profile.avatarUrl}}" class="avatar-img" mode="aspectFill" />
         <view wx:else class="avatar-placeholder">
-          <text>🐯</text>
-          <text class="avatar-edit-tag">换</text>
+          <text class="avatar-emoji">🐯</text>
         </view>
-      </button>
+        <button class="avatar-cover" open-type="chooseAvatar" bindchooseavatar="onChooseAvatar"></button>
+        <view class="avatar-edit-tag">换</view>
+      </view>
       <view class="profile-info">
         <!-- 昵称行内直接编辑（微信官方 nickname 输入框） -->
         <input type="nickname" class="nick-input" value="{{profile.nickname}}"
@@ -36,7 +37,7 @@
       <text class="text-placeholder">›</text>
     </view>
     <view class="menu-item" bindtap="onTapUpload">
-      <text>📲 上传新攻略</text>
+      <text>📤 上传新攻略</text>
       <text class="text-placeholder">›</text>
     </view>
   </view>
@@ -55,12 +56,5 @@
       <text class="logout-text">退出登录</text>
       <text class="text-placeholder">›</text>
     </view>
-  </view>
-
-  <view class="card" wx:if="{{systemInfo}}">
-    <view class="card-title">📱 系统信息</view>
-    <view class="info-row"><text>设备：</text>{{systemInfo.model}}</view>
-    <view class="info-row"><text>系统：</text>{{systemInfo.system}}</view>
-    <view class="info-row"><text>微信：</text>{{systemInfo.version}}</view>
   </view>
 </view>

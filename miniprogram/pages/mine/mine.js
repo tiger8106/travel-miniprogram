@@ -9,7 +9,6 @@ Page({
     loggedIn: false,
     loggingIn: false,
     profile: {},       // { nickname, avatarUrl }
-    systemInfo: null,
     saving: false,
   },
 
@@ -21,7 +20,6 @@ Page({
     this.setData({
       loggedIn: !!auth.getOpenid(),
       profile: auth.getProfile() || {},
-      systemInfo: app.globalData.systemInfo,
     });
   },
 
