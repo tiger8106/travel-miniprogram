@@ -184,8 +184,13 @@ git reset --soft HEAD~1     # 保留改动，只撤提交
 git reset --hard HEAD~1     # 慎用：改动一起丢弃
 
 # 仅当用户明确要求时才推
-git push origin master
+git push origin main
 ```
+
+> ⚠️ 本机推送到 GitHub 的已知情况（2026-09-21 配好）：
+> SSH 用 `~/.ssh/id_ed25519`，`~/.ssh/config` 里对 `github.com` 设了
+> `AddressFamily inet` + `ConnectTimeout 30`（强制 IPv4）。
+> 网络偶尔抽风会 `banner exchange: Connection timed out`，**多试几次就行**，不是配置坏了。
 
 ---
 
