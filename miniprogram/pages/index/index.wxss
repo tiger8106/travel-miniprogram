@@ -52,11 +52,11 @@
 
 .trip-menu-btn {
   position: absolute;
-  top: 16rpx;
+  top: 23rpx; /* 卡片内边距 24 + 标题行高一半(36*1.6/2) - 按钮半高 = 22.8，与标题行居中对齐 */
   right: 20rpx;
   width: 60rpx;
   height: 60rpx;
-  line-height: 54rpx;
+  line-height: 60rpx;
   text-align: center;
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.2);
