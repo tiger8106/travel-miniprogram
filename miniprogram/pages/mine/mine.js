@@ -8,11 +8,9 @@ Page({
   data: {
     loggedIn: false,
     loggingIn: false,
-    editing: false,
     profile: {},       // { nickname, avatarUrl }
-    openid: '',
-    openidShort: '',
     systemInfo: null,
+    saving: false,
   },
 
   onShow() {
@@ -20,12 +18,9 @@ Page({
   },
 
   refresh() {
-    const openid = auth.getOpenid() || '';
     this.setData({
-      loggedIn: !!openid,
+      loggedIn: !!auth.getOpenid(),
       profile: auth.getProfile() || {},
-      openid,
-      openidShort: openid ? openid.slice(0, 8) + '...' : '',
       systemInfo: app.globalData.systemInfo,
     });
   },
@@ -59,73 +54,61 @@ Page({
         app.globalData.openid = null;
         app.globalData.currentTripId = null;
         app.globalData.currentTrip = null;
-        this.setData({ editing: false });
         this.refresh();
         wx.showToast({ title: '已退出', icon: 'none' });
       },
     });
   },
 
-  // ---------- 编辑资料 ----------
-
-  onEditProfile() {
-    if (!this.data.loggedIn) {
-      this.onLogin();
-      return;
-    }
-    this.setData({ editing: !this.data.editing });
-  },
+  // ---------- 资料：点头像换头像 / 点昵称改昵称，改完自动保存 ----------
 
   onChooseAvatar(e) {
-    const avatarUrl = e.detail && e.detail.avatarUrl;
-    if (!avatarUrl) return;
-    // 微信返回的是临时文件路径，先存本地展示，保存时上传云存储
-    this._pendingAvatar = avatarUrl;
-    this.setData({ 'profile.avatarUrl': avatarUrl });
+    if (!this.data.loggedIn) return;
+    const temp = e.detail && e.detail.avatarUrl;
+    if (!temp) return;
+    // 先用临时路径立刻预览，再上传云存储换永久地址
+    this.setData({ 'profile.avatarUrl': temp });
+    this.saveProfile({ avatarTemp: temp });
   },
 
-  onNickInput(e) {
-    this._pendingNickname = e.detail.value;
+  onNickBlur(e) {
+    if (!this.data.loggedIn) return;
+    const nick = (e.detail && e.detail.value ? e.detail.value : '').trim().slice(0, 30);
+    const cur = (this.data.profile.nickname || '').trim();
+    if (!nick || nick === cur) return;
+    this.setData({ 'profile.nickname': nick });
+    this.saveProfile({ nickname: nick });
   },
 
-  async onSaveProfile() {
-    const patch = {};
-    if (this._pendingNickname !== undefined) patch.nickname = this._pendingNickname;
-    if (this._pendingAvatar) patch.avatarUrl = this._pendingAvatar;
-    if (!Object.keys(patch).length) {
-      this.setData({ editing: false });
-      return;
-    }
-    wx.showLoading({ title: '保存中…' });
+  async saveProfile(patch) {
+    if (this.data.saving) return;
+    this.setData({ saving: true });
+    wx.showLoading({ title: '保存中…', mask: true });
     try {
-      // chooseAvatar 返回的是临时路径，先传云存储换成永久 fileID
-      if (this._pendingAvatar && !/^cloud:|^https?:/.test(this._pendingAvatar)) {
+      // chooseAvatar 返回的是临时路径 → 传云存储换成永久 fileID
+      if (patch.avatarTemp) {
         const openid = auth.getOpenid() || 'user';
-        const ext = (this._pendingAvatar.match(/\.(\w+)$/) || [,'png'])[1];
+        const ext = (patch.avatarTemp.match(/\.(\w+)$/) || [, 'png'])[1];
         const cloudPath = `avatars/${openid}-${Date.now()}.${ext}`;
-        patch.avatarUrl = await uploadFile(cloudPath, this._pendingAvatar);
+        patch.avatarUrl = await uploadFile(cloudPath, patch.avatarTemp);
+        delete patch.avatarTemp;
       }
       const profile = await auth.updateProfile(patch);
-      this._pendingAvatar = null;
-      this._pendingNickname = undefined;
-      this.setData({ profile, editing: false });
+      this.setData({ profile });
       wx.hideLoading();
       wx.showToast({ title: '已保存', icon: 'success' });
     } catch (err) {
       wx.hideLoading();
       console.error('[mine] 保存资料失败', err);
+      // 失败时回读本地缓存，避免界面与云端不一致
+      this.setData({ profile: auth.getProfile() || {} });
       wx.showToast({ title: err.message || '保存失败', icon: 'none' });
+    } finally {
+      this.setData({ saving: false });
     }
   },
 
   // ---------- 其他 ----------
-
-  onCopyOpenid() {
-    wx.setClipboardData({
-      data: this.data.openid,
-      success: () => wx.showToast({ title: '已复制', icon: 'success' }),
-    });
-  },
 
   onTapMyTrips() {
     wx.navigateTo({ url: '/pages/mytrips/mytrips' });

@@ -5,37 +5,28 @@
       <view class="avatar avatar-off">👤</view>
       <view class="profile-info">
         <view class="profile-name">未登录</view>
-        <view class="profile-openid">微信登录后可在自己账号下保存攻略</view>
+        <view class="profile-sub">微信登录后可在自己账号下保存攻略</view>
       </view>
       <view class="login-btn {{loggingIn ? 'disabled' : ''}}" bindtap="onLogin">
         {{loggingIn ? '登录中…' : '微信登录'}}
       </view>
     </block>
     <block wx:else>
-      <button wx:if="{{editing}}" class="avatar avatar-btn" open-type="chooseAvatar" bindchooseavatar="onChooseAvatar">
+      <!-- 点头像直接换头像（微信官方 chooseAvatar 能力） -->
+      <button class="avatar avatar-btn" open-type="chooseAvatar" bindchooseavatar="onChooseAvatar">
         <image wx:if="{{profile.avatarUrl}}" src="{{profile.avatarUrl}}" class="avatar-img" mode="aspectFill" />
-        <text wx:else>📷</text>
+        <view wx:else class="avatar-placeholder">
+          <text>🐯</text>
+          <text class="avatar-edit-tag">换</text>
+        </view>
       </button>
-      <view wx:else class="avatar" bindtap="onEditProfile">
-        <image wx:if="{{profile.avatarUrl}}" src="{{profile.avatarUrl}}" class="avatar-img" mode="aspectFill" />
-        <text wx:else>🐯</text>
-      </view>
       <view class="profile-info">
-        <view class="profile-name" bindtap="onEditProfile">{{profile.nickname || '旅行者'}}</view>
-        <view class="profile-openid" bindtap="onCopyOpenid">{{openidShort ? 'ID: ' + openidShort : ''}}</view>
+        <!-- 昵称行内直接编辑（微信官方 nickname 输入框） -->
+        <input type="nickname" class="nick-input" value="{{profile.nickname}}"
+               placeholder="点击填写昵称" bindblur="onNickBlur" bindconfirm="onNickBlur" />
+        <view class="profile-sub">点头像换头像 · 点昵称改昵称</view>
       </view>
     </block>
-  </view>
-
-  <!-- 编辑昵称 -->
-  <view class="card" wx:if="{{editing}}">
-    <view class="card-title">✏️ 编辑资料</view>
-    <view class="edit-row">
-      <input type="nickname" class="nick-input" value="{{profile.nickname}}"
-             placeholder="点击填写昵称" bindinput="onNickInput" bindblur="onNickInput" />
-      <view class="save-btn" bindtap="onSaveProfile">保存</view>
-    </view>
-    <view class="edit-hint">点头像可更换微信头像，昵称输入框会弹出微信昵称快捷填充</view>
   </view>
 
   <view class="card">
