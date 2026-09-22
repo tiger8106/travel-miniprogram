@@ -9,6 +9,15 @@ Component({
 
   properties: {
     show: { type: Boolean, value: false },
+    // 功能名（用于文案「在使用 X 前…」），各页面按自己的场景传
+    feature: { type: String, value: '该功能' },
+    // 说明文字：写清楚「读/写什么、不读什么」
+    desc: {
+      type: String,
+      value: '我们只会在你主动操作时使用必要的信息，不会采集聊天记录、相册或任何个人信息，也不会对外分享。',
+    },
+    // 用户点「不同意」时的提示
+    denyTip: { type: String, value: '未同意则无法使用该功能' },
   },
 
   methods: {
@@ -31,7 +40,7 @@ Component({
       if (resolve) resolve({ event: 'disagree' });
       app.globalData.privacyResolve = null;
       this.triggerEvent('close');
-      wx.showToast({ title: '未同意则无法选择文件', icon: 'none' });
+      wx.showToast({ title: this.properties.denyTip, icon: 'none' });
     },
   },
 });

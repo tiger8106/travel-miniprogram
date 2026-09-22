@@ -38,6 +38,7 @@ Page({
     advanceIdx: 3,
     devMode: false,       // 开发者功能（推送自检 / 闹钟测试）是否可见，由 utils/env 决定
     advanceMin: 5,
+    showPrivacy: false,   // 隐私保护授权弹窗（写入系统日历前由微信触发）
   },
 
   // 遮罩层事件穿透拦截（catchtap / catchtouchmove 用）
@@ -55,9 +56,30 @@ Page({
 
   onUnload() {
     if (this._offAuth) { this._offAuth(); this._offAuth = null; }
+    this.unbindPrivacy();
+  },
+
+  onHide() {
+    // 离开本页就交出授权处理权，避免别的页面触发时弹到看不见的地方
+    this.unbindPrivacy();
+  },
+
+  // 注册隐私授权处理器：微信拦截隐私接口（写系统日历）时回调它，由当前可见页面弹窗确认
+  bindPrivacy() {
+    app._privacyHandler = () => this.setData({ showPrivacy: true });
+  },
+
+  unbindPrivacy() {
+    if (app._privacyHandler) app._privacyHandler = null;
+    this.setData({ showPrivacy: false });
+  },
+
+  onClosePrivacy() {
+    this.setData({ showPrivacy: false });
   },
 
   onShow() {
+    this.bindPrivacy();
     // 恢复用户设置的提前提醒分钟数
     this.setData({
       advanceMin: alarm.getAdvanceMin(),

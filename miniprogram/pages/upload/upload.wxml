@@ -61,4 +61,8 @@
 </view>
 
 <!-- 用户隐私保护授权弹窗（选文件时由微信触发） -->
-<privacy-popup show="{{showPrivacy}}" bind:close="onClosePrivacy" />
+<privacy-popup show="{{showPrivacy}}"
+               feature="上传攻略"
+               desc="我们只在你主动上传攻略时读取你选择的 Word 文档，不会采集聊天记录、相册或任何个人信息；文档仅用于生成行程，不会对外分享。"
+               denyTip="未同意则无法选择文件"
+               bind:close="onClosePrivacy" />

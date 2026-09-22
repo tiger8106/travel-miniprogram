@@ -153,4 +153,11 @@
       </view>
     </view>
   </view>
+
+  <!-- 用户隐私保护授权弹窗（写入系统日历前由微信触发） -->
+  <privacy-popup show="{{showPrivacy}}"
+                 feature="同步到系统日历"
+                 desc="我们只会在你主动点击同步时写入这条行程提醒，不会读取你日历里的其他日程，也不会对外分享。"
+                 denyTip="未同意则无法写入系统日历"
+                 bind:close="onClosePrivacy" />
 </view>

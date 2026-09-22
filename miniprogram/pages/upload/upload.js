@@ -49,13 +49,26 @@ Page({
   onLoad() {
     // 订阅全局登录态：一处登录全站解锁
     this._offAuth = auth.watch(this, { onLogout: () => this.setData({ fileName: '', result: null }) });
-    // 注册隐私授权处理器：微信拦截选文件时会回调它，由本页弹窗让用户确认
-    app._privacyHandler = () => this.setData({ showPrivacy: true });
   },
 
   onUnload() {
     if (this._offAuth) { this._offAuth(); this._offAuth = null; }
+    this.unbindPrivacy();
+  },
+
+  onHide() {
+    // 离开本页就交出授权处理权，避免别的页面触发时弹到看不见的地方
+    this.unbindPrivacy();
+  },
+
+  // 注册隐私授权处理器：微信拦截隐私接口（选文件）时回调它，由当前可见页面弹窗确认
+  bindPrivacy() {
+    app._privacyHandler = () => this.setData({ showPrivacy: true });
+  },
+
+  unbindPrivacy() {
     if (app._privacyHandler) app._privacyHandler = null;
+    this.setData({ showPrivacy: false });
   },
 
   onClosePrivacy() {
@@ -63,6 +76,7 @@ Page({
   },
 
   async onShow() {
+    this.bindPrivacy();
     // 未登录 → 先自动静默登录一次；仍然失败才显示登录门禁卡
     const ok = await auth.requireLogin();
     if (!ok) {

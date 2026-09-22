@@ -39,8 +39,15 @@ App({
         if (typeof this._privacyHandler === 'function') {
           this._privacyHandler();
         } else {
-          // 没有页面兜底就直接放弃，避免接口一直卡住
-          resolve({ event: 'disagree' });
+          // 页面没挂自定义弹窗时用系统弹窗兜底，别直接放弃（否则用户点了没反应）
+          wx.showModal({
+            title: '用户隐私保护提示',
+            content: '使用该功能前，需要先阅读并同意《用户隐私保护指引》。',
+            confirmText: '同意',
+            cancelText: '不同意',
+            success: (r) => resolve({ event: r.confirm ? 'agree' : 'disagree' }),
+            fail: () => resolve({ event: 'disagree' }),
+          });
         }
       });
     }
