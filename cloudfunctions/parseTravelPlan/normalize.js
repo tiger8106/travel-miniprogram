@@ -27,6 +27,35 @@ function normTime(t) {
   return v === null ? '' : fmtMin(v);
 }
 
+// 各类安排的常识耗时（分钟），原文真没给时长线索时用
+const DEFAULT_DUR = {
+  food: 60,
+  sight: 90,
+  transport: 60,
+  hotel: 45,
+  ticket: 30,
+  other: 30,
+};
+const MAX_MIN = 23 * 60 + 59;
+
+// 从文本里抓时长（分钟）："2.5小时" "1小时30分" "约40分钟" "40 min" "半小时"
+// 抓不到返回 0（LLM 没填 endTime 且原文也没写时长时才走分类默认值）
+function parseDurationMin(text) {
+  const s = String(text || '');
+  if (/半小时/.test(s)) return 30;
+  const hm = s.match(/(\d+(?:\.\d+)?)\s*(?:个)?\s*小时(?:\s*(\d{1,2})\s*分(?:钟)?)?/);
+  if (hm) {
+    const v = parseFloat(hm[1]) * 60 + (hm[2] ? parseInt(hm[2], 10) : 0);
+    if (v > 0) return Math.round(v);
+  }
+  const mm = s.match(/(\d{1,3})\s*(?:分钟|分|min|mins|minutes)/i);
+  if (mm) {
+    const v = parseInt(mm[1], 10);
+    if (v > 0) return v;
+  }
+  return 0;
+}
+
 // 地点归一化比较：去空格 + 去常见括号后缀差异仍视为相同的前提是主体一致
 // 简单可靠版：去所有空白后全等
 function samePlace(a, b) {
@@ -130,7 +159,49 @@ function sanitizeItems(rawItems) {
     });
   });
 
+  // ---------- Pass 5：结束时间修复（杜绝"零时长/缺结束时间"） ----------
+  // LLM 经常把 startTime 原样抄进 endTime（"18:00 → 18:00"），这类条目前端会当成异常数据。
+  // 这里按"原文时长线索 → 分类常识耗时 → 下一条开始时间"确定性补齐：
+  //   · 原文写了"正常用时2.5小时""步行约40 min" → 直接用
+  //   · 没写 → 用分类默认（吃饭 60 / 游览 90 / 交通 60 …）
+  //   · 无论如何不得晚于下一条的 startTime（行程是连续的，不能时间重叠）
+  // 注意：endTime < startTime 的条目（如 23:30 → 00:30 跨零点）是合法的，不动它。
+  byDay.forEach((dayItems) => {
+    const starts = dayItems.map((it) => toMin(it.startTime));
+    // 找下一条有明确开始时间的位置（用于收敛本条 endTime）
+    const nextStartOf = (i) => {
+      for (let j = i + 1; j < starts.length; j++) {
+        if (starts[j] !== null) return starts[j];
+      }
+      return null;
+    };
+
+    dayItems.forEach((it, i) => {
+      const st = toMin(it.startTime);
+      if (st === null) return;
+      const et = toMin(it.endTime);
+      const nextStart = nextStartOf(i);
+
+      // 有结束时间且不等于开始时间 → 只做重叠收敛，原样保留（含跨零点 23:30 → 00:30）
+      if (et !== null && et !== st) {
+        if (nextStart !== null && nextStart > st && et > nextStart) {
+          it.endTime = fmtMin(nextStart);
+        }
+        return;
+      }
+
+      // 缺失 或 等于开始时间（零时长）→ 推算
+      const dur = parseDurationMin(`${it.note} ${it.activity}`) || DEFAULT_DUR[it.category] || 30;
+      let cand = Math.min(st + dur, MAX_MIN);
+      if (nextStart !== null && nextStart > st) cand = Math.min(cand, nextStart);
+      if (cand <= st) cand = Math.min(st + 30, MAX_MIN);
+      if (nextStart !== null && nextStart > st) cand = Math.min(cand, nextStart);
+      if (cand <= st) cand = Math.min(st + 10, MAX_MIN);
+      it.endTime = fmtMin(cand);
+    });
+  });
+
   return items;
 }
 
-module.exports = { normTime, samePlace, sanitizeItems, toMin, fmtMin };
+module.exports = { normTime, samePlace, sanitizeItems, toMin, fmtMin, parseDurationMin };

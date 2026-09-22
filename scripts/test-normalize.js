@@ -141,7 +141,12 @@ const sameDay = [
   { dayIndex: 1, startTime: '09:00', endTime: '', activity: '停车场集合', category: 'other', startLocation: '', endLocation: '金坑大寨停车场', transportType: 'car' },
 ];
 const out6 = sanitizeItems(sameDay);
-check('继承后起点=终点 → 假导航清除', out6[1].startLocation === '' && out6[1].endLocation === '');
+// 边界：继承后起点==终点（人已在目的地）
+// 期望：不继承起点（避免出现 A→A 的假导航），但**保留终点**供前端"导航到目的地"。
+// 注意：早期版本这里断言"起点终点一起清空"，会把目的地信息也抹掉，现按实现语义修正。
+check('继承后起点=终点 → 不造 A→A 假导航（保留单头终点）',
+  out6[1].startLocation === '' && out6[1].endLocation === '金坑大寨停车场',
+  `实际 start="${out6[1].startLocation}" end="${out6[1].endLocation}"`);
 
 console.log(failed ? `\n${failed} 项失败 ✗` : '\n全部通过 ✓');
 process.exit(failed ? 1 : 0);

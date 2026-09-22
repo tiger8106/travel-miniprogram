@@ -58,14 +58,25 @@ function getModel() {
 /**
  * 原始 chat 调用，返回 content 字符串
  */
+// 推理型模型（会先输出一大段思考链）单次请求可达 100s+，云函数 60s 上限必然超时，
+// 表现为"某些天整段解析不出来"。这类模型必须显式关掉思考。
+// 实测：qwen3.5-plus 开思考 106s → 关思考 2.9s（快 36 倍），结构化抽取质量不受影响。
+const REASONING_MODEL = /qwen3|qwq|deepseek-r1|reasoner|o1|o3|m1|thinking/i;
+function disableThinking() {
+  if (process.env.LLM_ENABLE_THINKING === '1') return false; // 显式要思考才开
+  return REASONING_MODEL.test(getModel());
+}
+
 function chat(messages, maxTokens) {
   return new Promise((resolve, reject) => {
-    const body = JSON.stringify({
+    const bodyObj = {
       model: getModel(),
       messages,
       temperature: 0.1,
       max_tokens: maxTokens || 4000,
-    });
+    };
+    if (disableThinking()) bodyObj.enable_thinking = false;
+    const body = JSON.stringify(bodyObj);
     const url = `${getBaseURL()}/chat/completions`;
     const u = new URL(url);
     const isHttps = u.protocol === 'https:';
@@ -190,6 +201,7 @@ async function callLLMParallel(rawText) {
   const title = firstLine || '我的行程';
 
   const tasks = [];
+  const dayMeta = []; // 第二波"补漏复查"要用：每天的原文行 + 日期 + 标题
 
   // 每天一个请求
   // 关键：携带"今天之前"的原文作为上下文（累积截尾），让模型知道前一天结束时人在哪
@@ -212,14 +224,28 @@ async function callLLMParallel(rawText) {
 4. 没有发生位置移动的安排（起床、吃饭、休息、洗澡、看夜景、拍照等），startLocation、endLocation、transportType 一律留空字符串；绝不允许出现起点和终点相同（如"民宿→民宿"）的条目。
 5. 凡是"前往/去/回/逛/到达"类的移动动作，都必须填 startLocation 和 endLocation——哪怕原文没明说，也要根据上下文推断：起点=上一条安排的位置或背景里前一天结束的位置（如昨晚酒店），终点=动作指向的地点（"吃完步行逛东西巷"→ startLocation=上一条的餐厅，endLocation=东西巷；"到达重庆北站"→ endLocation=重庆北站，startLocation=此前所在位置）。
 6. "X点左右/大概X点"直接取 X 作为时间。
-7. 每个有明确时间或动作的句子都要提取，不要遗漏备注类信息（放进步 note）。`;
+7. 每个有明确时间或动作的句子都要提取，不要遗漏备注类信息（放进步 note）。
+
+# 结束时间（endTime）必须由上下文推导，禁止照抄开始时间（关键）
+8. 按以下优先级确定 endTime：
+   - 原文给了区间（"13:00～14:30游览…""16:30～18:30""08:00～10:00"）→ 直接取区间两端作为 startTime / endTime
+   - 原文给了时长（"正常用时2.5小时""约27分钟""步行约40 min""1.5小时""半小时""1小时30分"）→ endTime = startTime + 时长
+   - 原文没给时长，但下一段有开始时间 → 本段 endTime 不得晚于下一段的 startTime
+   - 都没有 → 按常识估算：吃饭 60 分钟、市内打车 30 分钟、景点游览 60～120 分钟、高铁/直通车按原文时长、休息洗漱 30 分钟
+9. endTime 严禁等于 startTime（零时长会被系统判为异常条目）；实在推不出来就按 30 分钟填，绝不留空。
+10. 行程是连续的：后一段的 startTime 不得早于前一段的 endTime。
+
+# 覆盖度：宁可多拆，不许漏
+11. 原文每一句含时间或动作的话都必须有对应条目。没写时间的句子（如"晚上可以看《印象刘三姐》""17:30左右回酒店洗澡休息"之后的安排）也要提取，startTime 按上一条 endTime 顺延。
+12. 备注类信息（"注：…""建议…""务必确认…""终极哪一段开放以公告为准"）放进最近一条行程项的 note，不要单独成条。`;
+    dayMeta.push({ i, date, title: d.title, lines: d.lines.slice() });
     tasks.push(
       chatWithRetry(
         [
           { role: 'system', content: SYS_PROMPT },
           { role: 'user', content: dayBody },
         ],
-        3000
+        3500
       )
         .then((t) => ({ kind: 'day', i, items: parseJSONFromText(t) }))
         .catch((e) => ({ kind: 'day', i, error: e.message }))
@@ -306,6 +332,79 @@ ${booking.join('\n').slice(0, 4000)}`,
   if (failedDays === days.length) {
     console.error('[llm] 并行模式所有天均失败，退回单次调用模式');
     return null;
+  }
+
+  // ---------- 第二波：覆盖度复查（补漏，自适应） ----------
+  // 第一波是"一次成文"，长段落/没写时间的句子最容易被整句吞掉。
+  // 再发一轮请求：把原文和已提取清单一起给模型，只让它输出"漏掉的那几条"。
+  // ⚠️ 云函数有 60s 总耗时上限，复查只对"条目数明显少于原文行数"的天发起，不做全量复查。
+  const coverageOf = (meta) => {
+    const n = items.filter((it) => it.dayIndex === meta.i).length;
+    const srcLines = meta.lines.filter((l) => l && !/^注[:：]/.test(l.trim())).length;
+    return { n, srcLines };
+  };
+  const needFix = dayMeta.filter((meta) => {
+    const { n, srcLines } = coverageOf(meta);
+    return srcLines > 0 && n < Math.max(2, Math.ceil(srcLines * 0.7));
+  });
+  if (needFix.length) {
+    console.log('[llm] 覆盖度复查: 触发 %d/%d 天 → %s', needFix.length, dayMeta.length,
+      needFix.map((m) => `第${m.i + 1}天(${coverageOf(m).n}/${coverageOf(m).srcLines})`).join(', '));
+  }
+
+  try {
+    const fixTasks = needFix.map((meta) => {
+      const got = items.filter((it) => it.dayIndex === meta.i);
+      const gotList = got.length
+        ? got.map((it, k) => `${k + 1}. ${it.startTime || '--:--'}-${it.endTime || '--:--'} ${it.activity}`).join('\n')
+        : '(这一天的条目一条都没提取出来)';
+      const body =
+        `【今天：${meta.date}｜${meta.title}，原始攻略正文】\n${meta.lines.join('\n')}\n\n` +
+        `【已经提取出来的行程项】\n${gotList}\n\n` +
+        `逐句核对正文，找出**没有被上面覆盖**的动作或安排，输出补充条目的 JSON 数组，元素格式：{"dayIndex":${meta.i},"startTime":"HH:mm","endTime":"HH:mm","activity":"描述","category":"sight/food/hotel/transport/ticket/other","startLocation":"","endLocation":"","transportType":"car/walk/ride/train/plane","note":""}。\n` +
+        `# 规则\n` +
+        `1. 只输出确实遗漏的条目；已覆盖的不要重复输出，也不要改写后重新输出。\n` +
+        `2. 确实没有遗漏 → 只输出 []。\n` +
+        `3. 没写时间的遗漏项，startTime 按上一条 endTime（或上下文）顺延，endTime 同样按耗时推算，禁止 endTime 等于 startTime。\n` +
+        `4. 只输出数组。`;
+      return chatWithRetry(
+        [
+          { role: 'system', content: SYS_PROMPT },
+          { role: 'user', content: body },
+        ],
+        2000
+      )
+        .then((t) => ({ i: meta.i, items: parseJSONFromText(t) }))
+        .catch((e) => ({ i: meta.i, error: e.message }));
+    });
+
+    const fixResults = await Promise.all(fixTasks);
+    const sig = (it) => `${String(it.startTime || '')}|${String(it.activity || '').replace(/\s+/g, '')}`;
+    const seen = new Set(items.map(sig));
+    let added = 0;
+    fixResults.forEach((r) => {
+      if (r.error || !r.items) return;
+      const arr = asArray(r.items).filter((it) => it && String(it.activity || '').trim());
+      arr.forEach((it) => {
+        const merged = Object.assign({}, it, { dayIndex: r.i });
+        if (seen.has(sig(merged))) return; // 已存在 → 跳过
+        seen.add(sig(merged));
+        items.push(merged);
+        added++;
+      });
+    });
+    console.log('[llm] 覆盖度复查: 补充条目 %d 条（复查前 %d 条）', added, items.length - added);
+
+    // 每天条目数 vs 原文有效行数，做个粗粒度的覆盖度告警（只打日志，不影响流程）
+    dayMeta.forEach((meta) => {
+      const n = items.filter((it) => it.dayIndex === meta.i).length;
+      const srcLines = meta.lines.filter((l) => l && !/^注[:：]/.test(l.trim())).length;
+      if (srcLines > 0 && n < Math.max(1, Math.ceil(srcLines / 3))) {
+        console.warn(`[llm] 覆盖度告警 第${meta.i + 1}天(${meta.date}): 原文 ${srcLines} 行 → 只提取到 ${n} 条`);
+      }
+    });
+  } catch (e) {
+    console.error('[llm] 覆盖度复查异常（忽略，不影响主流程）:', e.message);
   }
 
   // summary：优先取“路线概览”行，其次取第一句完整句子
