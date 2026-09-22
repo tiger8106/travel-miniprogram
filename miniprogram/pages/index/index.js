@@ -12,6 +12,9 @@ const app = getApp();
 // 同一行程的闹钟时区校准节流窗口（毫秒）
 const ALARM_SYNC_TTL = 10 * 60 * 1000;
 
+// 星期名（getDay() 下标：0 = 周日）
+const WEEK_NAMES = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+
 Page({
   data: {
     loading: true,
@@ -437,8 +440,18 @@ Page({
       endLon: it.endLon || 0,
       ongoing,
       statusText: ongoing ? '进行中' : this.relativeStatus(x.st, now),
-      dayLabel: `第${x.di + 1}天 · ${timeUtil.fmtDateShort(day)}`,
+      dateText: this.dateTextOf(day, now),   // 「今天 10-02 周四」这类完整日期
+      dayLabel: `第${x.di + 1}天`,
     };
+  },
+
+  // 行程日期：今天/明天/后天 + MM-DD + 星期（越久远越省略前缀）
+  dateTextOf(d, now) {
+    const a = new Date(d); a.setHours(0, 0, 0, 0);
+    const b = new Date(now); b.setHours(0, 0, 0, 0);
+    const days = Math.round((a.getTime() - b.getTime()) / 86400000);
+    const word = days === 0 ? '今天' : (days === 1 ? '明天' : (days === 2 ? '后天' : ''));
+    return [word, timeUtil.fmtDateShort(d), WEEK_NAMES[d.getDay()]].filter(Boolean).join(' ');
   },
 
   relativeStatus(st, now) {

@@ -73,7 +73,12 @@
               <text class="now-time">{{item.timeText}}</text>
               <text wx:if="{{item.endText}}" class="now-end">→ {{item.endText}}</text>
               <text class="now-status {{item.ongoing ? 'live' : ''}}">{{item.statusText}}</text>
-              <text class="now-day">{{item.dayLabel}}</text>
+            </view>
+
+            <view class="now-date-row">
+              <text class="now-date-icon">📅</text>
+              <text class="now-date-text">{{item.dateText}}</text>
+              <text class="now-date-day">{{item.dayLabel}}</text>
             </view>
 
             <view class="now-title-text">{{item.title}}</view>
@@ -91,6 +96,13 @@
           </view>
         </view>
       </view>
+    </view>
+
+    <!-- 没有正在进行/即将进行的安排（攻略已全部结束，或没有带时间的条目）→ 给明确状态，别整块消失 -->
+    <view wx:elif="{{trip}}" class="card now-empty">
+      <view class="now-empty-icon">🏁</view>
+      <view class="now-empty-text">没有正在进行或即将进行的行程</view>
+      <view class="now-empty-sub">{{tripEnded ? '本次攻略的安排已全部结束' : '攻略里暂无带时间的安排'}}</view>
     </view>
 
     <!-- 每日行程 -->

@@ -136,8 +136,10 @@ const rel3 = page.buildNowItems(trip([
 ]), 3);
 ok(rel3[0].statusText === '2 分钟后', '超过 1 分钟显示「N 分钟后」', rel3[0].statusText);
 
-// dayLabel
-ok(/^第1天 · \d{2}-\d{2}$/.test(list[0].dayLabel), 'dayLabel 形如「第1天 · 09-21」', list[0].dayLabel);
+// 日期展示：dayLabel 只管第几天，日期单独给 dateText（今天/明天 + MM-DD + 星期）
+ok(list[0].dayLabel === '第1天', 'dayLabel 形如「第1天」', list[0].dayLabel);
+ok(/^(今天|明天|后天)?\s*\d{2}-\d{2} 周[一二三四五六日]$/.test(list[0].dateText),
+  'dateText 形如「今天 09-22 周二」', list[0].dateText);
 
 // onTapDay 必须用 dayIndex，而不是重排后的数组下标
 const days = [{ dayIndex: 3, label: 'x' }, { dayIndex: 0, label: 'y' }];
