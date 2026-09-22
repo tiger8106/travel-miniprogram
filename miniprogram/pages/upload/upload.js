@@ -10,6 +10,7 @@ Page({
     uploading: false,
     parsing: false,
     needLogin: false,   // 未登录 → 只显示登录门禁卡
+    showPrivacy: false, // 隐私保护授权弹窗（选文件前由微信触发）
     progress: 0,
     fileName: '',
     fileID: null,
@@ -48,10 +49,17 @@ Page({
   onLoad() {
     // 订阅全局登录态：一处登录全站解锁
     this._offAuth = auth.watch(this, { onLogout: () => this.setData({ fileName: '', result: null }) });
+    // 注册隐私授权处理器：微信拦截选文件时会回调它，由本页弹窗让用户确认
+    app._privacyHandler = () => this.setData({ showPrivacy: true });
   },
 
   onUnload() {
     if (this._offAuth) { this._offAuth(); this._offAuth = null; }
+    if (app._privacyHandler) app._privacyHandler = null;
+  },
+
+  onClosePrivacy() {
+    this.setData({ showPrivacy: false });
   },
 
   async onShow() {

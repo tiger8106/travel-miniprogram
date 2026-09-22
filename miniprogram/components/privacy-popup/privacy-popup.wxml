@@ -1,0 +1,16 @@
+<view wx:if="{{show}}" class="pp-mask" catchtap="noop" catchtouchmove="noop">
+  <view class="pp-box" catchtap="noop">
+    <view class="pp-title">🛡️ 用户隐私保护提示</view>
+    <view class="pp-body">
+      在使用上传攻略功能前，请先阅读并同意
+      <text class="pp-link" bindtap="openContract">《用户隐私保护指引》</text>。
+    </view>
+    <view class="pp-desc">
+      我们只在你主动上传攻略时读取你选择的 Word 文档，不会采集聊天记录、相册或任何个人信息；文档仅用于生成行程，不会对外分享。
+    </view>
+    <view class="pp-btns">
+      <button class="pp-btn cancel" bindtap="onDisagree">不同意</button>
+      <button class="pp-btn ok" open-type="agreePrivacyAuthorization" bindagreeprivacyauthorization="onAgree">同意并继续</button>
+    </view>
+  </view>
+</view>

@@ -59,3 +59,6 @@
   </view>
   </block>
 </view>
+
+<!-- 用户隐私保护授权弹窗（选文件时由微信触发） -->
+<privacy-popup show="{{showPrivacy}}" bind:close="onClosePrivacy" />

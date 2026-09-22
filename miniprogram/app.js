@@ -29,6 +29,22 @@ App({
   },
 
   onLaunch() {
+    // 隐私授权监听：调用 wx.chooseMessageFile 这类隐私接口时微信会拦截，
+    // 这里把 resolve 交给当前页面弹窗，用户点「同意」后再放行
+    this.globalData.privacyResolve = null;
+    this._privacyHandler = null;   // 由使用隐私接口的页面注册
+    if (wx.onNeedPrivacyAuthorization) {
+      wx.onNeedPrivacyAuthorization((resolve) => {
+        this.globalData.privacyResolve = resolve;
+        if (typeof this._privacyHandler === 'function') {
+          this._privacyHandler();
+        } else {
+          // 没有页面兜底就直接放弃，避免接口一直卡住
+          resolve({ event: 'disagree' });
+        }
+      });
+    }
+
     // mock 模式下直接用默认行程 ID，不需要登录
     if (USE_MOCK) {
       this.globalData.currentTripId = DEFAULT_TRIP_ID;
