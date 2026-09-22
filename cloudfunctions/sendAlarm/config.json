@@ -3,5 +3,12 @@
     "openapi": [
       "subscribeMessage"
     ]
-  }
+  },
+  "triggers": [
+    {
+      "name": "alarmPollEveryMinute",
+      "type": "timer",
+      "config": "0 * * * * * *"
+    }
+  ]
 }

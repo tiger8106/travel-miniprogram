@@ -6,8 +6,7 @@
     "pages/tickets/tickets",
     "pages/suggestions/suggestions",
     "pages/mine/mine",
-    "pages/mytrips/mytrips",
-    "pages/webmap/webmap"
+    "pages/mytrips/mytrips"
   ],
   "window": {
     "backgroundTextStyle": "light",
