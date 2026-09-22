@@ -33,6 +33,8 @@ Page({
       app.globalData.openid = openid;
       this.setData({ loggingIn: false });
       this.refresh();
+      // 广播：其它页面（首页 / 行程 / 闹钟）立刻解锁，不用各自再点一次登录
+      auth.notifyLogin();
       wx.showToast({ title: '登录成功', icon: 'success' });
     }).catch((err) => {
       this.setData({ loggingIn: false });

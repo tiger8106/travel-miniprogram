@@ -37,6 +37,19 @@ Page({
     this._homeList = null;  // 首页可展示的完整攻略
     this._trip = null;      // 当前完整攻略（含 items）
     this._snapSig = '';     // 上一次渲染快照的签名（用于跳过无变化的 setData）
+    // 订阅全局登录态：在「我的」登录后本页自动解锁；退出登录后自动清空
+    this._offAuth = auth.watch(this, {
+      onLogin: () => { this._snapSig = ''; this.loadTrip(); },
+      onLogout: () => {
+        this.stopTicker();
+        homeCache.clear();
+        this._snapSig = '';
+        this.setData({
+          loading: false, trip: null, days: [], nowItems: [], nowTitle: '',
+          homeTrips: [], homeTripLabels: [], totalTrips: 0,
+        });
+      },
+    });
   },
 
   onShow() {
@@ -49,6 +62,7 @@ Page({
 
   onUnload() {
     this.stopTicker();
+    if (this._offAuth) { this._offAuth(); this._offAuth = null; }
   },
 
   // 「正在进行」会随时间变化，每分钟用本地数据重算一次（不打网络请求）
@@ -81,8 +95,9 @@ Page({
     this.loadTrip().then(() => wx.stopPullDownRefresh());
   },
 
-  // 登录成功后由门禁组件回调：清标记重新加载
+  // 登录成功后由门禁组件回调（正常情况下登录广播已刷新过，这里只兜底）
   onLoginSuccess() {
+    if (!this.data.needLogin) return;
     this.setData({ needLogin: false });
     this._snapSig = '';
     this.loadTrip();
@@ -94,8 +109,9 @@ Page({
   //   ③ 闹钟时区校准挪到后台跑，且同一行程 10 分钟内只做一次，不再阻塞首屏
   //   ④ setData 只传渲染需要的精简字段（items 数组不再重复序列化两次）
   async loadTrip() {
-    // ⓪ 未登录 → 不展示任何行程，只显示登录门禁卡
-    if (!auth.isLoggedIn()) {
+    // ⓪ 未登录 → 先自动静默登录一次（用户无感知）；仍然失败才显示登录门禁卡
+    const ok = await auth.requireLogin();
+    if (!ok) {
       this.stopTicker();
       homeCache.clear();
       this.setData({
@@ -111,6 +127,8 @@ Page({
       });
       return;
     }
+    // 已登录：把可能残留的门禁卡收起来
+    if (this.data.needLogin) this.setData({ needLogin: false });
 
     // ① 先渲染本地快照
     if (!this._snapSig) {

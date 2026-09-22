@@ -67,16 +67,18 @@ App({
       console.error('获取系统信息失败', e);
     }
 
-    // 2. 静默登录拿 openid
-    auth.silentLogin().then((openid) => {
-      this.globalData.openid = openid;
-      console.log('静默登录成功', openid);
+    // 2. 静默登录拿 openid（全局只此一处发请求，页面共用同一个 Promise；
+    //    登录成功后会广播，所有页面自动解锁，不用各自再点一次登录）
+    //    用户主动退出过时不会自动登录，要等他在页面上自己点登录
+    auth.requireLogin().then((ok) => {
+      if (!ok) {
+        console.info('[阿稳] 当前未登录，等待用户在页面点登录');
+        return;
+      }
+      this.globalData.openid = auth.getOpenid();
 
       // 3. 启动闹钟轮询（前台）
       alarm.startPolling();
-    }).catch((err) => {
-      console.error('静默登录失败', err);
-      wx.showToast({ title: '登录失败，请重试', icon: 'none' });
     });
 
     // 4. 监听小程序切前台

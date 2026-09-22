@@ -43,15 +43,27 @@ Page({
   // 遮罩层事件穿透拦截（catchtap / catchtouchmove 用）
   noop() {},
 
+  onLoad() {
+    // 订阅全局登录态：一处登录全站解锁
+    this._offAuth = auth.watch(this, {
+      onLogin: () => this.load(),
+      onLogout: () => this.setData({
+        loading: false, alarms: [], pendingCount: 0, editForm: null, delItem: null,
+      }),
+    });
+  },
+
+  onUnload() {
+    if (this._offAuth) { this._offAuth(); this._offAuth = null; }
+  },
+
   onShow() {
     // 恢复用户设置的提前提醒分钟数
-    const adv = alarm.getAdvanceMin();
     this.setData({
-      advanceMin: adv,
-      advanceIdx: Math.max(0, this.data.advanceOptions.indexOf(adv)),
+      advanceMin: alarm.getAdvanceMin(),
+      advanceIdx: Math.max(0, this.data.advanceOptions.indexOf(alarm.getAdvanceMin())),
       // 正式版自动隐藏调试入口（受 config.js 的 SHOW_DEV_TOOLS 控制）
       devMode: env.showDevTools(),
-      needLogin: !auth.isLoggedIn(),
     });
     this.load();
   },
@@ -66,21 +78,24 @@ Page({
     wx.showToast({ title: `已设为提前 ${minutes} 分钟提醒`, icon: 'none' });
   },
 
-  // 登录成功后由门禁组件回调
+  // 登录成功后由门禁组件回调（正常情况下登录广播已刷新过，这里只兜底）
   onLoginSuccess() {
+    if (!this.data.needLogin) return;
     this.setData({ needLogin: false });
     this.load();
   },
 
   async load() {
-    // 未登录 → 不展示闹钟，只显示登录门禁卡
-    if (!auth.isLoggedIn()) {
+    // 未登录 → 先自动静默登录一次；仍然失败才显示登录门禁卡
+    const ok = await auth.requireLogin();
+    if (!ok) {
       this.setData({
         loading: false, needLogin: true,
         alarms: [], pendingCount: 0, editForm: null, delItem: null,
       });
       return;
     }
+    if (this.data.needLogin) this.setData({ needLogin: false });
     const tripId = app.globalData.currentTripId;
     if (!tripId) {
       this.setData({ loading: false, alarms: [], pendingCount: 0 });

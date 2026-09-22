@@ -38,6 +38,13 @@ Page({
     this.rawItems = [];     // 按时间排好序的原始列表
     this.dayStartTs = 0;    // 当天 00:00 的时间戳
     this.baseDate = null;   // 行程第一天的 00:00（Date）
+    // 订阅全局登录态：一处登录全站解锁
+    this._offAuth = auth.watch(this, {
+      onLogin: () => this.load(),
+      onLogout: () => this.setData({
+        loading: false, trip: null, items: [], dayGroups: [], dayTips: null,
+      }),
+    });
   },
 
   onShow() {
@@ -51,6 +58,7 @@ Page({
 
   onUnload() {
     this.stopTicker();
+    if (this._offAuth) { this._offAuth(); this._offAuth = null; }
   },
 
   // ============================================================
@@ -174,16 +182,18 @@ Page({
     this.setData({ dayGroups: this.buildAllDays(this.data.trip) });
   },
 
-  // 登录成功后由门禁组件回调
+  // 登录成功后由门禁组件回调（正常情况下登录广播已刷新过，这里只兜底）
   onLoginSuccess() {
+    if (!this.data.needLogin) return;
     this.setData({ needLogin: false });
     this.load();
   },
 
   async load() {
     try {
-      // 未登录 → 不展示行程内容，只显示登录门禁卡
-      if (!auth.isLoggedIn()) {
+      // 未登录 → 先自动静默登录一次；仍然失败才显示登录门禁卡
+      const ok = await auth.requireLogin();
+      if (!ok) {
         this.setData({ needLogin: true, loading: false, trip: null, items: [], dayGroups: [] });
         return;
       }

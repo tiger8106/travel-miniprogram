@@ -45,13 +45,23 @@ Page({
     });
   },
 
-  onShow() {
-    // 未登录 → 不能制定行程，只显示登录门禁卡
-    if (!auth.isLoggedIn()) {
+  onLoad() {
+    // 订阅全局登录态：一处登录全站解锁
+    this._offAuth = auth.watch(this, { onLogout: () => this.setData({ fileName: '', result: null }) });
+  },
+
+  onUnload() {
+    if (this._offAuth) { this._offAuth(); this._offAuth = null; }
+  },
+
+  async onShow() {
+    // 未登录 → 先自动静默登录一次；仍然失败才显示登录门禁卡
+    const ok = await auth.requireLogin();
+    if (!ok) {
       this.setData({ needLogin: true, fileName: '' });
       return;
     }
-    this.setData({ needLogin: false });
+    if (this.data.needLogin) this.setData({ needLogin: false });
   },
 
   // 登录成功后由门禁组件回调

@@ -16,12 +16,27 @@ Page({
     endedCount: 0,   // 已过期数量
   },
 
+  onLoad() {
+    // 订阅全局登录态：一处登录全站解锁
+    this._offAuth = auth.watch(this, {
+      onLogin: () => this.load(),
+      onLogout: () => this.setData({
+        loading: false, trips: [], activeCount: 0, endedCount: 0,
+      }),
+    });
+  },
+
   onShow() {
     this.load();
   },
 
-  // 登录成功后由门禁组件回调
+  onUnload() {
+    if (this._offAuth) { this._offAuth(); this._offAuth = null; }
+  },
+
+  // 登录成功后由门禁组件回调（正常情况下登录广播已刷新过，这里只兜底）
   onLoginSuccess() {
+    if (!this.data.needLogin) return;
     this.setData({ needLogin: false });
     this.load();
   },
@@ -31,11 +46,13 @@ Page({
   },
 
   async load() {
-    // 未登录 → 不展示任何行程，只显示登录门禁卡
-    if (!auth.isLoggedIn()) {
+    // 未登录 → 先自动静默登录一次；仍然失败才显示登录门禁卡
+    const ok = await auth.requireLogin();
+    if (!ok) {
       this.setData({ loading: false, needLogin: true, trips: [], activeCount: 0, endedCount: 0 });
       return;
     }
+    if (this.data.needLogin) this.setData({ needLogin: false });
     this.setData({ loading: true });
     try {
       const list = await api.listItineraries();

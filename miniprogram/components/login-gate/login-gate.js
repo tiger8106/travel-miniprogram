@@ -23,6 +23,9 @@ Component({
       try {
         await auth.silentLogin(true);
         this.setData({ loggingIn: false });
+        // 广播给所有页面：在任意一处登录，全站一起解锁
+        auth.notifyLogin();
+        // 兼容没订阅广播的页面（onLoginSuccess 里自行刷新）
         this.triggerEvent('success');
       } catch (err) {
         this.setData({ loggingIn: false });
