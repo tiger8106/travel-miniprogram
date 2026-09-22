@@ -118,6 +118,29 @@ const midnight = page.buildNowItems(trip([
 ]), 3);
 ok(midnight.length === 1, '跨零点的班次不会被误判成已结束', '实际 ' + midnight.length);
 
+// 零时长：开始 = 结束（如 18:00 → 18:00），不能被当成跨零点加一天
+const zero = page.buildNowItems(trip([
+  { dayIndex: 0, startTime: '09:00', endTime: '09:00', activity: '零时长条目' },
+]), 3);
+ok(zero.length === 0, '开始=结束的条目按 1 小时窗口算，上午的已过去 → 排除', '实际 ' + zero.length);
+const zero2 = page.buildNowItems(trip([
+  { dayIndex: 0, startTime: hhmm(NOW - 90 * 60000), endTime: hhmm(NOW - 90 * 60000), activity: '90 分钟前的零时长' },
+]), 3);
+ok(zero2.length === 0, '90 分钟前的零时长条目已超出 1 小时窗口 → 排除', JSON.stringify(zero2.map(x => x.statusText)));
+const zero3 = page.buildNowItems(trip([
+  { dayIndex: 0, startTime: hhmm(NOW - 30 * 60000), endTime: hhmm(NOW - 30 * 60000), activity: '零时长但未过' },
+  { dayIndex: 0, startTime: '23:50', endTime: '00:10', activity: '真跨零点' },
+]), 3);
+ok(zero3.length === 2 && zero3[0].ongoing === true, '30 分钟内的零时长条目仍在 1 小时窗口内 → 进行中，且不影响后面的真跨零点', JSON.stringify(zero3.map(x => x.statusText)));
+
+// 行程日期已翻篇：endDate 是昨天，哪怕条目时间写得再怪也不显示
+const y = new Date(NOW - 86400000);
+const yesterday = timeUtil.fmtDate(y.getTime());
+const past = page.buildNowItems(trip([
+  { dayIndex: 0, startTime: '18:00', endTime: '18:00', activity: '昨天的零时长' },
+], yesterday), 3);
+ok(past.length === 0, 'endDate 已过的攻略不生成此刻条目（保险兜底）', '实际 ' + past.length);
+
 // 相对时间文案
 const rel = page.buildNowItems(trip([
   { dayIndex: 1, startTime: '23:00', activity: '明天的安排' },

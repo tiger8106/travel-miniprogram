@@ -379,6 +379,13 @@ Page({
     const startTs = this.parseLocalDate(trip.startDate);
     if (isNaN(startTs)) return [];
 
+    // 保险：整趟攻略的日期已经翻篇（结束日 23:59:59 都过了）→ 一条都不生成，
+    // 防止个别条目时间算歪了仍被当成"正在进行"
+    if (this.hasValidDate(trip.endDate)) {
+      const endTs = this.parseLocalDate(trip.endDate);
+      if (!isNaN(endTs) && endTs + 86400000 - 1 < Date.now()) return [];
+    }
+
     const now = Date.now();
     const list = [];
 
@@ -392,8 +399,8 @@ Page({
       if (st === null) return; // 没填时间的条目无法判断，跳过
 
       let et = this.clockOn(dayDate, it.endTime);
-      if (et !== null && et <= st) et += 86400000; // 跨零点（23:30 → 00:30）
-      if (et === null) et = st + 3600000;          // 没结束时间，默认 1 小时
+      if (et !== null && et < st) et += 86400000;  // 跨零点（23:30 → 00:30）：只有结束早于开始才加一天
+      if (et === null || et === st) et = st + 3600000; // 没结束时间 / 开始结束相同（零时长）→ 默认 1 小时
 
       if (et < now) return; // 已经结束了
 
