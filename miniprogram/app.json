@@ -3,6 +3,7 @@
     "pages/index/index",
     "pages/itinerary/itinerary",
     "pages/upload/upload",
+    "pages/planner/planner",
     "pages/tickets/tickets",
     "pages/suggestions/suggestions",
     "pages/mine/mine",

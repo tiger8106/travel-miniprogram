@@ -82,6 +82,15 @@ async function getDayTips(tripId, dayIndex, force) {
   return callFn('suggestions', { action: 'dayTips', tripId, dayIndex, force });
 }
 
+// AI 制定新攻略（两阶段，避免单次调用撞上云函数 60s 上限）
+async function generateOutline(input) {
+  return callFn('generatePlan', Object.assign({ action: 'outline' }, input));
+}
+
+async function buildPlan(input, outlineData) {
+  return callFn('generatePlan', Object.assign({ action: 'build' }, input, outlineData));
+}
+
 // 上传 / 下载
 async function uploadDoc(localPath) {
   const ts = Date.now();
@@ -109,6 +118,8 @@ module.exports = {
   getSuggestions,
   refreshSuggestions,
   getDayTips,
+  generateOutline,
+  buildPlan,
   uploadDoc,
   downloadFromCloud,
 };

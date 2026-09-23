@@ -1,0 +1,142 @@
+<view class="container">
+  <!-- 未登录：只显示门禁卡 -->
+  <login-gate wx:if="{{needLogin}}" tip="登录后使用 AI 制定攻略" bind:success="onLoginSuccess" />
+
+  <block wx:else>
+    <!-- ============ 第一步：填需求 ============ -->
+    <block wx:if="{{step === 'form'}}">
+      <view class="hero">
+        <view class="hero-title">✨ AI 帮你制定攻略</view>
+        <view class="hero-sub">回答几个关键问题，生成带时间、地点、导航和抢票闹钟的完整行程</view>
+      </view>
+
+      <view class="card">
+        <view class="card-title">🎯 去哪儿</view>
+        <view class="field">
+          <text class="field-label">出发城市</text>
+          <input class="field-input" data-field="origin" value="{{origin}}"
+                 placeholder="如：重庆" maxlength="20" bindinput="onInput" />
+        </view>
+        <view class="field">
+          <text class="field-label">目的地</text>
+          <input class="field-input" data-field="dest" value="{{dest}}"
+                 placeholder="如：广西（桂林、阳朔、南宁）" maxlength="40" bindinput="onInput" />
+        </view>
+        <view class="tip">多城市用顿号隔开，AI 会按顺路的方式串起来</view>
+      </view>
+
+      <view class="card">
+        <view class="card-title">📅 什么时候去</view>
+        <view class="field">
+          <text class="field-label">出发日期</text>
+          <picker mode="date" value="{{startDate}}" start="{{todayStr}}" bindchange="onStartDate">
+            <view class="field-picker">{{startDate}}</view>
+          </picker>
+        </view>
+        <view class="field">
+          <text class="field-label">返程日期</text>
+          <picker mode="date" value="{{endDate}}" start="{{startDate}}" bindchange="onEndDate">
+            <view class="field-picker">{{endDate}}</view>
+          </picker>
+        </view>
+        <view class="days-badge">共 {{daysText}}</view>
+      </view>
+
+      <view class="card">
+        <view class="card-title">👥 和谁去</view>
+        <view class="chips">
+          <view wx:for="{{partyOptions}}" wx:key="*this"
+                class="chip {{partyIdx === index ? 'chip-on' : ''}}"
+                data-field="party" data-idx="{{index}}" bindtap="onPickSingle">{{item}}</view>
+        </view>
+        <view class="field" style="margin-top: 20rpx;">
+          <text class="field-label">人数</text>
+          <input class="field-input" type="number" value="{{people}}"
+                 placeholder="2" bindblur="onPeopleChange" />
+        </view>
+      </view>
+
+      <view class="card">
+        <view class="card-title">💰 预算与节奏</view>
+        <view class="sub-label">预算档位</view>
+        <view class="chips">
+          <view wx:for="{{budgetOptions}}" wx:key="*this"
+                class="chip {{budgetIdx === index ? 'chip-on' : ''}}"
+                data-field="budget" data-idx="{{index}}" bindtap="onPickSingle">{{item}}</view>
+        </view>
+        <view class="sub-label">行程节奏</view>
+        <view class="chips">
+          <view wx:for="{{paceOptions}}" wx:key="*this"
+                class="chip {{paceIdx === index ? 'chip-on' : ''}}"
+                data-field="pace" data-idx="{{index}}" bindtap="onPickSingle">{{item}}</view>
+        </view>
+        <view class="sub-label">交通偏好</view>
+        <view class="chips">
+          <view wx:for="{{transportOptions}}" wx:key="*this"
+                class="chip {{transportIdx === index ? 'chip-on' : ''}}"
+                data-field="transport" data-idx="{{index}}" bindtap="onPickSingle">{{item}}</view>
+        </view>
+      </view>
+
+      <view class="card">
+        <view class="card-title">🎨 兴趣偏好（最多 5 个）</view>
+        <view class="chips">
+          <view wx:for="{{interests}}" wx:key="*this"
+                class="chip {{interestOn.indexOf(index) >= 0 ? 'chip-on' : ''}}"
+                data-idx="{{index}}" bindtap="onToggleInterest">{{item}}</view>
+        </view>
+      </view>
+
+      <view class="card">
+        <view class="card-title">📝 补充要求（选填）</view>
+        <textarea class="area" data-field="mustGo" value="{{mustGo}}"
+                  placeholder="一定要去的地方，如：漓江游船、遇龙河竹筏" maxlength="100"
+                  bindinput="onInput" auto-height />
+        <textarea class="area" data-field="extra" value="{{extra}}"
+                  placeholder="特殊要求，如：不想自驾、带老人少爬山、不吃辣" maxlength="100"
+                  bindinput="onInput" auto-height />
+      </view>
+
+      <view class="footer">
+        <button class="btn-primary btn-generate {{generating ? 'disabled' : ''}}"
+                bindtap="onSubmit" disabled="{{generating}}">
+          {{generating ? genTip : '✨ 生成我的攻略'}}
+        </button>
+        <view class="footer-tip">生成约需 40 秒，期间请不要离开页面</view>
+      </view>
+    </block>
+
+    <!-- ============ 第二步：确认大纲 ============ -->
+    <block wx:elif="{{step === 'outline'}}">
+      <view class="card">
+        <view class="card-title">🗺️ {{outlineTitle}}</view>
+        <view wx:if="{{outlineSummary}}" class="trip-summary">{{outlineSummary}}</view>
+        <view class="tip">看看路线合不合心意，满意再展开成逐天详情</view>
+      </view>
+
+      <view class="outline-list">
+        <view wx:for="{{outlineDays}}" wx:key="date" class="outline-item">
+          <view class="outline-day">第{{item.idx + 1}}天</view>
+          <view class="outline-body">
+            <view class="outline-date">{{item.date}}｜{{item.city}}</view>
+            <view class="outline-theme">{{item.theme}}</view>
+            <view wx:if="{{item.highlights}}" class="outline-hl">{{item.highlights}}</view>
+            <view class="outline-night">🏨 {{item.overnight}}</view>
+          </view>
+        </view>
+      </view>
+
+      <view class="footer">
+        <view class="btn-row">
+          <button class="btn-ghost" bindtap="onRegenOutline" disabled="{{generating}}">🔁 换个方案</button>
+          <button class="btn-ghost" bindtap="onBackToForm" disabled="{{generating}}">✏️ 改需求</button>
+        </view>
+        <button class="btn-primary btn-generate {{generating ? 'disabled' : ''}}"
+                bindtap="onConfirmOutline" disabled="{{generating}}">
+          {{generating ? genTip : '👍 就它了，生成详细行程'}}
+        </button>
+        <view class="footer-tip">展开约需 30 秒，会同时生成抢票闹钟和旅行建议</view>
+      </view>
+    </block>
+  </block>
+</view>

@@ -169,6 +169,41 @@ async function getDayTips(tripId, dayIndex, force) {
   return { code: 0, data: d };
 }
 
+// AI 制定新攻略（mock 版：返回一个假大纲，第二步直接假装成功）
+async function generateOutline(input) {
+  await delay(1200);
+  const days = [];
+  const start = new Date(input.startDate || Date.now());
+  const n = input.days || 3;
+  for (let i = 0; i < n; i++) {
+    const d = new Date(start.getTime() + i * 86400000);
+    const p = (x) => (x < 10 ? '0' + x : '' + x);
+    days.push({
+      d: `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`,
+      city: input.dest || '目的地',
+      t: i === 0 ? '抵达目的地，市区慢逛' : i === n - 1 ? '返程' : '深度游玩',
+      mv: [],
+      hl: ['主景区', '老街', '本地美食'],
+      ml: ['当地特色菜'],
+      ov: input.dest || '目的地',
+      n: '',
+    });
+  }
+  return {
+    title: `${input.dest || '目的地'}${n}日游`,
+    summary: 'mock 模式的示例行程',
+    startDate: input.startDate,
+    endDate: input.endDate,
+    days: n,
+    outline: { days },
+  };
+}
+
+async function buildPlan() {
+  await delay(1500);
+  return { tripId: 'mock-trip', itemCount: 12, alarmCount: 2, mock: true };
+}
+
 module.exports = {
   parseTravelPlan,
   // mock 模式没有真实地理编码，返回 null 让前端走降级
@@ -191,6 +226,8 @@ module.exports = {
   getSuggestions,
   refreshSuggestions,
   getDayTips,
+  generateOutline,
+  buildPlan,
   uploadDoc,
   downloadFromCloud,
 };

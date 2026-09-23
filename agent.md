@@ -49,6 +49,10 @@ node scripts/check-bindings.js
 校验 wxml 绑定的 handler 是否都在 js 里实现、config 引用是否齐全、语法是否正确（50 条断言）。
 **全绿才能说做完了。**
 
+> ⚠️ 本机已知假报错：`JS 语法 xxx.js` 这 6 条在本机会因为 `spawnSync` 报 **EBUSY**（沙箱不允许脚本再启 node 子进程）而恒失败，
+> 但这**不代表文件有语法错误**。验证方式：手动 `node --check miniprogram/<文件路径>` 通过即可。
+> wxml/js 事件对齐部分不受影响，正常可信。**
+
 ---
 
 ## 二、踩过的坑（血泪清单，按复发概率排序）
@@ -109,6 +113,19 @@ node scripts/check-bindings.js
 2. **`fireAt` 严格取自原文**（`9月21日15:15开抢` → `2026-09-21 15:15`），不许编。
 3. **模糊日期跳过**（`X日起`、`前后`、`待定`）；只有日期没时间的，默认 09:00 / 20:00 并在备注说明；**去重**。
 
+### ⏱️ 云函数 60 秒上限：生成类任务必须拆阶段
+
+一次请求让 LLM 吐出「8 天大纲 + 8 天逐天详情」实测要 **80 秒**，必然超时。
+`generatePlan` 因此拆成两次调用：`action=outline`（~28s）→ 前端确认 → `action=build`（~34s）。
+新增任何"让 LLM 写很多"的功能，先估算输出 token×速率，超 40 秒就要拆。
+
+### 🔔 闹钟不能让 LLM 算时间——只能让它提名
+
+LLM 算抢票日期必翻车。正确姿势：`plan.js` 里用**确定性规则**算 fireAt
+（12306 预售期 15 天含当日 → 乘车日 **减 14 天**；机票 -30 天；酒店出发前 7 天；门票 -7 天），
+LLM 只负责提名"哪些事情要抢"。算出已经过去的日期时，若行程还没出发，降级成
+"已进入抢票期"的近期提醒而不是丢掉。
+
 ### 🐛 其它小坑
 
 - **chooseAvatar / type="nickname" 是隐私接口**（对应隐私指引「微信昵称、头像」，官方映射表明确列出）。
@@ -137,7 +154,8 @@ travel-miniprogram/
 │  ├─ app.json                   页面 & tabBar 注册
 │  ├─ pages/
 │  │  ├─ index/      首页（行程列表、上传入口）
-│  │  ├─ upload/     上传行程文档
+│  │  ├─ upload/      上传行程文档
+│  │  ├─ planner/     AI 制定新攻略（填需求 → 确认大纲 → 生成入库）
 │  │  ├─ itinerary/  行程详情（按天时间轴、编辑/删除）
 │  │  ├─ tickets/    车票/闹钟管理
 │  │  ├─ mytrips/    我的行程（已结束 + 进行中，全量按时间顺序）
@@ -149,6 +167,7 @@ travel-miniprogram/
 │  └─ utils/         env.js / alarm.js / time.js / map.js / auth.js / request.js / trip.js
 ├─ cloudfunctions/               云函数（改完要部署！）
 │  ├─ parseTravelPlan/  文档解析主力：splitter.js(确定性切天) → llm.js(并行按天) → normalize.js(清洗) → cn-time.js
+│  ├─ generatePlan/     AI 制定新攻略：plan.js(大纲→逐天细化→闹钟→建议，两阶段) → llm.js / normalize.js / cn-time.js / geocode.js
 │  ├─ sendAlarm/        订阅消息推送（LAYOUTS 字段布局表、sendTestNow、pollAndPush）
 │  ├─ ticketAlarm/      闹钟 CRUD
 │  ├─ itinerary/        行程 CRUD

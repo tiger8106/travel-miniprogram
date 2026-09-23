@@ -166,6 +166,11 @@ Page({
 
   // ---------- 其他 ----------
 
+  // AI 制定新攻略：填需求 → 生成完整行程（含抢票闹钟）
+  onTapPlanner() {
+    wx.navigateTo({ url: '/pages/planner/planner' });
+  },
+
   onTapMyTrips() {
     wx.navigateTo({ url: '/pages/mytrips/mytrips' });
   },

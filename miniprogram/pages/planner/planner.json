@@ -1,0 +1,6 @@
+{
+  "navigationBarTitleText": "制定新攻略",
+  "usingComponents": {
+    "login-gate": "/components/login-gate/login-gate"
+  }
+}
