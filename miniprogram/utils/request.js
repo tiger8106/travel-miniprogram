@@ -2,6 +2,17 @@
 // 统一云函数调用封装
 
 /**
+ * 检测云函数执行超时（-504003 FUNCTIONS_TIME_LIMIT_EXCEEDED）
+ * 云开发新创建的云函数**默认超时只有 3 秒**，跑 LLM 必然超，
+ * 需要在控制台「云函数 → 配置 → 超时时间」改成 60 秒（每个函数单独配）
+ * @param {object} err 原始错误
+ */
+function isTimeout(err) {
+  const raw = `${(err && (err.errMsg || err.message)) || ''}${(err && err.errCode) || ''}`;
+  return /-504003|timed out|TIME_LIMIT/i.test(raw);
+}
+
+/**
  * 调用云函数
  * @param {string} name 云函数名
  * @param {object} data 参数
@@ -25,6 +36,11 @@ function callFn(name, data = {}) {
       },
       fail: (err) => {
         console.error(`[cloud] ${name} fail:`, err);
+        // 超时不丢原始 errCode，改成能直接照做的人话提示
+        if (isTimeout(err)) {
+          reject(new Error(`「${name}」执行超时：请在云开发控制台把该云函数的超时时间改成 60 秒（默认只有 3 秒）`));
+          return;
+        }
         reject(err);
       },
     });

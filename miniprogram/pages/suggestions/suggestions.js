@@ -151,6 +151,8 @@ Page({
       return;
     }
     this.setData({ refreshing: true });
+    // 重新生成要跑一次大模型，十几秒起步，先告诉用户别以为卡死了
+    wx.showLoading({ title: 'AI 重新生成中…', mask: true });
     try {
       await api.refreshSuggestions(tripId);
       // 手动刷新：清掉快照和自动尝试标记，下一轮 load 直接拿新数据
@@ -160,8 +162,10 @@ Page({
       await this.load();
       wx.showToast({ title: '已更新', icon: 'success' });
     } catch (err) {
-      wx.showToast({ title: err.message || '更新失败', icon: 'none' });
+      wx.hideLoading();
+      wx.showToast({ title: err.message || '更新失败', icon: 'none', duration: 3000 });
     } finally {
+      wx.hideLoading();
       this.setData({ refreshing: false });
     }
   },
