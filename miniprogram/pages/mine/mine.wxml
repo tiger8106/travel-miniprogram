@@ -12,18 +12,19 @@
       </view>
     </block>
     <block wx:else>
-      <!-- 可见的圆是固定尺寸 view；chooseAvatar 按钮透明覆盖，不受 button 默认样式影响 -->
-      <view class="avatar">
+      <!-- 头像：button 自己当圆形容器（官方 chooseAvatar 写法）。
+           注意 chooseAvatar 是隐私接口，未同意隐私指引时点击会被微信静默拦截 -->
+      <button class="avatar-btn" open-type="chooseAvatar" bindchooseavatar="onChooseAvatar">
         <image wx:if="{{profile.avatarUrl}}" src="{{profile.avatarUrl}}" class="avatar-img" mode="aspectFill" />
         <view wx:else class="avatar-placeholder">
           <text class="avatar-emoji">🐯</text>
         </view>
-        <button class="avatar-cover" open-type="chooseAvatar" bindchooseavatar="onChooseAvatar"></button>
-      </view>
+      </button>
       <view class="profile-info">
-        <!-- 昵称行内直接编辑（微信官方 nickname 输入框） -->
+        <!-- 昵称行内直接编辑（微信官方 nickname 输入框；真机键盘上方有「使用微信昵称」） -->
         <input type="nickname" class="nick-input" value="{{profile.nickname}}"
-               placeholder="点击填写昵称" bindblur="onNickBlur" bindconfirm="onNickBlur" />
+               placeholder="点击填写昵称" maxlength="30" confirm-type="done"
+               bindinput="onNickInput" bindblur="onNickBlur" bindconfirm="onNickBlur" />
         <view class="profile-sub">点头像换头像 · 点昵称改昵称</view>
       </view>
     </block>
@@ -56,4 +57,10 @@
       <text class="text-placeholder">›</text>
     </view>
   </view>
+
+  <!-- 用户隐私保护授权弹窗（点头像/填昵称被微信拦截时触发） -->
+  <privacy-popup show="{{showPrivacy}}" feature="设置头像和昵称"
+                 desc="头像和昵称仅用于在你的账号内展示个人资料，不会采集相册、聊天记录或任何其他信息，也不会对外分享。"
+                 denyTip="未同意则无法设置头像和昵称"
+                 bind:close="onClosePrivacy" />
 </view>

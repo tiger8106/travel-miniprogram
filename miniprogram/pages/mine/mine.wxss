@@ -18,30 +18,37 @@
   justify-content: center;
 }
 
-/* chooseAvatar 按钮：透明覆盖整个头像，点击区域即头像本身 */
-.avatar-cover {
-  position: absolute;
-  left: 0;
-  top: 0;
+/* chooseAvatar 按钮：button 自己就是圆形容器（官方写法）。
+   min/max 双重锁死尺寸，防止 button 默认样式把容器撑成椭圆 */
+.avatar-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 120rpx;
   height: 120rpx;
-  min-height: 0;
+  min-width: 120rpx;
+  max-width: 120rpx;
+  min-height: 120rpx;
+  max-height: 120rpx;
+  box-sizing: border-box;
   padding: 0;
-  margin: 0;
+  margin: 0 24rpx 0 0;
   border: none;
   border-radius: 50%;
-  background: transparent;
-  opacity: 0;
-  z-index: 2;
+  background: var(--primary-light);
+  overflow: hidden;
+  flex-shrink: 0;
+  line-height: 1;
 }
 
-.avatar-cover::after {
+.avatar-btn::after {
   border: none;
 }
 
 .avatar-img {
   width: 120rpx;
   height: 120rpx;
+  border-radius: 50%;
   display: block;
 }
 

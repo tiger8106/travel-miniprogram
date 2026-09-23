@@ -111,6 +111,14 @@ node scripts/check-bindings.js
 
 ### 🐛 其它小坑
 
+- **chooseAvatar / type="nickname" 是隐私接口**（对应隐私指引「微信昵称、头像」，官方映射表明确列出）。
+  开了 `__usePrivacyCheck__: true` 后，未授权时点击**静默无反应、无报错**——别以为是代码问题。
+  解法：后台隐私指引勾「微信昵称、头像」+ 页面挂 privacy-popup 并在 onShow 注册 `app._privacyHandler`。
+  （「头像昵称填写是用户主动填写、不算隐私接口」是错误认知，已踩过一次。）
+- **chooseAvatar 按钮不要用 opacity:0 透明覆盖层**，直接让 button 当圆形容器（官方写法），
+  并用 min/max-width/height 锁死尺寸——button 默认样式会把容器撑成椭圆。
+- **昵称 bindinput 实时同步后，blur 保存判定要跟「云端已存值」比**（refresh 时存 this._saved），
+  跟 data 比会因实时同步永远相等、永远不保存。
 - 组件向页面传值：`this.triggerEvent('xxx', {...})`，页面取 `e.detail.xxx`。
 - 小程序组件样式隔离：需要覆盖时显式设置 `styleIsolation`。
 - `require` 别漏：曾经 `api-real.js` 少了 `require('../config')` 导致 `config is not defined`，

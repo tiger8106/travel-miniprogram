@@ -11,16 +11,37 @@ Page({
     loggingIn: false,
     profile: {},       // { nickname, avatarUrl }
     saving: false,
+    showPrivacy: false, // 隐私保护授权弹窗（点头像/填昵称被微信拦截时触发）
   },
 
   onShow() {
-    this.refresh();
+    // 注册隐私授权处理器：chooseAvatar / nickname 是隐私接口，
+    // 未同意隐私指引时微信会静默拦截（点击无反应），由本页弹窗让用户确认
+    app._privacyHandler = () => this.setData({ showPrivacy: true });
+    // 保存中不刷新，避免头像上传时把预览覆盖回旧值
+    if (!this.data.saving) this.refresh();
+  },
+
+  onHide() {
+    if (app._privacyHandler) app._privacyHandler = null;
+  },
+
+  onUnload() {
+    if (app._privacyHandler) app._privacyHandler = null;
+  },
+
+  onClosePrivacy() {
+    this.setData({ showPrivacy: false });
   },
 
   refresh() {
+    const profile = auth.getProfile() || {};
+    // 记住云端已保存的值：昵称 bindinput 实时写入 data 后，
+    // blur 时要用「云端值」而不是 data 判断是否有改动，否则永远存不进去
+    this._saved = { nickname: profile.nickname || '', avatarUrl: profile.avatarUrl || '' };
     this.setData({
       loggedIn: !!auth.getOpenid(),
-      profile: auth.getProfile() || {},
+      profile,
     });
   },
 
@@ -66,19 +87,30 @@ Page({
   // ---------- 资料：点头像换头像 / 点昵称改昵称，改完自动保存 ----------
 
   onChooseAvatar(e) {
-    if (!this.data.loggedIn) return;
+    if (!this.data.loggedIn) {
+      wx.showToast({ title: '请先登录', icon: 'none' });
+      return;
+    }
     const temp = e.detail && e.detail.avatarUrl;
-    if (!temp) return;
+    if (!temp) {
+      wx.showToast({ title: '未获取到头像，请重试', icon: 'none' });
+      return;
+    }
     // 先用临时路径立刻预览，再上传云存储换永久地址
     this.setData({ 'profile.avatarUrl': temp });
     this.saveProfile({ avatarTemp: temp });
   },
 
+  onNickInput(e) {
+    // 实时同步输入值进 data，防止部分机型 blur 时拿不到最新值
+    this.setData({ 'profile.nickname': e.detail.value });
+  },
+
   onNickBlur(e) {
     if (!this.data.loggedIn) return;
     const nick = (e.detail && e.detail.value ? e.detail.value : '').trim().slice(0, 30);
-    const cur = (this.data.profile.nickname || '').trim();
-    if (!nick || nick === cur) return;
+    const saved = (this._saved && this._saved.nickname) || '';
+    if (!nick || nick === saved) return;
     this.setData({ 'profile.nickname': nick });
     this.saveProfile({ nickname: nick });
   },
@@ -98,6 +130,7 @@ Page({
       }
       const profile = await auth.updateProfile(patch);
       this.setData({ profile });
+      this._saved = { nickname: profile.nickname || '', avatarUrl: profile.avatarUrl || '' };
       wx.hideLoading();
       wx.showToast({ title: '已保存', icon: 'success' });
     } catch (err) {
