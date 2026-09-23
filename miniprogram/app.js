@@ -82,10 +82,13 @@ App({
       console.warn('[阿稳提示] CLOUD_ENV_ID 还是占位符,已临时使用默认环境。建议在 app.js 顶部填入真实环境 ID。');
     }
 
-    // 1. 初始化系统信息
+    // 1. 初始化系统信息（getSystemInfoSync 已废弃，改用拆分后的新 API）
     try {
-      const sys = wx.getSystemInfoSync();
-      this.globalData.systemInfo = sys;
+      this.globalData.systemInfo = Object.assign(
+        {},
+        typeof wx.getWindowInfo === 'function' ? wx.getWindowInfo() : {},
+        typeof wx.getAppBaseInfo === 'function' ? wx.getAppBaseInfo() : {}
+      );
     } catch (e) {
       console.error('获取系统信息失败', e);
     }
