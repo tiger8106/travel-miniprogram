@@ -2,6 +2,7 @@
 const auth = require('../../utils/auth');
 const { uploadFile } = require('../../utils/request');
 const homeCache = require('../../utils/homecache');
+const env = require('../../utils/env');
 
 const app = getApp();
 
@@ -155,9 +156,21 @@ Page({
   },
 
   onTapAbout() {
+    // 连点 5 次「关于」→ 临时解锁开发者功能（体验版真机自查用，24 小时后自动失效）
+    const now = Date.now();
+    if (!this._aboutTapTs || now - this._aboutTapTs > 1500) this._aboutTaps = 0;
+    this._aboutTapTs = now;
+    this._aboutTaps = (this._aboutTaps || 0) + 1;
+    if (this._aboutTaps >= 5) {
+      this._aboutTaps = 0;
+      const hours = env.unlockDevTools();
+      wx.showToast({ title: `开发者功能已开启 ${hours} 小时`, icon: 'none' });
+      return;
+    }
+
     wx.showModal({
       title: '关于',
-      content: '微信旅游小程序 v1.0\n基于微信云开发\n阿稳 🧰 出品',
+      content: `微信旅游小程序 v1.0\n基于微信云开发\n阿稳 🧰 出品\n\n运行环境：${env.envLabel()}`,
       showCancel: false,
     });
   },
