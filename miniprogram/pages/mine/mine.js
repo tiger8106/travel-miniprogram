@@ -19,8 +19,27 @@ Page({
     // 注册隐私授权处理器：chooseAvatar / nickname 是隐私接口，
     // 未同意隐私指引时微信会静默拦截（点击无反应），由本页弹窗让用户确认
     app._privacyHandler = () => this.setData({ showPrivacy: true });
+    // 隐私诊断：后台指引审核生效情况打日志，进页需要授权就直接弹，不等点击被拦
+    this.checkPrivacy();
     // 保存中不刷新，避免头像上传时把预览覆盖回旧值
     if (!this.data.saving) this.refresh();
+  },
+
+  // 后台《用户隐私保护指引》改完要等微信审核通过才生效（不是保存即生效），
+  // 未生效时 chooseAvatar / nickname 照样报 "api scope is not declared"。
+  // 这里用官方诊断接口看当前状态，需要授权就主动弹窗，用户先同意再点头像就不会被拦
+  checkPrivacy() {
+    if (!wx.getPrivacySetting) return; // 低版本基础库没有此接口，忽略
+    wx.getPrivacySetting({
+      success: (res) => {
+        console.log('[隐私诊断] 需要授权:', res.needAuthorization,
+          '| 指引名称:', res.privacyContractName || '（空 = 后台指引还没生效）');
+        if (res.needAuthorization && !this.data.showPrivacy) {
+          this.setData({ showPrivacy: true });
+        }
+      },
+      fail: (err) => console.warn('[隐私诊断] 获取隐私设置失败', err),
+    });
   },
 
   onHide() {
