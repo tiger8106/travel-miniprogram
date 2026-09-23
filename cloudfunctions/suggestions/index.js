@@ -274,12 +274,21 @@ function getLLMConfig() {
   return { baseURL, model, apiKey: process.env.LLM_API_KEY || '' };
 }
 
+// 推理型模型（会先输出一大段思考链）单次请求可达 100s+，
+// 云函数 60s 上限必然超时 —— 这类模型必须显式关掉思考
+const REASONING_MODEL = /qwen3|qwq|deepseek-r1|reasoner|o1|o3|m1|thinking/i;
+
 function callLLMDirect(prompt) {
   return new Promise((resolve, reject) => {
     const { baseURL, model, apiKey } = getLLMConfig();
     if (!apiKey) return reject(new Error('云函数环境变量 LLM_API_KEY 未配置（需要在 suggestions 函数也配置一份）'));
+    // 没配 provider / baseURL 时会默认打到 api.openai.com，
+    // 国内云函数连不上，会一直卡到超时 —— 直接拒绝并给明确提示
+    if (!process.env.LLM_BASE_URL && !process.env.LLM_PROVIDER) {
+      return reject(new Error('未配置 LLM_PROVIDER（或 LLM_BASE_URL），当前默认打到 api.openai.com，云函数连不上会一直卡到超时。请在 suggestions 环境变量里加 LLM_PROVIDER=qwen'));
+    }
 
-    const body = JSON.stringify({
+    const bodyObj = {
       model,
       messages: [
         { role: 'system', content: '你是旅行建议助手，根据用户提供的行程生成结构化建议。只输出严格 JSON，禁止 markdown 代码块和任何解释文字。' },
@@ -287,7 +296,13 @@ function callLLMDirect(prompt) {
       ],
       temperature: 0.3,
       max_tokens: 2000,
-    });
+    };
+    if (REASONING_MODEL.test(model) && process.env.LLM_ENABLE_THINKING !== '1') {
+      bodyObj.enable_thinking = false;
+    }
+    const body = JSON.stringify(bodyObj);
+    const started = Date.now();
+    console.log('[suggestions] LLM 请求开始', { baseURL, model, thinking: !!bodyObj.enable_thinking, promptChars: prompt.length });
     const u = new URL(`${baseURL}/chat/completions`);
     const isHttps = u.protocol === 'https:';
     const req = (isHttps ? https : http).request({
@@ -304,6 +319,7 @@ function callLLMDirect(prompt) {
       let data = '';
       res.on('data', (c) => data += c);
       res.on('end', () => {
+        console.log('[suggestions] LLM 返回', res.statusCode, Date.now() - started, 'ms');
         if (res.statusCode >= 200 && res.statusCode < 300) {
           try {
             const obj = JSON.parse(data);
@@ -318,7 +334,10 @@ function callLLMDirect(prompt) {
         }
       });
     });
-    req.setTimeout(40 * 1000, () => req.destroy(new Error('LLM 请求超时')));
+    // 云函数上限 60s，这里留 50s：超时信息带上 model/baseURL，一眼看出连的是谁
+    req.setTimeout(50 * 1000, () => req.destroy(
+      new Error(`LLM 请求超时（50s）：model=${model} baseURL=${baseURL}。若模型是推理型（qwen3.5-plus 等），请换成 qwen3.8-flash`)
+    ));
     req.on('error', reject);
     req.write(body);
     req.end();
