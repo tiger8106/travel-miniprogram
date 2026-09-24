@@ -31,11 +31,16 @@ function httpGet(url) {
 
 /**
  * 单个地点 → { lon, lat } | null
+ * @param {string} address 地点名
+ * @param {string} [city] 大地名（省/市/县），帮助消歧：全国同名地点太多
+ *   （"龙脊梯田""西山""人民公园"），不带城市可能定位到别的省去。
+ *   只加 city 参数做优先级提示，不加 citylimit——跨城交通（车站/机场在邻市）不会被误杀。
  */
-async function geocodeOne(address) {
+async function geocodeOne(address, city) {
   if (!AMAP_KEY || !address) return null;
   try {
-    const url = `${GEOCODE_URL}?address=${encodeURIComponent(address)}&key=${AMAP_KEY}&output=json`;
+    let url = `${GEOCODE_URL}?address=${encodeURIComponent(address)}&key=${AMAP_KEY}&output=json`;
+    if (city) url += `&city=${encodeURIComponent(city)}`;
     const resp = await httpGet(url);
     if (resp.status === '1' && resp.geocodes && resp.geocodes.length) {
       const loc = resp.geocodes[0].location; // "lon,lat"
@@ -51,8 +56,10 @@ async function geocodeOne(address) {
 
 /**
  * 批量地理编码（并发），返回 Map: address -> {lon, lat}
+ * @param {Array} addresses 地点名列表
+ * @param {Function} [cityOf] address -> 大地名（省/市/县），可为空
  */
-async function geocodeBatch(addresses) {
+async function geocodeBatch(addresses, cityOf) {
   const result = new Map();
   if (!AMAP_KEY) {
     console.log('[geocode] 未配置 AMAP_KEY，跳过地理编码');
@@ -66,7 +73,7 @@ async function geocodeBatch(addresses) {
   const BATCH = 10;
   for (let i = 0; i < unique.length; i += BATCH) {
     const batch = unique.slice(i, i + BATCH);
-    const coords = await Promise.all(batch.map(geocodeOne));
+    const coords = await Promise.all(batch.map((addr) => geocodeOne(addr, cityOf ? cityOf(addr) : '')));
     batch.forEach((addr, j) => {
       if (coords[j]) result.set(addr, coords[j]);
     });

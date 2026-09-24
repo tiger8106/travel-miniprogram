@@ -100,6 +100,34 @@ ok(meta2 === '20:10 去崇善米粉吃第一顿桂林米粉，点卤菜粉/锅�
 const meta3 = stripMeta('注：作为AI我无法确认班次');
 ok(meta3.length > 0, '整段都是元叙述时保留原文（不把行程清成空白）', meta3);
 
+// 5c. 目的地清单解析：用户点名的地点一个都不能丢（"龙脊梯田消失"事件的防线）
+const dl1 = P.parseDestList('桂林、龙脊梯田、阳朔、明仕田园和德天瀑布');
+ok(dl1.mustVisit.join(',') === '桂林,龙脊梯田,阳朔,明仕田园,德天瀑布',
+  '顿号 + "和"都能拆开', dl1.mustVisit.join(','));
+const dl2 = P.parseDestList('广西（桂林、阳朔、南宁）');
+ok(dl2.destList.includes('广西') && !dl2.mustVisit.includes('广西'),
+  '省份只是范围提示，不算必到点', dl2.mustVisit.join(','));
+ok(dl2.mustVisit.join(',') === '桂林,阳朔,南宁', '括号里的城市全部进必到清单', dl2.mustVisit.join(','));
+const dl3 = P.parseDestList('北京颐和园');
+ok(dl3.mustVisit.length === 1 && dl3.mustVisit[0] === '北京颐和园',
+  '"颐和园"这类含"和"的地名不被切碎', dl3.mustVisit.join(','));
+const dl4 = P.parseDestList('四川省、成都');
+ok(!dl4.mustVisit.includes('四川省') && dl4.mustVisit.includes('成都'),
+  '"四川省"被排除、城市保留', dl4.mustVisit.join(','));
+
+// 5d. 大纲漏点检测：点名地点没出现在大纲里要能查出来
+const fakeP = { mustVisit: ['桂林', '龙脊梯田'] };
+const outlineMiss = {
+  title: 't', summary: '', nights: [],
+  days: [{ date: '2026-10-01', city: '桂林', theme: '象鼻山', moves: [], highlights: ['象鼻山'], meals: [], overnight: '桂林', note: '' }],
+};
+ok(P.missingMustVisit(fakeP, outlineMiss).join('') === '龙脊梯田',
+  '漏掉龙脊梯田能被检测出来', JSON.stringify(P.missingMustVisit(fakeP, outlineMiss)));
+const outlineHit = Object.assign({}, outlineMiss, {
+  days: outlineMiss.days.concat([{ date: '2026-10-02', city: '龙胜', theme: '龙脊梯田一日', moves: [], highlights: ['龙脊梯田'], meals: [], overnight: '龙脊', note: '' }]),
+});
+ok(P.missingMustVisit(fakeP, outlineHit).length === 0, '排进去了就不再报缺');
+
 // 6. 失败天重试链路（不调真实 LLM：把 llm.chatWithRetry 换成假实现）
 //
 //    背景：之前某天细化失败会被直接排除在续跑队列外，partial=false 就结束了，
@@ -186,6 +214,13 @@ return (async () => {
   });
   ok((Date.now() - t0) / 1000 < 60, `阶段一耗时 ${outlineSec}s < 云函数 60s 上限`);
 
+  // 点名地点必须全部进大纲（Tiger 实锤：龙脊梯田曾被 LLM 默默丢掉）
+  const mustVisit = P.normalizeInput(INPUT).mustVisit;
+  const outlineJson = JSON.stringify(phase1.outline);
+  mustVisit.forEach((name) => {
+    ok(outlineJson.includes(name), `大纲包含点名地点「${name}」`);
+  });
+
   // 阶段二：模拟云端续跑——一次跑不完（partial）就接着调，直到全部生成
   const t1 = Date.now();
   let plan = null;
@@ -229,6 +264,11 @@ return (async () => {
   ok(noTime.length === 0, '没有缺失时间的条目', noTime.length);
   ok([...byDay.keys()].length === plan.meta.days, `每一天都有内容（${plan.meta.days} 天）`, [...byDay.keys()].length);
 
+  // 详细行程里得真的去了龙脊梯田（不只是一句带过——这是 Tiger 点名要防的回归）
+  const hitLongji = plan.items.some((it) =>
+    /龙脊/.test(String(it.activity || '') + (it.startLocation || '') + (it.endLocation || '')));
+  ok(hitLongji, '详细行程包含「龙脊梯田」相关安排');
+
   // 时间连续性抽检：同一天内相邻条目时间不得倒退超过 0 分钟（允许间隔，但不允许倒退）
   let backward = 0;
   [...byDay.keys()].forEach((d) => {
@@ -247,7 +287,9 @@ return (async () => {
     if (a.note) console.log(`      └ ${a.note.slice(0, 80)}`);
   });
   const alarms = plan.alarms || [];
-  ok(alarms.length >= 5, '至少 5 条待办（车票/门票/酒店/准备）', alarms.length);
+  // 临近出发场景下，已过开票日的抢票闹钟会被规则收敛掉一部分，
+  // 数量随 LLM 提名波动（实测 4~7 条）——质量门槛看下面的类型覆盖
+  ok(alarms.length >= 4, '至少 4 条待办（车票/门票/酒店/准备）', alarms.length);
   const goA = alarms.find((a) => /去程/.test(a.title));
   ok(!!goA, '存在去程抢票闹钟');
   ok(alarms.every((a) => a.fireAt > Date.now()), '所有闹钟都在未来');

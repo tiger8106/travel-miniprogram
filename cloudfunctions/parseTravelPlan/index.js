@@ -33,6 +33,23 @@ function validDateStr(s) {
 // 否则会出现 15:15 → 23:15 这类 +8 小时错位、凌晨时间日期差一天等问题
 const { parseCnTime, tsToDateStr, tsToCnDateTimeStr } = require('./cn-time');
 
+// 省级地名（高德 city 参数只认城市/区县，塞省份没用）
+const PROVINCE_NAMES = new Set([
+  '河北', '山西', '辽宁', '吉林', '黑龙江', '江苏', '浙江', '安徽', '福建', '江西',
+  '山东', '河南', '湖北', '湖南', '广东', '海南', '四川', '贵州', '云南', '陕西',
+  '甘肃', '青海', '台湾', '内蒙古', '广西', '西藏', '宁夏', '新疆',
+]);
+
+/**
+ * 从"广西 桂林 阳朔"这类 region 里挑出最适合给高德 city 参数的那个词：
+ * 第一个不是省份的词。挑不到就返回空（让高德自己猜，总比塞个错参数强）。
+ */
+function pickCity(region) {
+  const tokens = String(region || '').split(/[\s,，、]+/).map((s) => s.trim()).filter(Boolean);
+  const city = tokens.find((t) => !t.endsWith('省') && !PROVINCE_NAMES.has(t));
+  return city || '';
+}
+
 exports.main = async (event, context) => {
   const wxContext = cloud.getWXContext();
   const openid = wxContext.OPENID;
@@ -44,7 +61,9 @@ exports.main = async (event, context) => {
     const location = (event.location || '').trim();
     if (!location) return { code: -1, msg: '缺少 location' };
     try {
-      const coord = await geocodeOne(location);
+      // event.city：前端传来的大地名（可能是"广西 桂林"整串）——挑出城市词再查，
+      // 帮高德消歧，避免定位到同名地点
+      const coord = await geocodeOne(location, pickCity(event.city) || String(event.city || '').trim());
       if (!coord) return { code: -1, msg: '未配置 AMAP_KEY 或未查到该地点' };
       return { code: 0, data: coord };
     } catch (e) {
@@ -93,14 +112,18 @@ exports.main = async (event, context) => {
     console.log('[parseTravelPlan] 清洗后 items 数量:', items.length);
 
     // 4.1 地理编码：把地点名转成经纬度（供 wx.openLocation 打开微信原生地图）
-    // 未配置 AMAP_KEY 时自动跳过，前端走“复制路线”降级
+    // 未配置 AMAP_KEY 时自动跳过，前端走“复制路线”降级。
+    // 带上 LLM 提取的大地名（region）消歧：全国同名地点太多，
+    // 不带城市可能把"龙脊梯田""西山"定位到别的省去。
+    const region = String(structured.region || '').trim();
+    const cityHint = pickCity(region);
     try {
       const addrSet = new Set();
       items.forEach((it) => {
         if (it.startLocation) addrSet.add(it.startLocation);
         if (it.endLocation) addrSet.add(it.endLocation);
       });
-      const coordMap = await geocodeBatch([...addrSet]);
+      const coordMap = await geocodeBatch([...addrSet], cityHint ? () => cityHint : undefined);
       if (coordMap.size) {
         items.forEach((it) => {
           const s = coordMap.get(it.startLocation);
@@ -176,6 +199,7 @@ exports.main = async (event, context) => {
       summary: structured.summary || '',
       startDate,
       endDate,
+      region,               // 大地名（省 市）：前端导航实时定位时消歧用，不做展示
       sourceFileID: fileID,
       items,
       createdAt: now,

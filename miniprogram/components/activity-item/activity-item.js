@@ -43,6 +43,11 @@ Component({
       type: Boolean,
       value: false,
     },
+    // 大地名（"广西 桂林"）：导航缺坐标实时定位时给高德消歧，不做展示
+    region: {
+      type: String,
+      value: '',
+    },
   },
 
   data: {
@@ -76,6 +81,7 @@ Component({
         title: `${item.startLocation} → ${item.endLocation}`,
         endLat: item.endLat,
         endLon: item.endLon,
+        region: this.data.region || '',
       });
     },
 

@@ -408,7 +408,7 @@ Page({
     });
 
     list.sort((a, b) => a.st - b.st || a.di - b.di || a.seq - b.seq);
-    return list.slice(0, n).map((x) => this.decorateNowItem(x, now));
+    return list.slice(0, n).map((x) => this.decorateNowItem(x, now, trip.region || ''));
   },
 
   // "14:30" 落到某一天上 → 时间戳；解析不了返回 null
@@ -420,7 +420,7 @@ Page({
     return d.getTime();
   },
 
-  decorateNowItem(x, now) {
+  decorateNowItem(x, now, region) {
     const it = x.it;
     const s = it.startLocation || '';
     const e = it.endLocation || '';
@@ -445,6 +445,7 @@ Page({
       transportType: it.transportType || 'car',
       endLat: it.endLat || 0,
       endLon: it.endLon || 0,
+      region: region || '',   // 大地名：导航缺坐标实时定位时给高德消歧
       ongoing,
       statusText: ongoing ? '进行中' : this.relativeStatus(x.st, now),
       dateText: this.dateTextOf(day, now),   // 「今天 10-02 周四」这类完整日期
@@ -492,6 +493,7 @@ Page({
       mode: item.transportType,
       endLat: item.endLat,
       endLon: item.endLon,
+      region: item.region || '',
     });
   },
 
@@ -571,6 +573,10 @@ Page({
 
   onTapUpload() {
     wx.navigateTo({ url: '/pages/upload/upload' });
+  },
+
+  onTapPlanner() {
+    wx.navigateTo({ url: '/pages/planner/planner' });
   },
 
   onTapTicket() {

@@ -11,8 +11,9 @@
     <text class="empty-icon">🗺️</text>
     <view>{{totalTrips ? '进行中的行程都结束了' : '还没有行程，先上传一份攻略吧'}}</view>
     <view class="empty-actions">
-      <button wx:if="{{totalTrips}}" class="btn-ghost" bindtap="onTapMyTrips">🗂️ 查看我的行程（{{totalTrips}}）</button>
-      <button class="btn-primary" bindtap="onTapUpload" style="margin-top: 24rpx;">上传攻略文档</button>
+      <button wx:if="{{totalTrips}}" class="btn-ghost" bindtap="onTapMyTrips">🗂️ 我的行程</button>
+      <button class="btn-primary" bindtap="onTapUpload" style="margin-top: 24rpx;">📤 上传攻略</button>
+      <button class="btn-primary" bindtap="onTapPlanner" style="margin-top: 24rpx;">✨ 制定攻略</button>
     </view>
   </view>
 

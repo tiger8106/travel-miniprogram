@@ -293,7 +293,7 @@ ${booking.join('\n').slice(0, 4000)}`,
         { role: 'system', content: SYS_PROMPT },
         {
           role: 'user',
-          content: `以下是一份旅游攻略，提取旅行建议为 JSON 对象：{"weather":"天气与穿着","gear":"装备清单","food":"必吃推荐","tips":"注意事项","transport":"交通贴士","budget":"预算参考"}。只输出对象。\n\n${rawText.slice(0, 3000)}`,
+          content: `以下是一份旅游攻略，提取旅行建议为 JSON 对象：{"weather":"天气与穿着","gear":"装备清单","food":"必吃推荐","tips":"注意事项","transport":"交通贴士","budget":"预算参考","region":"本攻略的主要目的地，格式「省 市」（如 广西 桂林）；涉及多个主要城市时空格分隔、最多 3 个，只写城市级，不要写景点名"}。只输出对象。\n\n${rawText.slice(0, 3000)}`,
         },
       ],
       800
@@ -327,6 +327,10 @@ ${booking.join('\n').slice(0, 4000)}`,
       suggestions = r.suggestions && typeof r.suggestions === 'object' ? r.suggestions : {};
     }
   }
+
+  // region 是给地图定位消歧用的大地名（如"广西 桂林"），不是旅行建议，单独拎出来
+  const region = String(suggestions.region || '').trim();
+  delete suggestions.region;
 
   // 全部天都失败 → 交给上层走旧逻辑
   if (failedDays === days.length) {
@@ -427,6 +431,7 @@ ${booking.join('\n').slice(0, 4000)}`,
     summary,
     startDate,
     endDate,
+    region,
     items,
     alarms,
     suggestions,
@@ -480,6 +485,7 @@ ${rawText.slice(0, 8000)}
   "summary": "行程总览 1-2 句",
   "startDate": "YYYY-MM-DD",
   "endDate": "YYYY-MM-DD",
+  "region": "本攻略的主要目的地，格式「省 市」（如 广西 桂林）；多个主要城市空格分隔、最多 3 个，只写城市级，不要写景点名",
   "items": [
     { "dayIndex": 0, "startTime": "HH:mm", "endTime": "HH:mm", "activity": "行程描述",
       "category": "sight/food/hotel/transport/ticket/other",

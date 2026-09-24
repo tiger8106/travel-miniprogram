@@ -10,8 +10,9 @@ async function parseTravelPlan(fileID) {
 }
 
 // 实时地理编码：地点名 → { lon, lat }
-async function geocode(location) {
-  return callFn('parseTravelPlan', { action: 'geocode', location });
+// city：可选的大地名（省/市/县），帮高德消歧，避免定位到同名的其他地点
+async function geocode(location, city) {
+  return callFn('parseTravelPlan', { action: 'geocode', location, city: city || '' });
 }
 
 // 行程 CRUD

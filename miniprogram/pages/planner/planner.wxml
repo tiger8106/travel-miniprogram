@@ -5,6 +5,8 @@
   <block wx:else>
     <!-- ============ 第一步：填需求 ============ -->
     <block wx:if="{{step === 'form'}}">
+      <!-- 生成中整表锁定 + 置灰：防止等待期间误改，结果和自己填的对不上 -->
+      <view class="{{generating ? 'form-lock' : ''}}">
       <view class="hero">
         <view class="hero-title">✨ AI 帮你制定攻略</view>
         <view class="hero-sub">回答几个关键问题，生成带时间、地点、导航和抢票闹钟的完整行程</view>
@@ -15,12 +17,12 @@
         <view class="field">
           <text class="field-label">出发城市</text>
           <input class="field-input" data-field="origin" value="{{origin}}"
-                 placeholder="如：重庆" maxlength="20" bindinput="onInput" />
+                 placeholder="如：重庆" maxlength="20" bindinput="onInput" disabled="{{generating}}" />
         </view>
         <view class="field">
           <text class="field-label">目的地</text>
           <input class="field-input" data-field="dest" value="{{dest}}"
-                 placeholder="如：广西（桂林、阳朔、南宁）" maxlength="40" bindinput="onInput" />
+                 placeholder="如：广西（桂林、阳朔、南宁）" maxlength="40" bindinput="onInput" disabled="{{generating}}" />
         </view>
         <view class="tip">多城市用顿号隔开，AI 会按顺路的方式串起来</view>
       </view>
@@ -31,10 +33,10 @@
           <text class="dt-label">去程时间</text>
           <view class="dt-pickers">
             <picker class="dt-date" mode="multiSelector" range="{{startRange}}" value="{{startVal}}"
-                    bindcolumnchange="onStartDateCol" bindchange="onStartDate">
+                    bindcolumnchange="onStartDateCol" bindchange="onStartDate" disabled="{{generating}}">
               <view class="dt-val">{{startDate}}</view>
             </picker>
-            <picker class="dt-time" mode="time" value="{{goTime}}" bindchange="onGoTime">
+            <picker class="dt-time" mode="time" value="{{goTime}}" bindchange="onGoTime" disabled="{{generating}}">
               <view class="dt-val">{{goTime}}</view>
             </picker>
           </view>
@@ -43,10 +45,10 @@
           <text class="dt-label">返程时间</text>
           <view class="dt-pickers">
             <picker class="dt-date" mode="multiSelector" range="{{endRange}}" value="{{endVal}}"
-                    bindcolumnchange="onEndDateCol" bindchange="onEndDate">
+                    bindcolumnchange="onEndDateCol" bindchange="onEndDate" disabled="{{generating}}">
               <view class="dt-val">{{endDate}}</view>
             </picker>
-            <picker class="dt-time" mode="time" value="{{backTime}}" bindchange="onBackTime">
+            <picker class="dt-time" mode="time" value="{{backTime}}" bindchange="onBackTime" disabled="{{generating}}">
               <view class="dt-val">{{backTime}}</view>
             </picker>
           </view>
@@ -65,7 +67,7 @@
         <view class="field" style="margin-top: 20rpx;">
           <text class="field-label">人数</text>
           <input class="field-input" type="number" value="{{people}}"
-                 placeholder="2" bindblur="onPeopleChange" />
+                 placeholder="2" bindblur="onPeopleChange" disabled="{{generating}}" />
         </view>
       </view>
 
@@ -102,7 +104,7 @@
         </view>
         <view class="custom-row">
           <input class="custom-input" value="{{customText}}" placeholder="自定义偏好，如：滑雪、看展、赶海"
-                 maxlength="20" bindinput="onCustomInput" bindconfirm="onAddCustom" />
+                 maxlength="20" bindinput="onCustomInput" bindconfirm="onAddCustom" disabled="{{generating}}" />
           <view class="custom-add {{customText ? '' : 'custom-add-off'}}" bindtap="onAddCustom">＋ 添加</view>
         </view>
       </view>
@@ -111,10 +113,11 @@
         <view class="card-title">📝 补充要求（选填）</view>
         <textarea class="area" data-field="mustGo" value="{{mustGo}}"
                   placeholder="一定要去的地方，如：漓江游船、遇龙河竹筏" maxlength="100"
-                  bindinput="onInput" auto-height />
+                  bindinput="onInput" auto-height disabled="{{generating}}" />
         <textarea class="area" data-field="extra" value="{{extra}}"
                   placeholder="特殊要求，如：不想自驾、带老人少爬山、不吃辣" maxlength="100"
-                  bindinput="onInput" auto-height />
+                  bindinput="onInput" auto-height disabled="{{generating}}" />
+      </view>
       </view>
 
       <view class="footer">
@@ -134,16 +137,19 @@
         <view class="tip">长按 ☰ 拖动调整天数顺序（日期自动重排），点 ✏️ 修改当天内容</view>
       </view>
 
-      <!-- 拖动期间 scroll-y 关掉，避免手指一动就把页面滚走 -->
-      <scroll-view scroll-y="{{!dragging}}" class="day-scroll" style="height:{{listH}}px">
+      <!-- 拖动期间 scroll-y 关掉，避免手指一动就把页面滚走；
+           自动滚动用 manualOffset 手动偏移模拟，松手时再同步回真实 scroll-top -->
+      <scroll-view scroll-y="{{!dragging}}" scroll-top="{{scrollTop}}" bindscroll="onDayScroll"
+                   class="day-scroll" style="height:{{listH}}px">
         <view class="day-list" style="height:{{areaH}}px">
           <view wx:for="{{outlineDays}}" wx:key="uid"
                 class="di {{dragging && dragIdx === index ? 'di-drag' : ''}}"
-                style="top:{{index * itemH}}px;height:{{itemH}}px;transform:translateY({{dragging && dragIdx === index ? dragShift : 0}}px)"
+                style="top:{{index * itemH - manualOffset}}px;height:{{itemH}}px;transform:translateY({{dragging && dragIdx === index ? dragShift : 0}}px){{dragging && dragIdx === index ? ' scale(0.96)' : ''}}"
                 data-idx="{{index}}"
                 bindlongpress="onDayLongPress"
                 bindtouchmove="onDayTouchMove"
-                bindtouchend="onDayTouchEnd">
+                bindtouchend="onDayTouchEnd"
+                bindtouchcancel="onDayTouchEnd">
             <view class="outline-item">
               <view class="oi-head">
                 <text class="oi-grip">☰</text>
@@ -161,8 +167,8 @@
             </view>
           </view>
 
-          <!-- 拖动参考线：松手后卡片就落到这条线所在的位置 -->
-          <view wx:if="{{dragging}}" class="drag-guide" style="top:{{guideTop}}px"></view>
+          <!-- 拖动参考线：贴在拖动卡中心最近的缝隙上，松手后卡片就落到这条线所在的位置 -->
+          <view wx:if="{{dragging}}" class="drag-guide" style="top:{{guideTop - manualOffset}}px"></view>
         </view>
       </scroll-view>
 
@@ -173,7 +179,7 @@
         </view>
         <button class="btn-primary btn-generate {{generating ? 'disabled' : ''}}"
                 bindtap="onConfirmOutline" disabled="{{generating}}">
-          {{generating ? genTip : '👍 就它了，生成详细行程'}}
+          {{generating ? genTip : '📄 生成详细文档'}}
         </button>
         <view class="footer-tip">展开约需 30 秒，会同时生成抢票/预订提醒和旅行建议</view>
       </view>

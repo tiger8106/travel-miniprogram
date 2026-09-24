@@ -57,6 +57,39 @@ function isHolidayRange(start, end) {
   return inNation || inLabor || inSpring;
 }
 
+// 省级地名：用户写"广西（桂林、阳朔）"时，"广西"只是范围提示，不算必到点
+// （北京/上海/天津/重庆/香港/澳门本身是城市级目的地，不在此列）
+const PROVINCE_NAMES = new Set([
+  '河北', '山西', '辽宁', '吉林', '黑龙江', '江苏', '浙江', '安徽', '福建', '江西',
+  '山东', '河南', '湖北', '湖南', '广东', '海南', '四川', '贵州', '云南', '陕西',
+  '甘肃', '青海', '台湾', '内蒙古', '广西', '西藏', '宁夏', '新疆',
+]);
+
+/**
+ * 目的地清单解析："广西（桂林、龙脊梯田、阳朔、明仕田园和德天瀑布）"
+ *   → destList:  ['广西','桂林','龙脊梯田','阳朔','明仕田园','德天瀑布']（进 prompt）
+ *   → mustVisit: 去掉省份后的清单（大纲必须逐个覆盖，漏了代码会发起修订）
+ * "和"也当分隔符（用户习惯连写）；但像"颐和园"这种切成单字碎片的保留原词，不误伤。
+ */
+function parseDestList(dest) {
+  const cleaned = String(dest || '').replace(/[（）()【】[\]]/g, '、');
+  const raw = cleaned.split(/[、，,；;\/|\s]+/).map((s) => s.trim()).filter(Boolean);
+  const list = [];
+  raw.forEach((tok) => {
+    if (tok.includes('和')) {
+      const parts = tok.split('和').map((x) => x.trim());
+      if (parts.every((x) => x.length >= 2)) { list.push(...parts); return; }
+    }
+    list.push(tok);
+  });
+  const uniq = [...new Set(list)];
+  return {
+    destList: uniq,
+    mustVisit: uniq.filter((t) =>
+      t.length >= 2 && !t.endsWith('省') && !PROVINCE_NAMES.has(t)),
+  };
+}
+
 function normalizeInput(input) {
   const i = input || {};
   const startDate = validDate(i.startDate) ? i.startDate : tsToDateStr(Date.now());
@@ -74,10 +107,14 @@ function normalizeInput(input) {
   const transport = String(i.transport || '高铁优先');
   // 分钟级的去/返程时刻：用户指定后，首末两天的大交通必须落在这个时刻上
   const validTime = (s) => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(s || '').trim()) ? String(s).trim() : '';
+  const dest = String(i.dest || i.destCity || '').trim();
+  const { destList, mustVisit } = parseDestList(dest);
 
   return {
     origin: String(i.origin || i.fromCity || '').trim(),
-    dest: String(i.dest || i.destCity || '').trim(),
+    dest,
+    destList,      // 目的地清单（含省份提示词），进 prompt 让 LLM 逐个安排
+    mustVisit,     // 用户点名必到的地点（去省份），大纲漏了会触发修订
     startDate,
     endDate: end,
     days,
@@ -103,6 +140,7 @@ function profileText(p) {
   bits.push(`预算${p.budget}`);
   bits.push(`节奏${p.pace}`);
   bits.push(p.transport);
+  if (p.destList && p.destList.length > 1) bits.push('目的地清单：' + p.destList.join('、'));
   if (p.interests.length) bits.push('偏好：' + p.interests.join('、'));
   if (p.mustGo) bits.push('必去：' + p.mustGo);
   if (p.extra) bits.push('特殊要求：' + p.extra);
@@ -152,18 +190,47 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
 4. mv 只写城际大交通：火车给参考车次走向（如 G2249）与运行时刻，飞机给航线；市内交通不写。
 5. hl 每天 3-4 个**具体景点/片区名称**，别写"逛逛市区"这种废话；兼顾${p.pace}节奏${p.interests.length ? '和偏好' : ''}。
 6. ${p.mustGo ? `用户必去：${p.mustGo}，必须排进合适的一天。` : ''}${p.extra ? `特殊要求：${p.extra}` : ''}
+6.1 ${p.mustVisit && p.mustVisit.length ? `**用户点名的目的地一个都不许漏**：${p.mustVisit.join('、')} —— 每一个都必须在大纲里占到实实在在的行程（成为某天的城市、当天主题或必玩点之一）。觉得不顺路的，安排当天往返或顺路串联，宁可调整路线也绝不许默默丢掉任何一个。` : ''}
 7. ${p.budget === '经济' ? '住性价比档，餐饮接地气；' : p.budget === '品质' ? '住高品质酒店/度假村，餐饮选口碑正餐；' : '住舒适型酒店，餐饮兼顾特色与性价比；'}推荐写类型/片区+代表菜，不要编造具体门牌地址。
 8. ov 写住宿城市或片区（最后一天写"返程"）；nt 长度 = ${p.days - 1} 晚。
 9. 所有文本简体中文，n 字段控制在 30 字以内。只输出 JSON 对象。`;
 
   // 大纲是单独一次云函数调用（60s 上限），留 8s 给返回，单次最多等 52s
+  const outlineDeadline = Date.now() + 52 * 1000;
   const text = await llm.chatWithRetry([
     { role: 'system', content: SYS_PROMPT },
     { role: 'user', content: prompt },
-  ], 3000, { deadline: Date.now() + 52 * 1000 });
+  ], 3000, { deadline: outlineDeadline });
 
-  const raw = parseJSONFromText(text);
-  const days = asArray(raw.ds).map((d, i) => ({
+  const outline = normalizeOutlineJson(parseJSONFromText(text), p);
+  if (!outline.days.length) throw new Error('大纲没有生成任何一天');
+
+  // 点名地点兜底：LLM 偶尔会"自作主张"丢掉它认为不顺路的点
+  // （用户点名"桂林、龙脊梯田、阳朔…"，结果整份大纲没有龙脊梯田——实锤踩过）。
+  // 生成后对照清单逐个查，漏了且时间还够就发一次修订请求补回来。
+  const missing = missingMustVisit(p, outline);
+  if (missing.length) {
+    console.warn('[generatePlan] 大纲漏掉用户点名地点: %s → 发起修订', missing.join('、'));
+    if (outlineDeadline - Date.now() > 18 * 1000) {
+      const repaired = await repairOutline(p, outline, missing, outlineDeadline);
+      if (repaired) {
+        const still = missingMustVisit(p, repaired);
+        if (!still.length) {
+          console.log('[generatePlan] 修订成功，点名地点已全部排入');
+          return repaired;
+        }
+        console.warn('[generatePlan] 修订后仍缺: %s（保留原大纲）', still.join('、'));
+      }
+    } else {
+      console.warn('[generatePlan] 剩余时间不足，跳过修订，保留原大纲');
+    }
+  }
+  return outline;
+}
+
+/** 大纲 JSON（短键名）→ 归一化结构 */
+function normalizeOutlineJson(raw, p) {
+  const days = asArray(raw && raw.ds).map((d, i) => ({
     date: validDate(d.d) ? d.d : shiftDate(p.startDate, i),
     city: String(d.city || '').trim(),
     theme: String(d.t || '').trim(),
@@ -176,16 +243,69 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
     overnight: String(d.ov || d.city || '').trim(),
     note: String(d.n || '').trim(),
   }));
-  if (!days.length) throw new Error('大纲没有生成任何一天');
-
-  const nights = asArray(raw.nt).map((n) => ({ date: n.d || '', city: String(n.c || '').trim() }));
-
+  const nights = asArray(raw && raw.nt).map((n) => ({ date: n.d || '', city: String(n.c || '').trim() }));
   return {
-    title: String(raw.t || `${p.dest}行程`).trim().slice(0, 60),
-    summary: String(raw.s || '').trim().slice(0, 200),
+    title: String((raw && raw.t) || `${p.dest}行程`).trim().slice(0, 60),
+    summary: String((raw && raw.s) || '').trim().slice(0, 200),
     nights,
     days,
   };
+}
+
+/** 归一化大纲 → 短键名 JSON（修订请求里要回喂给 LLM，省 token） */
+function outlineToShortJson(outline) {
+  return {
+    t: outline.title,
+    s: outline.summary,
+    nt: asArray(outline.nights).map((n) => ({ d: n.date, c: n.city })),
+    ds: asArray(outline.days).map((d) => ({
+      d: d.date, city: d.city, t: d.theme,
+      mv: asArray(d.moves).map((m) => ({
+        f: m.from, to: m.to, m: m.mode, c: m.code, s: m.startTime, e: m.endTime,
+      })),
+      hl: d.highlights, ml: d.meals, ov: d.overnight, n: d.note,
+    })),
+  };
+}
+
+/** 用户点名的地点里，大纲还没覆盖到的 */
+function missingMustVisit(p, outline) {
+  const text = JSON.stringify(outlineToShortJson(outline));
+  return (p.mustVisit || []).filter((name) => !text.includes(name));
+}
+
+/**
+ * 修订大纲：把漏掉的点名地点排进去，其余安排尽量保持不变。
+ * 修订结果必须通过"天数一致 + 能解析"才采用，失败返回 null（保留原大纲）。
+ */
+async function repairOutline(p, outline, missing, deadline) {
+  try {
+    const prompt = `下面这份旅行路线大纲漏掉了用户点名要去的地点：${missing.join('、')}。请修订大纲，把它们安排进合适的天（顺路串联或当天往返都可以），其余天的安排尽量保持不变。
+
+【旅行需求】${profileText(p)}
+
+【当前大纲 JSON（短键名，与输出格式完全一致）】
+${JSON.stringify(outlineToShortJson(outline))}
+
+# 输出要求
+1. 输出修订后的完整大纲 JSON，格式与上面一模一样（短键名，含 t/s/nt/ds）。
+2. ds 仍然恰好 ${p.days} 天，日期从 ${p.startDate} 连续到 ${p.endDate}，每天一个元素。
+3. ${missing.join('、')} 每一个都必须出现在某天的 city / t / hl 里。
+4. 只输出 JSON 对象，不要任何解释。`;
+    const text = await llm.chatWithRetry([
+      { role: 'system', content: SYS_PROMPT },
+      { role: 'user', content: prompt },
+    ], 3000, { deadline });
+    const repaired = normalizeOutlineJson(parseJSONFromText(text), p);
+    if (repaired.days.length !== p.days) {
+      console.warn('[generatePlan] 修订大纲天数不符（%d ≠ %d），弃用', repaired.days.length, p.days);
+      return null;
+    }
+    return repaired;
+  } catch (e) {
+    console.error('[generatePlan] 大纲修订失败（保留原大纲）:', e.message);
+    return null;
+  }
 }
 
 // ============================================================
@@ -595,10 +715,12 @@ ${brief}
 要求：全部简体中文，结合目的地与出行季节给出具体建议（不要正确的废话）。budget 按 ${p.budget} 档、${p.peopleNum} 人估算。只输出对象。`;
 
   try {
+    // 1200 token 对 6 段中文建议太紧：实测 budget 字段被截成 "bud"（截断抢救把它
+    // 当成了键名），预算建议整段丢失。放宽到 1800，够写完整又不拖时间。
     const text = await llm.chatWithRetry([
       { role: 'system', content: SYS_PROMPT },
       { role: 'user', content: prompt },
-    ], 1200, deadline ? { deadline } : undefined);
+    ], 1800, deadline ? { deadline } : undefined);
     const obj = parseJSONFromText(text);
     return obj && typeof obj === 'object' ? obj : {};
   } catch (e) {
@@ -681,6 +803,17 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
 
   const items = sanitizeItems(detail.items);
 
+  // 地理编码消歧要用的每天城市 + 地址→天下标映射。
+  // savePlan 的 cityOf 靠它们给高德传 city 参数——之前只消费不生产，
+  // cityOf 永远拿不到每天的城市，同名地点照样可能定位到别的省去。
+  const dayCities = asArray(outline.days).map((d) => String(d.city || d.overnight || '').trim());
+  const addrDay = new Map();
+  items.forEach((it) => {
+    const di = Number(it.dayIndex || 0);
+    if (it.startLocation && !addrDay.has(it.startLocation)) addrDay.set(it.startLocation, di);
+    if (it.endLocation && !addrDay.has(it.endLocation)) addrDay.set(it.endLocation, di);
+  });
+
   // 还有天没生成完（撞时间预算）→ 只交回已完成的部分，闹钟/建议留到最后一次生成，
   // 前端拿到 partial=true 会立刻静默再调一次，用户全程只看到"正在细化…"
   if (detail.partial) {
@@ -690,6 +823,8 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
       startDate: p.startDate,
       endDate: p.endDate,
       items,
+      dayCities,
+      addrDay,
       partial: true,
       doneDayIndexes: detail.doneDayIndexes,
       attempts: detail.attempts,
@@ -728,6 +863,8 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
     startDate: p.startDate,
     endDate: p.endDate,
     items,
+    dayCities,
+    addrDay,
     alarms: alarms.sort((a, b) => a.fireAt - b.fireAt),  // 待办按时间先后排，用户照着做就行
     suggestions,
     partial: false,
@@ -760,4 +897,5 @@ async function generate(rawInput) {
 module.exports = {
   generate, generateOutline, buildPlan, genDayItems,
   normalizeInput, sanitizeAlarmCandidates, buildFallbackAlarms, shiftDate, dayDiff, isHolidayRange,
+  parseDestList, missingMustVisit,
 };

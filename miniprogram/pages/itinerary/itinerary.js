@@ -189,6 +189,10 @@ Page({
     this.load();
   },
 
+  // 加载策略（2026-09-24 秒开优化）：
+  //   之前每次进本页都硬等一次云函数（0.5~2s），首页点进来就干转圈。
+  //   现在：全局缓存里是同一趟行程就先渲染（首页/本页编辑刚写过这份数据），
+  //   后台再拉最新数据，内容变了才重渲染——点了就开，开完悄悄对齐。
   async load() {
     try {
       // 未登录 → 先自动静默登录一次；仍然失败才显示登录门禁卡
@@ -204,59 +208,95 @@ Page({
         wx.showToast({ title: '请先上传攻略', icon: 'none' });
         return;
       }
-      const trip = await api.getItinerary(tripId);
-      // 补齐每条行程的稳定 key（否则编辑/删除拿不到标识）
-      trip.items = this.withItemKeys(trip.items);
-      app.globalData.currentTrip = trip;
-      this.baseDate = this.parseTripStart(trip.startDate);
 
-      // 全行程展开模式：直接按天顺序铺开，不再按单天查看
-      if (this.data.viewAll) {
-        const dayGroups = this.buildAllDays(trip);
-        const s = trip.startDate || '';
-        const e = trip.endDate || '';
-        if (trip.title) wx.setNavigationBarTitle({ title: trip.title });
-        this.setData({
-          tripId,
-          trip,
-          dayGroups,
-          totalCount: (trip.items || []).length,
-          dayLabel: (s || e) ? `${s || '?'} → ${e || '?'}` : '日期未设置',
-          items: [],
-        });
+      const cached = app.globalData.currentTrip;
+      if (cached && cached._id === tripId && Array.isArray(cached.items) && cached.items.length) {
+        this.renderTrip(cached, tripId);
+        this.bgRefresh(tripId, cached);
         return;
       }
 
-      // 严格按开始时间从早到晚排；没填时间的排最后
-      const sorted = (trip.items || [])
-        .filter((it) => (it.dayIndex || 0) === this.data.dayIdx)
-        .sort((a, b) => {
-          const ta = a.startTime || '99:99';
-          const tb = b.startTime || '99:99';
-          return ta.localeCompare(tb);
-        });
-      this.rawItems = sorted;
-
-      const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
-      const m = trip.startDate ? String(trip.startDate).match(/^(\d{4})-(\d{2})-(\d{2})/) : null;
-      const startDate = m ? new Date(+m[1], +m[2] - 1, +m[3]) : new Date();
-      const cur = new Date(startDate);
-      cur.setDate(cur.getDate() + this.data.dayIdx);
-      this.dayStartTs = new Date(cur.getFullYear(), cur.getMonth(), cur.getDate()).getTime();
-
-      const today = new Date();
-      const isToday = cur.getFullYear() === today.getFullYear()
-        && cur.getMonth() === today.getMonth()
-        && cur.getDate() === today.getDate();
-
-      const dayLabel = `${this.formatYMD(cur)} ${weekdays[cur.getDay()]} · 第${this.data.dayIdx + 1}天`;
-
-      this.setData({ tripId, trip, dayLabel, isToday });
-      this.applyTimeFlags();
-      this.loadDayTips();
+      const trip = await api.getItinerary(tripId);
+      app.globalData.currentTrip = trip;
+      this.renderTrip(trip, tripId);
     } catch (err) {
       wx.showToast({ title: err.message || '加载失败', icon: 'none' });
     }
+  },
+
+  // 后台刷新：缓存渲染后拉最新数据，变了才重渲染（编辑抽屉打开时不打扰）
+  async bgRefresh(tripId, cached) {
+    try {
+      const trip = await api.getItinerary(tripId);
+      if (!trip || !trip._id) return;
+      app.globalData.currentTrip = trip;
+      const same = trip.updatedAt && cached.updatedAt
+        ? trip.updatedAt === cached.updatedAt
+        : (trip.items || []).length === (cached.items || []).length;
+      if (same) return;
+      if (this.data.editForm) return;   // 用户正在编辑，别冲掉抽屉（下次进页再对齐）
+      this.renderTrip(trip, tripId);
+    } catch (e) { /* 后台刷新失败就静默：用户看的是缓存版，下次进页再试 */ }
+  },
+
+  // 本地改动同步进全局缓存：load() 优先渲染缓存，不同步会先闪一下旧内容
+  syncGlobalTrip(tripId, items) {
+    const g = app.globalData.currentTrip;
+    if (g && g._id === tripId) {
+      app.globalData.currentTrip = Object.assign({}, g, { items });
+    }
+  },
+
+  // 把一趟行程渲染到页面（缓存首渲染与网络重渲染共用）
+  renderTrip(trip, tripId) {
+    // 补齐每条行程的稳定 key（否则编辑/删除拿不到标识）
+    trip.items = this.withItemKeys(trip.items);
+    this.baseDate = this.parseTripStart(trip.startDate);
+
+    // 全行程展开模式：直接按天顺序铺开，不再按单天查看
+    if (this.data.viewAll) {
+      const dayGroups = this.buildAllDays(trip);
+      const s = trip.startDate || '';
+      const e = trip.endDate || '';
+      if (trip.title) wx.setNavigationBarTitle({ title: trip.title });
+      this.setData({
+        tripId,
+        trip,
+        dayGroups,
+        totalCount: (trip.items || []).length,
+        dayLabel: (s || e) ? `${s || '?'} → ${e || '?'}` : '日期未设置',
+        items: [],
+      });
+      return;
+    }
+
+    // 严格按开始时间从早到晚排；没填时间的排最后
+    const sorted = (trip.items || [])
+      .filter((it) => (it.dayIndex || 0) === this.data.dayIdx)
+      .sort((a, b) => {
+        const ta = a.startTime || '99:99';
+        const tb = b.startTime || '99:99';
+        return ta.localeCompare(tb);
+      });
+    this.rawItems = sorted;
+
+    const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+    const m = trip.startDate ? String(trip.startDate).match(/^(\d{4})-(\d{2})-(\d{2})/) : null;
+    const startDate = m ? new Date(+m[1], +m[2] - 1, +m[3]) : new Date();
+    const cur = new Date(startDate);
+    cur.setDate(cur.getDate() + this.data.dayIdx);
+    this.dayStartTs = new Date(cur.getFullYear(), cur.getMonth(), cur.getDate()).getTime();
+
+    const today = new Date();
+    const isToday = cur.getFullYear() === today.getFullYear()
+      && cur.getMonth() === today.getMonth()
+      && cur.getDate() === today.getDate();
+
+    const dayLabel = `${this.formatYMD(cur)} ${weekdays[cur.getDay()]} · 第${this.data.dayIdx + 1}天`;
+
+    this.setData({ tripId, trip, dayLabel, isToday });
+    this.applyTimeFlags();
+    this.loadDayTips();
   },
 
   formatYMD(d) {
@@ -285,6 +325,11 @@ Page({
     return (it && (it.key || it._id || it.id)) || '';
   },
 
+  // 本行程的大地名（"广西 桂林"）：导航/实时定位时给高德消歧，不做展示
+  tripRegion() {
+    return (this.data.trip && this.data.trip.region) || '';
+  },
+
   onTapNav(e) {
     const { item } = e.currentTarget.dataset;
     // 只填了一头也能导航：优先目的地，其次出发地（从我的位置出发）
@@ -302,6 +347,7 @@ Page({
         : `导航到 ${to}`,
       endLat: item.endLat,
       endLon: item.endLon,
+      region: this.tripRegion(),
     });
   },
 
@@ -398,6 +444,7 @@ Page({
       });
       await api.updateItinerary(tripId, { items });
       homeCache.clear();
+      this.syncGlobalTrip(tripId, items);
       this.setData({ editingId: '', editForm: null });
       await this.load();
       wx.showToast({ title: '已保存', icon: 'success' });
@@ -417,7 +464,7 @@ Page({
   async tryGeocode(name) {
     if (!name) return null;
     try {
-      const r = await api.geocode(name);
+      const r = await api.geocode(name, this.tripRegion());
       if (!r) return null;
       const lon = r.lon != null ? r.lon : (r.lng != null ? r.lng : r.longitude);
       const lat = r.lat != null ? r.lat : r.latitude;
@@ -449,6 +496,7 @@ Page({
       const items = (trip.items || []).filter((it) => this.itemKeyOf(it) !== id);
       await api.updateItinerary(this.data.tripId, { items });
       homeCache.clear();
+      this.syncGlobalTrip(this.data.tripId, items);
       await this.load();
       wx.showToast({ title: '已删除', icon: 'success' });
     } catch (err) {
@@ -464,6 +512,10 @@ Page({
   async loadDayTips() {
     const { tripId, dayIdx } = this.data;
     if (!tripId) return;
+    // 缓存首渲染 + 后台重渲染会连着调两次：同一天只拉一次建议
+    const key = tripId + '_' + dayIdx;
+    if (this._tipsKey === key) return;
+    this._tipsKey = key;
     this.setData({ tipsLoading: true, dayTips: null });
     try {
       const res = await api.getDayTips(tripId, dayIdx);
@@ -487,6 +539,7 @@ Page({
   async onRetryTips() {
     const { tripId, dayIdx } = this.data;
     if (!tripId) return;
+    this._tipsKey = null;   // 强制重拉（否则会被"同一天只拉一次"的守卫拦下）
     this.setData({ tipsLoading: true });
     try {
       await api.getDayTips(tripId, dayIdx, true); // force = 重新生成
@@ -530,6 +583,7 @@ Page({
           const items = [...(trip.items || []), newItem];
           await api.updateItinerary(tripId, { items });
           homeCache.clear();
+          this.syncGlobalTrip(tripId, items);
           await this.load();
           wx.showToast({ title: '已添加', icon: 'success' });
         } catch (err) {

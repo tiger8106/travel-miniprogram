@@ -19,11 +19,40 @@ Page({
   },
 
   onChooseFile() {
+    if (!wx.chooseMessageFile) {
+      wx.showModal({
+        title: '微信版本过低',
+        content: '当前微信不支持选择聊天文件，请升级到最新版微信后重试。',
+        showCancel: false,
+      });
+      return;
+    }
     wx.chooseMessageFile({
       count: 1,
       type: 'file',
       extension: ['docx', 'doc'],
       success: (res) => this.handleFile(res.tempFiles[0]),
+      fail: (err) => this.onChooseFail(err),
+    });
+  },
+
+  // 选文件失败绝不能"静默没反应"（实锤踩过：隐私指引重新审核后授权状态被重置，
+  // 微信拦下 chooseMessageFile 又没自动弹授权 → 用户点了跟没点一样，完全不知道发生了什么）
+  onChooseFail(err) {
+    const msg = (err && err.errMsg) || '';
+    console.error('[upload] chooseMessageFile 失败:', msg);
+    if (/cancel/.test(msg)) return; // 用户自己取消，不算故障
+    if (/privacy|scope|author/i.test(msg)) {
+      // 微信没自动弹授权 → 我们自己弹；用户点"同意"后立即替他重试一次
+      this._retryChoose = true;
+      this.setData({ showPrivacy: true });
+      return;
+    }
+    wx.showModal({
+      title: '选择文件失败',
+      content: `${msg || '未知原因'}\n\n可以换个文件再试，或先把文档发到「文件传输助手」再从这里选择。`,
+      showCancel: false,
+      confirmText: '知道了',
     });
   },
 
@@ -33,6 +62,7 @@ Page({
       count: 1,
       type: 'file',
       success: (res) => this.handleFile(res.tempFiles[0]),
+      fail: (err) => this.onChooseFail(err),
     });
   },
 
@@ -71,8 +101,15 @@ Page({
     this.setData({ showPrivacy: false });
   },
 
-  onClosePrivacy() {
+  onClosePrivacy(e) {
     this.setData({ showPrivacy: false });
+    // 从失败回调里手动弹的授权（不是微信拦截自动触发的）：
+    // 用户点"同意"后微信不会自动重试刚才被拦的调用，这里替他再选一次
+    const agreed = !!(e && e.detail && e.detail.agreed);
+    if (this._retryChoose) {
+      this._retryChoose = false;
+      if (agreed) setTimeout(() => this.onChooseFile(), 300);
+    }
   },
 
   async onShow() {

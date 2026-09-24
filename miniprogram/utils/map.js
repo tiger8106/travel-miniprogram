@@ -14,17 +14,20 @@ const api = require('../services/api');
 
 /**
  * 打开导航（一键直达，无中间弹窗）
- * @param {object} opts { from, to, mode, endLat, endLon }
+ * @param {object} opts { from, to, mode, endLat, endLon, region }
+ *   region：省/市/县等大地名（如「广西 桂林」），只用于帮地理编码消歧，
+ *   绝不会拼进显示名称——界面上看到的还是「龙脊梯田」而不是「广西桂林龙脊梯田」。
+ *   没有它时，重名地点（全国一堆"西湖""人民公园"）可能定位到别的城市去。
  */
 async function openAmapNav(opts) {
   let lat = Number(opts.endLat);
   let lon = Number(opts.endLon);
 
-  // 没有坐标 → 实时查一次（约 200ms）
+  // 没有坐标 → 实时查一次（约 200ms），带上大地名消歧
   if (!(lat && lon && !isNaN(lat) && !isNaN(lon))) {
     wx.showLoading({ title: '定位中…' });
     try {
-      const coord = await api.geocode(opts.to);
+      const coord = await api.geocode(opts.to, opts.region || '');
       wx.hideLoading();
       if (coord && coord.lon && coord.lat) {
         lon = coord.lon;

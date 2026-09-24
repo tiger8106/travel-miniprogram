@@ -139,6 +139,8 @@ Page({
     dragIdx: -1,
     dragShift: 0,                 // 拖动卡片的纵向位移（px）
     guideTop: 0,                  // 参考线位置（px）
+    manualOffset: 0,              // 拖动中"假装滚动"的手动偏移（px，见下方说明）
+    scrollTop: 0,                 // 松手时把手动偏移同步成真实滚动位置
     dayForm: null,                // 正在编辑的那一天（null = 抽屉关闭）
     dayFormIdx: -1,
   },
@@ -161,6 +163,7 @@ Page({
   onUnload() {
     if (this._offAuth) { this._offAuth(); this._offAuth = null; }
     this.stopTicker();
+    this.resetEdge();   // 清掉拖动自动滚动的定时器
   },
 
   // ---------- 生成计时器 ----------
@@ -272,6 +275,7 @@ Page({
   },
 
   onPickSingle(e) {
+    if (this.data.generating) return;   // 生成中锁定表单，防止误改
     const { field } = e.currentTarget.dataset;
     const idx = Number(e.currentTarget.dataset.idx);
     switch (field) {
@@ -290,6 +294,7 @@ Page({
   // ---------- 兴趣偏好 ----------
 
   onToggleInterest(e) {
+    if (this.data.generating) return;
     const idx = Number(e.currentTarget.dataset.idx);
     const item = this.data.interestItems[idx];
     if (!item) return;
@@ -308,6 +313,7 @@ Page({
 
   // ✕ 掉一个偏好：以后制定攻略时不再出现（预置和自定义一视同仁）
   onRemoveInterest(e) {
+    if (this.data.generating) return;
     const idx = Number(e.currentTarget.dataset.idx);
     const item = this.data.interestItems[idx];
     if (!item) return;
@@ -321,6 +327,7 @@ Page({
   },
 
   onAddCustom() {
+    if (this.data.generating) return;
     const name = (this.data.customText || '').trim();
     if (!name) return;
     if (name.length > 20) {
@@ -487,6 +494,7 @@ Page({
   // ---------- 大纲：编辑某一天 ----------
 
   onEditDay(e) {
+    if (this.data.generating) return;   // 细化生成中不允许改大纲
     const idx = Number(e.currentTarget.dataset.idx);
     const d = this.data.outlineDays[idx];
     if (!d) return;
@@ -549,6 +557,24 @@ Page({
   },
 
   // ---------- 大纲：拖动排序 ----------
+  //
+  // 交互约定（2026-09-24 重做）：
+  //   · 长按进入拖动，拖动卡缩小 + 半透明，悬浮置顶
+  //   · 蓝色参考线永远贴在"拖动卡中心最近的缝隙"上——线在哪，松手就落到哪
+  //   · 落点 = 有几张"其他"卡片的中心在拖动卡中心上方（中心对中心）。
+  //     旧版按"卡片顶边"算落点、插入时又没扣除"先删掉自己"的下标前移，
+  //     导致线在第 2、3 天中间，松手却落到第 3 天后面（Tiger 截图实锤）
+  //   · 参考线能到最顶上（第 1 天之前）和最底下（最后一天之后）
+  //   · 拖动卡贴在可视区上/下边缘超过 1 秒 → 列表自动滚动，远处的天能拖过去
+  //
+  // 为什么自动滚动要手动算偏移（manualOffset）而不是设 scroll-top：
+  //   拖动中 scroll-y 是关的（不然手指一动页面跟着滚），scroll-top 设了不生效。
+  //   改成给所有卡片 top 叠加手动偏移来"假装滚动"，松手时再把真实
+  //   scroll-top 一次性同步过去，视觉上无缝衔接。
+
+  onDayScroll(e) {
+    this._scrollTop = e.detail.scrollTop || 0;
+  },
 
   // 长按卡片进入拖动模式（避免上下滑页面时误拖）
   onDayLongPress(e) {
@@ -556,49 +582,127 @@ Page({
     const idx = Number(e.currentTarget.dataset.idx);
     const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]);
     this._dragStartY = t ? t.clientY : 0;
+    this._lastClientY = this._dragStartY;
     this._dragTarget = idx;
+    this._frozenScroll = this._scrollTop || 0;
+    this._manualOff = 0;
+    this._edgeDir = 0;
+    this._edgeSince = 0;
+    // 列表可视区位置（边缘自动滚动要用），异步拿，拿不到就只是没有自动滚动
+    this._scrollRect = null;
+    wx.createSelectorQuery().in(this).select('.day-scroll').boundingClientRect((r) => {
+      this._scrollRect = r || null;
+    }).exec();
     this.setData({
       dragging: true,
       dragIdx: idx,
       dragShift: 0,
+      manualOffset: 0,
       guideTop: idx * (this._itemH || 0),
     });
     wx.vibrateShort && wx.vibrateShort({ type: 'medium' });
   },
 
-  // 拖动中：卡片跟着手指走，实时算出落点并画参考线
+  // 拖动中：卡片跟着手指走，实时算落点画参考线 + 侦测边缘自动滚动
   onDayTouchMove(e) {
     if (!this.data.dragging) return;
+    const t = (e.touches && e.touches[0]) || {};
+    if (typeof t.clientY !== 'number') return;
+    this._lastClientY = t.clientY;
+    this.updateDrag();
+    this.watchEdge();
+  },
+
+  // 根据手指当前位置重算拖动卡位移与参考线位置
+  updateDrag() {
     const idx = this.data.dragIdx;
     const n = this.data.outlineDays.length;
     const h = this._itemH || 1;
-    const t = (e.touches && e.touches[0]) || {};
-    if (typeof t.clientY !== 'number') return;
-
     // 位移限制在列表内，拖不出界
-    let dy = t.clientY - this._dragStartY;
+    let dy = this._lastClientY - this._dragStartY;
     dy = Math.max(-idx * h, Math.min((n - 1 - idx) * h, dy));
 
-    // 落点 = 有几张"其他"卡片的顶部在这张卡上方（i*h < 拖动卡当前顶部）
-    const pos = idx + dy / h;
+    // 落点 = 有几张"其他"卡片的中心在拖动卡中心上方
+    const center = idx * h + dy + h / 2;
     let target = 0;
     for (let i = 0; i < n; i++) {
-      if (i !== idx && i < pos) target++;
+      if (i !== idx && (i + 0.5) * h < center) target++;
     }
     target = Math.max(0, Math.min(n - 1, target));
+    // 参考线画在"落点对应的缝隙"上：落点在自己之后 → 线在下标 target+1 的
+    // 顶边（其他卡没动，那个位置才是用户看到的缝隙）；在之前/原位 → target 的顶边
+    const guide = (target > idx ? target + 1 : target) * h;
 
     const shift = Math.round(dy);
     if (shift === this.data.dragShift && target === this._dragTarget) return; // 节流
     this._dragTarget = target;
-    this.setData({ dragShift: shift, guideTop: target * h });
+    this.setData({ dragShift: shift, guideTop: guide });
+  },
+
+  // 边缘侦测：拖动卡在可视区上/下边缘停住超过 1 秒 → 开始自动滚动
+  watchEdge() {
+    const rect = this._scrollRect;
+    if (!rect) return;
+    const maxScroll = Math.max(0, this.data.areaH - (rect.height || this.data.listH));
+    if (maxScroll <= 0) return; // 列表没超出可视区，没什么可滚的
+    const EDGE = 56; // px：手指进入上下 56px 范围算"贴边"
+    const y = this._lastClientY;
+    let dir = 0;
+    if (y < rect.top + EDGE) dir = -1;
+    else if (y > rect.top + rect.height - EDGE) dir = 1;
+
+    if (!dir) { this.resetEdge(); return; }
+    if (this._edgeDir !== dir) {
+      this.resetEdge();
+      this._edgeDir = dir;
+      this._edgeSince = Date.now();
+      return;
+    }
+    if (!this._autoTimer && Date.now() - this._edgeSince > 1000) {
+      this._autoTimer = setInterval(() => this.autoScrollStep(), 40);
+    }
+  },
+
+  resetEdge() {
+    this._edgeDir = 0;
+    this._edgeSince = 0;
+    if (this._autoTimer) { clearInterval(this._autoTimer); this._autoTimer = null; }
+  },
+
+  // 自动滚动：内容每次挪 10px（约 250px/s），拖动卡通过补位移保持贴在手指下
+  autoScrollStep() {
+    const dir = this._edgeDir;
+    if (!dir || !this.data.dragging) { this.resetEdge(); return; }
+    const rect = this._scrollRect || { height: this.data.listH };
+    const maxScroll = Math.max(0, this.data.areaH - (rect.height || this.data.listH));
+    // 手动偏移可调范围：滚到顶 = -frozen，滚到底 = maxScroll - frozen
+    const lo = -this._frozenScroll;
+    const hi = maxScroll - this._frozenScroll;
+    const next = Math.max(lo, Math.min(hi, this._manualOff + dir * 10));
+    const applied = next - this._manualOff;
+    if (!applied) { this.resetEdge(); return; } // 已经滚到头/尾了
+    this._manualOff = next;
+    // 内容滚了 applied、手指没动 → 拖动卡位移同步补上，才能继续贴在手指下
+    this._dragStartY -= applied;
+    this.setData({ manualOffset: next });
+    this.updateDrag();
   },
 
   // 松手：落到参考线所在位置
   onDayTouchEnd() {
     if (!this.data.dragging) return;
+    this.resetEdge();
     const idx = this.data.dragIdx;
     const target = typeof this._dragTarget === 'number' ? this._dragTarget : idx;
-    this.setData({ dragging: false, dragIdx: -1, dragShift: 0 });
+    // 把"假装滚动"的偏移同步成真实滚动位置（值不变时 scroll-view 不会跳，视觉无缝）
+    const maxScroll = Math.max(0, this.data.areaH - this.data.listH);
+    const finalScroll = Math.max(0, Math.min(maxScroll, this._frozenScroll + this._manualOff));
+    this._manualOff = 0;
+    this.setData({
+      dragging: false, dragIdx: -1, dragShift: 0,
+      manualOffset: 0, scrollTop: finalScroll,
+    });
+    this._scrollTop = finalScroll;
     this._dragTarget = null;
     if (target === idx) return;   // 没换位置
     const list = this.data.outlineDays.slice();
@@ -611,23 +715,31 @@ Page({
   // 重排后统一刷新：序号 / 日期 / 纵坐标 / 云函数用的 outline
   applyDayOrder(list) {
     const h = this._itemH || 1;
+
+    // ① 先按"旧 __src"重排云函数用的 outline.days：
+    //    list 里每项的 __src 还是"重排前"的下标，用它去旧 outline.days 里取内容。
+    //    （必须先做这步再重置 __src，顺序反了 outline 会保持旧顺序不变
+    //      ——"拖完生成的攻略还是按拖动前的顺序"就是这么来的）
+    const outline = this.data.outline;
+    const srcDays = (outline && outline.days) || [];
+    let newDays = null;
+    if (srcDays.length === list.length) {
+      newDays = list.map((d, i) => {
+        const src = srcDays[d.__src == null ? d.idx : d.__src];
+        const date = plusDays(this.data.startDate, i);
+        return src ? Object.assign({}, src, { d: date, date }) : null;
+      }).filter(Boolean);
+    }
+
+    // ② 再重建渲染用的大纲：序号 / 日期（连续重排）/ 纵坐标，
+    //    __src 重置成当前下标（outline.days 已与新顺序一致，下次拖动才不会拿错天）
     const outlineDays = list.map((d, i) => Object.assign({}, d, {
       idx: i,
-      date: plusDays(this.data.startDate, i),   // 日期跟着顺序重新连续排
+      __src: i,
+      date: plusDays(this.data.startDate, i),
       y: i * h,
     }));
     const endDate = outlineDays.length ? outlineDays[outlineDays.length - 1].date : this.data.startDate;
-
-    // 云函数用的 outline.days 也按新顺序重排，并重算每天日期
-    const outline = this.data.outline;
-    let newDays = null;
-    const srcDays = (outline && outline.days) || [];
-    if (srcDays.length === outlineDays.length) {
-      newDays = outlineDays.map((d) => {
-        const src = srcDays[d.__src == null ? d.idx : d.__src] || srcDays[d.idx];
-        return src ? Object.assign({}, src, { d: d.date, date: d.date }) : null;
-      }).filter(Boolean);
-    }
 
     this.setData({
       outlineDays,

@@ -27,15 +27,19 @@ const COL_SUG = 'suggestions';
 // 生成引擎版本（用于确认线上跑的是哪一版）
 const GEN_VERSION = 'v1.1-gen';
 
-/** 给一批条目补经纬度（供 wx.openLocation 打开微信原生地图） */
-async function geocodeItems(items) {
+/** 给一批条目补经纬度（供 wx.openLocation 打开微信原生地图）
+ *  cityOf(address)：返回该地点所属的大地名（省/市/县），帮高德消歧——
+ *  全国同名地点太多，不带城市可能把"龙脊梯田"定位到别的省去。
+ *  显示名称不受影响：经纬度只用于打开地图，用户看到的还是短地名。
+ */
+async function geocodeItems(items, cityOf) {
   try {
     const addrSet = new Set();
     items.forEach((it) => {
       if (it.startLocation) addrSet.add(it.startLocation);
       if (it.endLocation) addrSet.add(it.endLocation);
     });
-    const coordMap = await geocodeBatch([...addrSet]);
+    const coordMap = await geocodeBatch([...addrSet], cityOf);
     if (coordMap.size) {
       items.forEach((it) => {
         const s = coordMap.get(it.startLocation);
@@ -58,7 +62,20 @@ async function geocodeItems(items) {
 async function savePlan(openid, plan, tripId) {
   const db = cloud.database();
   const now = Date.now();
-  await geocodeItems(plan.items);
+  // 每天的大地名（城市）：地理编码时带上，避免同名地点定位到别的城市。
+  // 城市集合也存进 trip.region——前端点击导航、条目缺坐标需要实时查时，
+  // 拿它继续消歧（只用于查询，不会拼进显示名称）。
+  const dayCities = Array.isArray(plan.dayCities) ? plan.dayCities : [];
+  const region = [...new Set(dayCities.filter(Boolean))].join(' ');
+  const firstCity = dayCities.find(Boolean) || '';
+  const cityOf = (addr) => {
+    const idx = plan.addrDay ? plan.addrDay.get(addr) : -1;
+    const c = idx >= 0 ? (dayCities[idx] || '') : '';
+    // 兜底用第一个城市：plan.dest 是"桂林、龙脊梯田、阳朔…"整串，
+    // 直接塞给高德 city 参数只会被忽略，不能拿它兜底
+    return c || firstCity;
+  };
+  await geocodeItems(plan.items, cityOf);
 
   // 首轮颗粒无收（天天都失败）但还要续跑：别先建一个空行程，
   // 等哪一轮真有内容了再建，否则中途放弃会在「我的行程」里留下一条 0 条的空攻略。
@@ -93,6 +110,7 @@ async function savePlan(openid, plan, tripId) {
       summary: plan.summary,
       startDate: plan.startDate,
       endDate: plan.endDate,
+      region,                  // 本行程涉及的城市（空格分隔）：导航实时定位时消歧用
       sourceType: 'ai',          // 区别于上传文档解析出来的攻略
       sourceFileID: '',
       items: plan.items,
@@ -115,6 +133,7 @@ async function savePlan(openid, plan, tripId) {
         summary: plan.summary,
         startDate: plan.startDate,
         endDate: plan.endDate,
+        region,
         items: merged,
         updatedAt: now,
         genVersion: GEN_VERSION,

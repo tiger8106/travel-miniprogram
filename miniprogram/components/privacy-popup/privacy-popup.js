@@ -32,14 +32,14 @@ Component({
       const resolve = app.globalData.privacyResolve;
       if (resolve) resolve({ event: 'agree' });
       app.globalData.privacyResolve = null;
-      this.triggerEvent('close');
+      this.triggerEvent('close', { agreed: true });
     },
 
     onDisagree() {
       const resolve = app.globalData.privacyResolve;
       if (resolve) resolve({ event: 'disagree' });
       app.globalData.privacyResolve = null;
-      this.triggerEvent('close');
+      this.triggerEvent('close', { agreed: false });
       wx.showToast({ title: this.properties.denyTip, icon: 'none' });
     },
   },

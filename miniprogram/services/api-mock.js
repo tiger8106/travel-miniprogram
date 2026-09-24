@@ -207,7 +207,7 @@ async function buildPlan() {
 module.exports = {
   parseTravelPlan,
   // mock 模式没有真实地理编码，返回 null 让前端走降级
-  geocode: async function () { await delay(200); return null; },
+  geocode: async function (location, city) { await delay(200); return null; },
   saveItinerary,
   getItinerary,
   listItineraries,

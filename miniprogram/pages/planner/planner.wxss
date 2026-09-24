@@ -190,17 +190,17 @@
   transition: transform 0.18s ease, top 0.18s ease;
 }
 
-/* 拖动中的卡片：悬浮在最上层 + 放大 + 加重阴影 */
+/* 拖动中的卡片：悬浮最上层 + 缩小一点（inline transform 里的 scale(0.96)）
+   + 半透明，让下面的卡片和参考线透出来，落点看得更清楚 */
 .di-drag {
   z-index: 99;
   transition: none;
+  opacity: 0.88;
 }
 
 .di-drag .outline-item {
-  transform: scale(1.02);
   box-shadow: 0 12rpx 32rpx rgba(25, 137, 250, 0.28);
   border: 2rpx solid var(--primary);
-  opacity: 0.97;
 }
 
 /* 参考线：松手后卡片落到这条线上 */
@@ -333,6 +333,12 @@
 
 .btn-generate {
   width: 100%;
+  white-space: nowrap;   /* 按钮文案一行显示，不换行 */
+}
+
+/* 生成中锁定表单：整体置灰，输入控件由 disabled / 事件守卫拦下 */
+.form-lock {
+  opacity: 0.55;
 }
 
 .btn-generate.disabled {
