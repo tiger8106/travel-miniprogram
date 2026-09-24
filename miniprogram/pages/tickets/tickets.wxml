@@ -56,9 +56,53 @@
       </view>
     </view>
 
-    <!-- ===== 闹钟列表 ===== -->
-    <view wx:for="{{alarms}}" wx:key="_id" wx:for-item="item">
-      <ticket-alarm item="{{item}}"
+    <!-- ===== 正在进行 / 即将进行（和首页「此刻行程」同一套视觉） ===== -->
+    <block wx:if="{{nowAlarms.length}}">
+      <view class="card now-card">
+        <view class="now-head-bar">
+          <view class="now-head-title">
+            <text class="now-emoji">🔔</text>
+            正在进行 / 即将进行
+          </view>
+          <text class="now-more">{{nowAlarms.length}} 项待办</text>
+        </view>
+        <view class="now-list">
+          <view wx:for="{{nowAlarms}}" wx:key="_id"
+                class="now-item {{item.ongoing ? 'live' : ''}}"
+                data-idx="{{index}}" bindtap="onTapNowAlarm">
+            <view class="now-rail">
+              <view class="now-dot {{item.ongoing ? 'live' : ''}}"></view>
+              <view wx:if="{{index !== nowAlarms.length - 1}}" class="now-line"></view>
+            </view>
+            <view class="now-body">
+              <view class="now-line1">
+                <text class="now-time">{{item.friendly}}</text>
+                <text class="now-status {{item.ongoing ? 'live' : ''}}">{{item.statusText}}</text>
+                <text class="now-day">{{item.typeLabel}}</text>
+              </view>
+              <view class="now-title-text">{{item.title}}</view>
+              <view wx:if="{{item.note}}" class="now-note">{{item.note}}</view>
+            </view>
+          </view>
+        </view>
+        <view wx:if="{{nowExtra}}" class="now-foot">还有 {{nowExtra}} 项提醒，见下方分类 · 点任意一条可编辑</view>
+      </view>
+    </block>
+    <view wx:else class="card now-empty">
+      <view class="now-empty-icon">🚩</view>
+      <view class="now-empty-text">没有正在进行或即将进行的提醒</view>
+      <view class="now-empty-sub">{{alarms.length ? '所有事项都还早，见下方分类待办' : '还没有任何提醒事项'}}</view>
+    </view>
+
+    <!-- ===== 分类待办：车票 / 门票 / 酒店 / 其他 ===== -->
+    <view wx:for="{{groups}}" wx:key="key" wx:for-item="g" class="group-block">
+      <view class="group-head">
+        <text class="group-icon">{{g.icon}}</text>
+        <text class="group-label">{{g.label}}</text>
+        <text class="group-count">{{g.pending ? g.pending + ' 项待办 / ' : ''}}共 {{g.count}} 项</text>
+      </view>
+      <ticket-alarm wx:for="{{g.items}}" wx:for-item="al" wx:key="_id"
+                    item="{{al}}"
                     devMode="{{devMode}}"
                     bind:tapcalendar="onTapCalendar"
                     bind:tapedit="onTapEdit"
@@ -66,7 +110,7 @@
                     bind:taptest="onTapTest" />
     </view>
 
-    <view wx:if="{{!editForm}}" class="add-btn" bindtap="onAdd">+ 添加闹钟</view>
+    <view wx:if="{{!editForm}}" class="add-btn" bindtap="onAdd">+ 添加提醒事项</view>
   </block>
   </block>
 

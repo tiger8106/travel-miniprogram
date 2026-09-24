@@ -524,4 +524,6 @@ async function callLLM(rawText) {
   return callLLMSingle(rawText);
 }
 
-module.exports = { callLLM, LLM_CONFIG };
+// chatWithRetry / parseJSONFromText 也导出：供 alarm-infer.js 做「攻略没写抢票时间时
+// 由 AI 反推待办事项」这类独立的小请求复用，不用再写一份 HTTP 调用。
+module.exports = { callLLM, LLM_CONFIG, chatWithRetry, parseJSONFromText };

@@ -12,6 +12,23 @@ const app = getApp();
 // 闹钟列表快照缓存 key
 const CACHE_KEY = 'tickets';
 
+// 分类板块顺序 = 「正在进行」模块的展示优先级：车票 > 门票 > 酒店 > 其他
+// （同时到点的事项太多时，先保证各类车票提醒被看见）
+const GROUP_DEFS = [
+  { key: 'traffic', label: '车票提醒', icon: '🚄', types: ['train', 'plane', 'bus'] },
+  { key: 'sight', label: '门票预约', icon: '🎫', types: ['ticket'] },
+  { key: 'hotel', label: '酒店住宿', icon: '🏨', types: ['hotel'] },
+  { key: 'other', label: '其他事项', icon: '⏰', types: ['other'] },
+];
+const NOW_LIMIT = 4;               // 「正在进行/即将进行」最多展示条数
+const ONGOING_WINDOW = 2 * 3600000; // 提醒刚触发 2 小时内算"正在进行"
+const SOON_WINDOW = 7 * 86400000;   // 7 天内算"即将进行"
+
+function groupRank(type) {
+  const i = GROUP_DEFS.findIndex((d) => d.types.indexOf(type) >= 0);
+  return i < 0 ? GROUP_DEFS.length : i;   // 未知类型排最后
+}
+
 // 闹钟类型选项（编辑抽屉里的 chips）
 const TYPE_OPTIONS = [
   { value: 'train', label: '高铁/火车', icon: '🚄' },
@@ -26,6 +43,9 @@ Page({
   data: {
     loading: true,
     alarms: [],
+    groups: [],        // 按板块分类的待办（车票/门票/酒店/其他）
+    nowAlarms: [],     // 正在进行 / 即将进行
+    nowExtra: 0,       // 顶部模块装不下、被折叠的条数
     // 编辑/新增抽屉：sheetMode = 'edit' | 'new'；editForm 为 null 时抽屉关闭
     sheetMode: 'edit',
     editingId: null,
@@ -50,6 +70,7 @@ Page({
       onLogin: () => this.load(),
       onLogout: () => this.setData({
         loading: false, alarms: [], pendingCount: 0, editForm: null, delItem: null,
+        groups: [], nowAlarms: [], nowExtra: 0,
       }),
     });
   },
@@ -114,6 +135,7 @@ Page({
       this.setData({
         loading: false, needLogin: true,
         alarms: [], pendingCount: 0, editForm: null, delItem: null,
+        groups: [], nowAlarms: [], nowExtra: 0,
       });
       return;
     }
@@ -163,14 +185,18 @@ Page({
         return ta - tb;
       });
       const pendingCount = items.filter((a) => a.triggerAt && a.triggerAt > now).length;
+      const views = this.buildViews(items);
 
-      // ② 内容没变就不 setData，避免无谓重绘
+      // ② 内容没变就不 setData，避免无谓重绘（视图派生数据一起比，避免状态过期）
       const snap = { tripId, alarms: items, pendingCount };
       const sig = JSON.stringify(snap);
       if (sig !== this._sig) {
         this._sig = sig;
-        this.setData({ alarms: items, pendingCount });
+        this.setData(Object.assign({ alarms: items, pendingCount }, views));
         homeCache.writePage(CACHE_KEY, snap);
+      } else {
+        // 数据没变，但"正在进行/即将进行"是按当前时间算的，仍要刷新一次
+        this.setData(views);
       }
       this.setData({ loading: false });
 
@@ -187,6 +213,60 @@ Page({
       wx.showToast({ title: err.message || '加载失败', icon: 'none' });
       this.setData({ loading: false });
     }
+  },
+
+  // 派生视图：① 顶部「正在进行/即将进行」 ② 按板块分类的待办列表
+  // 分类 = 车票（火车/飞机/汽车）、门票、酒店、其他，类内按时间先后排
+  buildViews(items) {
+    const now = Date.now();
+
+    const groups = GROUP_DEFS.map((def) => {
+      const list = items.filter((a) => def.types.indexOf(a.type || 'other') >= 0);
+      return {
+        key: def.key,
+        label: def.label,
+        icon: def.icon,
+        items: list,
+        count: list.length,
+        pending: list.filter((a) => a.triggerAt && a.triggerAt > now).length,
+      };
+    }).filter((g) => g.items.length);
+
+    // 正在进行：提醒已经触发但还在 2 小时窗口内（比如"正在开抢"）
+    // 即将进行：7 天内要动手的
+    const cand = items.filter((a) =>
+      a.triggerAt && a.triggerAt > now - ONGOING_WINDOW && a.triggerAt <= now + SOON_WINDOW);
+    // 先按板块优先级（车票 > 门票 > 酒店 > 其他），同级按时间先后
+    cand.sort((a, b) => (groupRank(a.type) - groupRank(b.type)) || (a.triggerAt - b.triggerAt));
+
+    const nowAlarms = cand.slice(0, NOW_LIMIT).map((a) => {
+      const ongoing = a.triggerAt <= now;
+      const gap = a.triggerAt - now;
+      let statusText = '待办';
+      if (ongoing) statusText = '进行中';
+      else if (gap < 3600000) statusText = `${Math.max(1, Math.round(gap / 60000))} 分钟后`;
+      else if (gap < 86400000) statusText = `${Math.round(gap / 3600000)} 小时后`;
+      else statusText = `${Math.round(gap / 86400000)} 天后`;
+      return {
+        ...a,
+        ongoing,
+        statusText,
+        typeLabel: (GROUP_DEFS[groupRank(a.type)] || GROUP_DEFS[GROUP_DEFS.length - 1]).label,
+      };
+    });
+
+    return {
+      groups,
+      nowAlarms,
+      nowExtra: Math.max(0, cand.length - nowAlarms.length),
+    };
+  },
+
+  // 点顶部模块里的某条 → 直接打开编辑抽屉
+  onTapNowAlarm(e) {
+    const idx = Number(e.currentTarget.dataset.idx);
+    const item = this.data.nowAlarms[idx];
+    if (item) this.onTapEdit({ detail: { item } });
   },
 
   computeStatus(triggerAt) {

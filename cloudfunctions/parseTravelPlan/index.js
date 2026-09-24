@@ -8,6 +8,7 @@ const mammoth = require('mammoth');
 const { callLLM } = require('./llm');
 const { geocodeBatch, geocodeOne } = require('./geocode');
 const { sanitizeItems } = require('./normalize');
+const { inferAlarms, INFER_THRESHOLD } = require('./alarm-infer');
 
 const COL_TRIP = 'trips';
 const COL_ALARM = 'ticket_alarms';
@@ -185,7 +186,28 @@ exports.main = async (event, context) => {
     const addRes = await db.collection(COL_TRIP).add({ data: tripData });
     const tripId = addRes._id;
 
-    // 5. 入库 - 闹钟（已在上文清洗）
+    // 5. 入库 - 闹钟
+    //    文档里没写抢票时间（很常见：攻略只写"9月30日 G2249 出发"）→ 用行程反推一份
+    //    「什么时候该抢票/预订/准备」的待办清单，别让闹钟页空着
+    if (alarms.length < INFER_THRESHOLD) {
+      try {
+        const inferred = await inferAlarms({
+          title: tripData.title,
+          startDate,
+          endDate,
+          items,
+        });
+        const have = new Set(alarms.map((a) => `${a.fireAt}|${a.title.replace(/\s+/g, '')}`));
+        inferred.forEach((a) => {
+          const key = `${a.fireAt}|${a.title.replace(/\s+/g, '')}`;
+          if (!have.has(key)) { alarms.push(a); have.add(key); }
+        });
+        alarms.sort((a, b) => a.fireAt - b.fireAt);
+        console.log('[parseTravelPlan] 补上 AI 反推待办，闹钟合计 %d 条', alarms.length);
+      } catch (e) {
+        console.error('[parseTravelPlan] 待办反推异常（不影响主流程）:', e.message);
+      }
+    }
 
     if (alarms.length) {
       // 批量插入，每次最多 20 条

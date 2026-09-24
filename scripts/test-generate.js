@@ -125,13 +125,27 @@ const INPUT = {
   });
   ok((Date.now() - t0) / 1000 < 60, `阶段一耗时 ${outlineSec}s < 云函数 60s 上限`);
 
+  // 阶段二：模拟云端续跑——一次跑不完（partial）就接着调，直到全部生成
   const t1 = Date.now();
-  const plan = await P.buildPlan(INPUT, Object.assign({}, INPUT, phase1));
-  const buildSec = ((Date.now() - t1) / 1000).toFixed(1);
-  ok((Date.now() - t1) / 1000 < 60, `阶段二耗时 ${buildSec}s < 云函数 60s 上限`);
+  let plan = null;
+  let slowest = 0;
+  let rounds = 0;
+  const allItems = [];
+  for (let r = 0; r < 6; r++) {
+    const rt = Date.now();
+    plan = await P.buildPlan(INPUT, Object.assign({}, INPUT, phase1), { doneDayIndexes: plan && plan.doneDayIndexes });
+    const cost = (Date.now() - rt) / 1000;
+    slowest = Math.max(slowest, cost);
+    rounds = r + 1;
+    allItems.push(...plan.items);
+    if (!plan.partial) break;
+  }
+  ok(slowest < 60, `阶段二单次最长耗时 ${slowest.toFixed(1)}s < 云函数 60s 上限（共 ${rounds} 轮续跑）`);
+  // 续跑时每轮只返回新生成的天，这里合并成完整行程再校验
+  if (allItems.length !== plan.items.length) plan.items = allItems;
   const sec = ((Date.now() - t0) / 1000).toFixed(1);
 
-  console.log(`\n生成结果：${plan.title}（${plan.startDate} ~ ${plan.endDate}）耗时 ${sec}s`);
+  console.log(`\n生成结果：${plan.title}（${plan.startDate} ~ ${plan.endDate}）耗时 ${sec}s（${rounds} 轮）`);
   console.log('概览:', plan.summary);
 
   const byDay = new Map();
@@ -163,14 +177,21 @@ const INPUT = {
   ok(backward === 0, '同天内没有时间倒退的条目', backward);
 
   console.log('\n闹钟清单：');
-  plan.alarms.forEach((a) => {
+  (plan.alarms || []).forEach((a) => {
     console.log(`  [${a.fireAtStr}] ${a.title}  (${a.type}${a.source ? '/' + a.source : ''})`);
     if (a.note) console.log(`      └ ${a.note.slice(0, 80)}`);
   });
-  ok(plan.alarms.length >= 3, '至少 3 条闹钟（去程/返程/酒店）', plan.alarms.length);
-  const goA = plan.alarms.find((a) => /去程/.test(a.title));
+  const alarms = plan.alarms || [];
+  ok(alarms.length >= 5, '至少 5 条待办（车票/门票/酒店/准备）', alarms.length);
+  const goA = alarms.find((a) => /去程/.test(a.title));
   ok(!!goA, '存在去程抢票闹钟');
-  ok(plan.alarms.every((a) => a.fireAt > Date.now()), '所有闹钟都在未来');
+  ok(alarms.every((a) => a.fireAt > Date.now()), '所有闹钟都在未来');
+  // 待办必须按时间先后排好（用户照着做就行）
+  let sortedOk = true;
+  for (let i = 1; i < alarms.length; i++) if (alarms[i].fireAt < alarms[i - 1].fireAt) sortedOk = false;
+  ok(sortedOk, '待办按时间从早到晚排序');
+  const types = [...new Set(alarms.map((a) => a.type))];
+  ok(types.length >= 3, `覆盖至少 3 类待办（${types.join('/')}）`, types.length);
 
   if (plan.suggestions && Object.keys(plan.suggestions).length) {
     console.log('\n建议字段:', Object.keys(plan.suggestions).join(', '));
