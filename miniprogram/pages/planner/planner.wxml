@@ -27,33 +27,31 @@
 
       <view class="card">
         <view class="card-title">📅 什么时候去</view>
-        <view class="field">
-          <text class="field-label">出发日期</text>
-          <picker mode="multiSelector" range="{{startRange}}" value="{{startVal}}"
-                  bindcolumnchange="onStartDateCol" bindchange="onStartDate">
-            <view class="field-picker">{{startDate}}</view>
-          </picker>
+        <view class="dt-row">
+          <text class="dt-label">去程时间</text>
+          <view class="dt-pickers">
+            <picker class="dt-date" mode="multiSelector" range="{{startRange}}" value="{{startVal}}"
+                    bindcolumnchange="onStartDateCol" bindchange="onStartDate">
+              <view class="dt-val">{{startDate}}</view>
+            </picker>
+            <picker class="dt-time" mode="time" value="{{goTime}}" bindchange="onGoTime">
+              <view class="dt-val">{{goTime}}</view>
+            </picker>
+          </view>
         </view>
-        <view class="field">
-          <text class="field-label">返程日期</text>
-          <picker mode="multiSelector" range="{{endRange}}" value="{{endVal}}"
-                  bindcolumnchange="onEndDateCol" bindchange="onEndDate">
-            <view class="field-picker">{{endDate}}</view>
-          </picker>
+        <view class="dt-row">
+          <text class="dt-label">返程时间</text>
+          <view class="dt-pickers">
+            <picker class="dt-date" mode="multiSelector" range="{{endRange}}" value="{{endVal}}"
+                    bindcolumnchange="onEndDateCol" bindchange="onEndDate">
+              <view class="dt-val">{{endDate}}</view>
+            </picker>
+            <picker class="dt-time" mode="time" value="{{backTime}}" bindchange="onBackTime">
+              <view class="dt-val">{{backTime}}</view>
+            </picker>
+          </view>
         </view>
         <view class="days-badge">共 {{daysText}}</view>
-        <view class="field">
-          <text class="field-label">去程时刻</text>
-          <picker mode="time" value="{{goTime}}" bindchange="onGoTime">
-            <view class="field-picker">{{goTime}} 出发</view>
-          </picker>
-        </view>
-        <view class="field">
-          <text class="field-label">返程时刻</text>
-          <picker mode="time" value="{{backTime}}" bindchange="onBackTime">
-            <view class="field-picker">{{backTime}} 启程返回</view>
-          </picker>
-        </view>
         <view class="tip">时刻精确到分钟，AI 会把首末两天的大交通卡在这个时间点上</view>
       </view>
 
@@ -137,9 +135,9 @@
       </view>
 
       <movable-area class="day-area" style="height:{{areaH}}px">
-        <movable-view wx:for="{{outlineDays}}" wx:key="idx"
+        <movable-view wx:for="{{outlineDays}}" wx:key="uid"
                       class="day-mv" style="height:{{itemH}}px"
-                      direction="vertical" y="{{item.y}}" damping="40"
+                      direction="vertical" y="{{item.y}}" damping="30"
                       data-idx="{{index}}" bindchange="onDayMove" bindtouchend="onDayMoveEnd">
           <view class="outline-item">
             <view class="oi-head">
@@ -185,34 +183,36 @@
       </view>
 
       <scroll-view scroll-y class="sheet-body">
-        <view class="field">
-          <view class="field-label">当日主题</view>
-          <input class="input-line" value="{{dayForm.theme}}" data-field="theme"
+        <view class="sf">
+          <view class="sf-label">当日主题</view>
+          <input class="sf-input" value="{{dayForm.theme}}" data-field="theme"
                  placeholder="如：重庆出发 · 桂林米粉与日月双塔" bindinput="onDayFormInput" maxlength="40" />
         </view>
-        <view class="field">
-          <view class="field-label">所在城市</view>
-          <input class="input-line" value="{{dayForm.city}}" data-field="city"
+        <view class="sf">
+          <view class="sf-label">所在城市</view>
+          <input class="sf-input" value="{{dayForm.city}}" data-field="city"
                  placeholder="如：桂林" bindinput="onDayFormInput" maxlength="20" />
         </view>
-        <view class="field">
-          <view class="field-label">必玩点（顿号分隔）</view>
-          <input class="input-line" value="{{dayForm.highlights}}" data-field="highlights"
-                 placeholder="如：象鼻山、日月双塔、东西巷" bindinput="onDayFormInput" maxlength="80" />
+        <view class="sf">
+          <view class="sf-label">必玩点（顿号分隔）</view>
+          <textarea class="sf-area" value="{{dayForm.highlights}}" data-field="highlights"
+                 placeholder="如：象鼻山、日月双塔、东西巷" bindinput="onDayFormInput"
+                 auto-height maxlength="120" />
         </view>
-        <view class="field">
-          <view class="field-label">当晚住宿</view>
-          <input class="input-line" value="{{dayForm.overnight}}" data-field="overnight"
+        <view class="sf">
+          <view class="sf-label">当晚住宿</view>
+          <input class="sf-input" value="{{dayForm.overnight}}" data-field="overnight"
                  placeholder="如：桂林市区（最后一天写「返程」）" bindinput="onDayFormInput" maxlength="30" />
         </view>
-        <view class="field">
-          <view class="field-label">大交通（车次 出发站→到达站 时刻）</view>
-          <input class="input-line" value="{{dayForm.moveText}}" data-field="moveText"
-                 placeholder="如：G2249 重庆北→桂林西 14:44-19:38" bindinput="onDayFormInput" maxlength="60" />
+        <view class="sf">
+          <view class="sf-label">大交通（车次 出发站→到达站 时刻）</view>
+          <textarea class="sf-area" value="{{dayForm.moveText}}" data-field="moveText"
+                 placeholder="如：G2249 重庆北→桂林西 14:44-19:38" bindinput="onDayFormInput"
+                 auto-height maxlength="100" />
         </view>
-        <view class="field">
-          <view class="field-label">当天提示</view>
-          <textarea class="input-area" value="{{dayForm.note}}" data-field="note"
+        <view class="sf">
+          <view class="sf-label">当天提示</view>
+          <textarea class="sf-area" value="{{dayForm.note}}" data-field="note"
                     placeholder="如：需提前预约、行李寄存、末班车时间" bindinput="onDayFormInput"
                     auto-height maxlength="100" />
         </view>

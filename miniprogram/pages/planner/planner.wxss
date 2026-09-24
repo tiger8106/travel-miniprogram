@@ -82,6 +82,49 @@
   margin-top: 4rpx;
 }
 
+/* ---------- 去程 / 返程时间行：日期 + 时刻同一行 ---------- */
+
+.dt-row {
+  padding: 18rpx 0;
+  border-bottom: 2rpx solid var(--border-color);
+}
+
+.dt-row:last-of-type {
+  border-bottom: none;
+}
+
+.dt-label {
+  display: block;
+  font-size: 27rpx;
+  color: var(--text-secondary);
+  margin-bottom: 12rpx;
+}
+
+.dt-pickers {
+  display: flex;
+  align-items: stretch;
+}
+
+.dt-date {
+  flex: 1.5;
+}
+
+.dt-time {
+  flex: 1;
+  margin-left: 16rpx;
+}
+
+.dt-val {
+  box-sizing: border-box;
+  background: #f8f9fa;
+  border-radius: 12rpx;
+  padding: 16rpx 12rpx;
+  font-size: 29rpx;
+  color: var(--text-primary);
+  text-align: center;
+  white-space: nowrap;
+}
+
 /* ---------- 选项 chips ---------- */
 
 .chips {
@@ -364,29 +407,40 @@
   max-height: 56vh;
 }
 
-.field-label {
-  font-size: 25rpx;
+/* 抽屉字段：label 一整行在上、输入框一整行在下。
+   不能复用全局 .field（label 固定 160rpx 的横向布局）——长 label
+   会被挤成几行、输入框被压扁，就是截图里排版乱的原因。 */
+.sf {
+  margin-bottom: 24rpx;
+}
+
+.sf-label {
+  font-size: 27rpx;
   color: var(--text-secondary);
-  margin: 16rpx 0 8rpx;
+  margin-bottom: 10rpx;
+  line-height: 1.4;
 }
 
-.input-line {
+.sf-input {
   width: 100%;
   box-sizing: border-box;
   background: #f8f9fa;
   border-radius: 12rpx;
-  padding: 16rpx;
-  font-size: 28rpx;
+  padding: 20rpx 22rpx;
+  font-size: 29rpx;
+  line-height: 1.4;
+  min-height: 84rpx;
 }
 
-.input-area {
+.sf-area {
   width: 100%;
   box-sizing: border-box;
-  min-height: 100rpx;
   background: #f8f9fa;
   border-radius: 12rpx;
-  padding: 16rpx;
-  font-size: 28rpx;
+  padding: 20rpx 22rpx;
+  font-size: 29rpx;
+  line-height: 1.5;
+  min-height: 84rpx;
 }
 
 .sheet-foot {

@@ -370,6 +370,9 @@ Page({
       const days = (res.outline && res.outline.days) || [];
       const outlineDays = days.map((d, i) => ({
         idx: i,
+        // 稳定 uid：movable-view 的 wx:key 必须用它。若用 idx 当 key，
+        // 重排后组件按 key 复用、内容换家，表现为"松手卡片又弹回去"。
+        uid: 'd' + i,
         __src: i,               // 对应 outline.days 的下标，拖动排序后据此重排
         date: d.d || d.date || '',
         theme: d.t || d.theme || '',
@@ -478,23 +481,39 @@ Page({
   onDayMove(e) {
     if (e.detail && e.detail.source && e.detail.source !== 'touch') return;
     this._dragY = e.detail.y;
-    this._dragIdx = Number(e.currentTarget.dataset.idx);
   },
 
-  // 松手：按落点算出目标位置 → 重排 → 自动重算第几天和日期
+  // 松手：按"中心点比较"算落点 → 重排 → 自动重算第几天和日期
+  // 例：第1天拖到第3、4天之间（y 在 2h~3h 之间）→ 数出 2 张卡片在其上方
+  //     → 插到位置 2 → 顺序变为 [原第2天, 原第3天, 原第1天, 原第4天...]，
+  //     原第1天变成第3天，日期自动重排，内容不变。
   onDayMoveEnd(e) {
     const idx = Number(e.currentTarget.dataset.idx);
-    const y = typeof this._dragY === 'number' ? this._dragY : idx * this._itemH;
+    const list0 = this.data.outlineDays;
+    const n = list0.length;
     const h = this._itemH || 1;
-    let target = Math.round(y / h);
-    target = Math.max(0, Math.min(this.data.outlineDays.length - 1, target));
+    const y = this._dragY;
     this._dragY = null;
+
+    // 没有拖动过程（只是点了一下卡片/✏️）：复位即可，不做重排
+    if (typeof y !== 'number') {
+      this.setData({ [`outlineDays[${idx}].y`]: idx * h });
+      return;
+    }
+
+    // 落点 = 有几张"其他"卡片的顶部在这张卡上方（i*h < y）
+    let target = 0;
+    for (let i = 0; i < n; i++) {
+      if (i !== idx && i * h < y) target++;
+    }
+    target = Math.max(0, Math.min(n - 1, target));
+
     if (target === idx) {
       // 没换位置：把卡片弹回原位
       this.setData({ [`outlineDays[${idx}].y`]: idx * h });
       return;
     }
-    const list = this.data.outlineDays.slice();
+    const list = list0.slice();
     const moved = list.splice(idx, 1)[0];
     list.splice(target, 0, moved);
     this.applyDayOrder(list);
