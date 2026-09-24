@@ -42,6 +42,19 @@
           </picker>
         </view>
         <view class="days-badge">共 {{daysText}}</view>
+        <view class="field">
+          <text class="field-label">去程时刻</text>
+          <picker mode="time" value="{{goTime}}" bindchange="onGoTime">
+            <view class="field-picker">{{goTime}} 出发</view>
+          </picker>
+        </view>
+        <view class="field">
+          <text class="field-label">返程时刻</text>
+          <picker mode="time" value="{{backTime}}" bindchange="onBackTime">
+            <view class="field-picker">{{backTime}} 启程返回</view>
+          </picker>
+        </view>
+        <view class="tip">时刻精确到分钟，AI 会把首末两天的大交通卡在这个时间点上</view>
       </view>
 
       <view class="card">
@@ -84,8 +97,10 @@
         <view class="card-title">🎨 兴趣偏好（最多 5 个）</view>
         <view class="chips">
           <view wx:for="{{interestItems}}" wx:key="name"
-                class="chip {{item.on ? 'chip-on' : ''}}"
-                data-idx="{{index}}" bindtap="onToggleInterest">{{item.name}}</view>
+                class="chip {{item.on ? 'chip-on' : ''}}">
+            <text class="chip-text" data-idx="{{index}}" bindtap="onToggleInterest">{{item.name}}</text>
+            <text class="chip-x" data-idx="{{index}}" catchtap="onRemoveInterest">✕</text>
+          </view>
         </view>
         <view class="custom-row">
           <input class="custom-input" value="{{customText}}" placeholder="自定义偏好，如：滑雪、看展、赶海"
@@ -118,20 +133,31 @@
       <view class="card">
         <view class="card-title">🗺️ {{outlineTitle}}</view>
         <view wx:if="{{outlineSummary}}" class="trip-summary">{{outlineSummary}}</view>
-        <view class="tip">看看路线合不合心意，满意再展开成逐天详情</view>
+        <view class="tip">拖动 ☰ 调整天数顺序（日期自动重排），点 ✏️ 修改当天内容</view>
       </view>
 
-      <view class="outline-list">
-        <view wx:for="{{outlineDays}}" wx:key="date" class="outline-item">
-          <view class="outline-day">第{{item.idx + 1}}天</view>
-          <view class="outline-body">
-            <view class="outline-date">{{item.date}}｜{{item.city}}</view>
-            <view class="outline-theme">{{item.theme}}</view>
-            <view wx:if="{{item.highlights}}" class="outline-hl">{{item.highlights}}</view>
-            <view class="outline-night">🏨 {{item.overnight}}</view>
+      <movable-area class="day-area" style="height:{{areaH}}px">
+        <movable-view wx:for="{{outlineDays}}" wx:key="idx"
+                      class="day-mv" style="height:{{itemH}}px"
+                      direction="vertical" y="{{item.y}}" damping="40"
+                      data-idx="{{index}}" bindchange="onDayMove" bindtouchend="onDayMoveEnd">
+          <view class="outline-item">
+            <view class="oi-head">
+              <text class="oi-grip">☰</text>
+              <text class="oi-day">第{{item.idx + 1}}天</text>
+              <text class="oi-date">{{item.date}}</text>
+              <text class="oi-city">{{item.city}}</text>
+              <text class="oi-edit" data-idx="{{index}}" catchtap="onEditDay">✏️</text>
+            </view>
+            <view class="oi-theme">{{item.theme}}</view>
+            <view class="oi-meta">
+              <text class="oi-move" wx:if="{{item.moveText}}">🚄 {{item.moveText}}</text>
+              <text class="oi-night">🏨 {{item.overnight}}</text>
+            </view>
+            <view wx:if="{{item.highlights}}" class="oi-hl">{{item.highlights}}</view>
           </view>
-        </view>
-      </view>
+        </movable-view>
+      </movable-area>
 
       <view class="footer">
         <view class="btn-row">
@@ -142,8 +168,60 @@
                 bindtap="onConfirmOutline" disabled="{{generating}}">
           {{generating ? genTip : '👍 就它了，生成详细行程'}}
         </button>
-        <view class="footer-tip">展开约需 30 秒，会同时生成抢票闹钟和旅行建议</view>
+        <view class="footer-tip">展开约需 30 秒，会同时生成抢票/预订提醒和旅行建议</view>
       </view>
     </block>
   </block>
+
+  <!-- ===== 编辑某一天（底部抽屉） ===== -->
+  <view wx:if="{{dayForm}}" class="sheet-mask" bindtap="onCancelDayForm" catchtouchmove="noop">
+    <view class="sheet" catchtap="noop">
+      <view class="sheet-head">
+        <view class="sheet-head-left">
+          <view class="sheet-title">✏️ 编辑第 {{dayFormIdx + 1}} 天</view>
+          <view class="sheet-sub">改完点保存，AI 会按修改后的大纲展开</view>
+        </view>
+        <view class="sheet-close" bindtap="onCancelDayForm">✕</view>
+      </view>
+
+      <scroll-view scroll-y class="sheet-body">
+        <view class="field">
+          <view class="field-label">当日主题</view>
+          <input class="input-line" value="{{dayForm.theme}}" data-field="theme"
+                 placeholder="如：重庆出发 · 桂林米粉与日月双塔" bindinput="onDayFormInput" maxlength="40" />
+        </view>
+        <view class="field">
+          <view class="field-label">所在城市</view>
+          <input class="input-line" value="{{dayForm.city}}" data-field="city"
+                 placeholder="如：桂林" bindinput="onDayFormInput" maxlength="20" />
+        </view>
+        <view class="field">
+          <view class="field-label">必玩点（顿号分隔）</view>
+          <input class="input-line" value="{{dayForm.highlights}}" data-field="highlights"
+                 placeholder="如：象鼻山、日月双塔、东西巷" bindinput="onDayFormInput" maxlength="80" />
+        </view>
+        <view class="field">
+          <view class="field-label">当晚住宿</view>
+          <input class="input-line" value="{{dayForm.overnight}}" data-field="overnight"
+                 placeholder="如：桂林市区（最后一天写「返程」）" bindinput="onDayFormInput" maxlength="30" />
+        </view>
+        <view class="field">
+          <view class="field-label">大交通（车次 出发站→到达站 时刻）</view>
+          <input class="input-line" value="{{dayForm.moveText}}" data-field="moveText"
+                 placeholder="如：G2249 重庆北→桂林西 14:44-19:38" bindinput="onDayFormInput" maxlength="60" />
+        </view>
+        <view class="field">
+          <view class="field-label">当天提示</view>
+          <textarea class="input-area" value="{{dayForm.note}}" data-field="note"
+                    placeholder="如：需提前预约、行李寄存、末班车时间" bindinput="onDayFormInput"
+                    auto-height maxlength="100" />
+        </view>
+      </scroll-view>
+
+      <view class="sheet-foot">
+        <view class="btn-cancel" bindtap="onCancelDayForm">取消</view>
+        <view class="btn-save" bindtap="onSaveDayForm">保存修改</view>
+      </view>
+    </view>
+  </view>
 </view>

@@ -27,13 +27,8 @@ const COL_SUG = 'suggestions';
 // 生成引擎版本（用于确认线上跑的是哪一版）
 const GEN_VERSION = 'v1.0-gen';
 
-/** 阶段二：写库（行程 + 闹钟 + 建议） */
-async function savePlan(openid, plan) {
-  const db = cloud.database();
-  const now = Date.now();
-  const items = plan.items;
-
-  // 地理编码：地点名 → 经纬度（供 wx.openLocation 打开微信原生地图）
+/** 给一批条目补经纬度（供 wx.openLocation 打开微信原生地图） */
+async function geocodeItems(items) {
   try {
     const addrSet = new Set();
     items.forEach((it) => {
@@ -52,47 +47,98 @@ async function savePlan(openid, plan) {
   } catch (e) {
     console.error('[generatePlan] 地理编码失败（不影响主流程）:', e.message);
   }
+  return items;
+}
 
-  const tripData = {
-    _openid: openid,
-    title: plan.title,
-    summary: plan.summary,
-    startDate: plan.startDate,
-    endDate: plan.endDate,
-    sourceType: 'ai',          // 区别于上传文档解析出来的攻略
-    sourceFileID: '',
-    items,
-    createdAt: now,
-    updatedAt: now,
-    genVersion: GEN_VERSION,
-  };
-  const addRes = await db.collection(COL_TRIP).add({ data: tripData });
-  const tripId = addRes._id;
+/**
+ * 写库（行程 + 闹钟 + 建议），支持续跑：
+ *   - 第一次（含撞时间预算的半成品）→ 新建 trip
+ *   - 后续轮次（带 tripId）→ 把新生成的天合并进已有 trip，最后再补闹钟和建议
+ */
+async function savePlan(openid, plan, tripId) {
+  const db = cloud.database();
+  const now = Date.now();
+  await geocodeItems(plan.items);
 
-  // 闹钟：plan.js 已经算好 fireAt（时间戳）+ fireAtStr（北京时间墙面时刻）
-  const alarms = (plan.alarms || []).map((a) => ({
-    _openid: openid,
-    tripId,
-    title: a.title,
-    note: a.note || '',
-    fireAt: a.fireAt,
-    fireAtStr: a.fireAtStr,
-    type: a.type || 'other',
-    source: a.source || 'ai',
-    createdAt: now,
-    updatedAt: now,
-  }));
-  for (let i = 0; i < alarms.length; i += 20) {
-    await Promise.all(alarms.slice(i, i + 20).map((a) => db.collection(COL_ALARM).add({ data: a })));
+  let finalTripId = tripId;
+  let title = plan.title;
+  let startDate = plan.startDate;
+  let endDate = plan.endDate;
+  let itemCount = plan.items.length;
+
+  if (!finalTripId) {
+    const tripData = {
+      _openid: openid,
+      title: plan.title,
+      summary: plan.summary,
+      startDate: plan.startDate,
+      endDate: plan.endDate,
+      sourceType: 'ai',          // 区别于上传文档解析出来的攻略
+      sourceFileID: '',
+      items: plan.items,
+      createdAt: now,
+      updatedAt: now,
+      genVersion: GEN_VERSION,
+    };
+    const addRes = await db.collection(COL_TRIP).add({ data: tripData });
+    finalTripId = addRes._id;
+  } else {
+    // 续跑合并：本次生成的天覆盖旧的，其余天保留，最后按 dayIndex 排序
+    const old = await db.collection(COL_TRIP).doc(finalTripId).get();
+    const oldData = (old && old.data) || {};
+    const freshDays = new Set(plan.items.map((it) => it.dayIndex));
+    const kept = (oldData.items || []).filter((it) => !freshDays.has(it.dayIndex));
+    const merged = kept.concat(plan.items).sort((a, b) => (a.dayIndex || 0) - (b.dayIndex || 0));
+    await db.collection(COL_TRIP).doc(finalTripId).update({
+      data: {
+        title: plan.title,
+        summary: plan.summary,
+        startDate: plan.startDate,
+        endDate: plan.endDate,
+        items: merged,
+        updatedAt: now,
+        genVersion: GEN_VERSION,
+      },
+    });
+    title = plan.title;
+    startDate = plan.startDate;
+    endDate = plan.endDate;
+    itemCount = merged.length;
   }
 
-  // 旅行建议
-  const s = plan.suggestions || {};
-  if (s.weather || s.gear || s.food || s.tips || s.transport || s.budget) {
-    await db.collection(COL_SUG).add({
-      data: {
+  // 只在最后一批（非 partial）写闹钟和建议，避免续跑时重复插入
+  let alarmCount = 0;
+  if (!plan.partial) {
+    // 幂等：先把这个行程已有的 AI 闹钟清掉再写，重复生成不会翻倍
+    const existed = await db.collection(COL_ALARM).where({ tripId: finalTripId, source: 'ai' }).get();
+    for (let i = 0; i < (existed.data || []).length; i += 20) {
+      await Promise.all(existed.data.slice(i, i + 20).map((a) =>
+        db.collection(COL_ALARM).doc(a._id).remove()));
+    }
+
+    const alarms = (plan.alarms || []).map((a) => ({
+      _openid: openid,
+      tripId: finalTripId,
+      title: a.title,
+      note: a.note || '',
+      fireAt: a.fireAt,
+      fireAtStr: a.fireAtStr,
+      type: a.type || 'other',
+      source: 'ai',
+      createdAt: now,
+      updatedAt: now,
+    }));
+    for (let i = 0; i < alarms.length; i += 20) {
+      await Promise.all(alarms.slice(i, i + 20).map((a) => db.collection(COL_ALARM).add({ data: a })));
+    }
+    alarmCount = alarms.length;
+
+    const s = plan.suggestions || {};
+    if (s.weather || s.gear || s.food || s.tips || s.transport || s.budget) {
+      const oldSug = await db.collection(COL_SUG).where({ tripId: finalTripId }).get();
+      const sugData = {
         _openid: openid,
-        tripId,
+        tripId: finalTripId,
         weather: s.weather || '',
         gear: s.gear || '',
         food: s.food || '',
@@ -100,20 +146,27 @@ async function savePlan(openid, plan) {
         transport: s.transport || '',
         budget: s.budget || '',
         generatedAt: now,
-      },
-    });
+      };
+      if ((oldSug.data || []).length) {
+        await db.collection(COL_SUG).doc(oldSug.data[0]._id).update({ data: sugData });
+      } else {
+        await db.collection(COL_SUG).add({ data: sugData });
+      }
+    }
   }
 
-  console.log('[generatePlan] 入库完成 tripId=%s 条目=%d 闹钟=%d 版本=%s',
-    tripId, items.length, alarms.length, GEN_VERSION);
+  console.log('[generatePlan] 入库完成 tripId=%s 条目=%d 闹钟=%d partial=%s 版本=%s',
+    finalTripId, itemCount, alarmCount, !!plan.partial, GEN_VERSION);
 
   return {
-    tripId,
-    title: tripData.title,
-    startDate: tripData.startDate,
-    endDate: tripData.endDate,
-    itemCount: items.length,
-    alarmCount: alarms.length,
+    tripId: finalTripId,
+    title,
+    startDate,
+    endDate,
+    itemCount,
+    alarmCount,
+    partial: !!plan.partial,
+    doneDayIndexes: plan.doneDayIndexes || [],
     version: GEN_VERSION,
   };
 }
@@ -156,15 +209,21 @@ exports.main = async (event, context) => {
     }
   }
 
-  // ③ 阶段二：展开逐天详情 + 闹钟 + 建议，并入库（~35s）
+  // ③ 阶段二：展开逐天详情 + 闹钟 + 建议，并入库
   //    入参 = 原始输入 + 阶段一返回的 { title, summary, outline }
+  //    续跑：前端拿到 partial=true 就带上 tripId + doneDayIndexes 再调一次，
+  //          直到 partial=false（用户全程只看到"正在细化…"）
   try {
     if (!event.dest && !event.destCity) return { code: -1, msg: '缺少目的地' };
-    const plan = await buildPlan(event, event);
+    const budget = event.budgetMs ? Number(event.budgetMs) : undefined;
+    const plan = await buildPlan(event, event, {
+      doneDayIndexes: event.doneDayIndexes,
+      budgetMs: budget,
+    });
     if (!plan || !plan.items.length) {
       return { code: -1, msg: 'AI 没有生成出有效行程，请调整需求后重试' };
     }
-    return { code: 0, data: await savePlan(openid, plan) };
+    return { code: 0, data: await savePlan(openid, plan, event.tripId) };
   } catch (err) {
     console.error('[generatePlan] build error:', err);
     return { code: -1, msg: err.message || '生成失败' };

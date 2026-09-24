@@ -74,6 +74,21 @@ function buildInterestItems(defaultNames) {
   return INTERESTS.map((name) => ({ name, on: defaultNames.indexOf(name) >= 0 }));
 }
 
+// 兴趣偏好持久化：被用户 ✕ 掉的标签不再出现（没删的无论选没选都保留）
+const INTEREST_KEY = 'planner_interests';
+function loadInterests() {
+  try {
+    const v = wx.getStorageSync(INTEREST_KEY);
+    if (Array.isArray(v) && v.length && v.every((x) => x && x.name)) {
+      return v.map((x) => ({ name: String(x.name), on: !!x.on }));
+    }
+  } catch (e) { /* 读不到就用默认 */ }
+  return buildInterestItems(['自然山水', '当地美食', '拍照打卡']);
+}
+function saveInterests(items) {
+  try { wx.setStorageSync(INTEREST_KEY, items); } catch (e) { /* 存不了不影响使用 */ }
+}
+
 const MAX_DAYS = 12;
 
 Page({
@@ -94,6 +109,9 @@ Page({
     startVal: pickVal(todayStr()),
     endRange: pickRange(plusDays(todayStr(), 2)),
     endVal: pickVal(plusDays(todayStr(), 2)),
+    // 去程/返程时刻（精确到分钟）：AI 必须把首末两天的大交通卡在这个时刻上
+    goTime: '08:00',
+    backTime: '18:00',
     people: 2,
     partyIdx: 1,
     partyOptions: PARTY,
@@ -103,7 +121,7 @@ Page({
     paceOptions: PACE,
     transportIdx: 0,
     transportOptions: TRANSPORT,
-    interestItems: buildInterestItems(['自然山水', '当地美食', '拍照打卡']),
+    interestItems: [],            // onLoad 时从 storage 恢复（✕ 掉的不再出现）
     customText: '',
     mustGo: '',
     extra: '',
@@ -113,10 +131,20 @@ Page({
     outlineTitle: '',
     outlineSummary: '',
     outlineDays: [],
+    itemH: 0,                     // 每天卡片高度（px，拖动排序用）
+    areaH: 0,                     // 拖动区总高度
+    dayForm: null,                // 正在编辑的那一天（null = 抽屉关闭）
+    dayFormIdx: -1,
   },
 
   onLoad() {
     this._offAuth = auth.watch(this, {});
+    // 兴趣偏好从本地恢复：上次 ✕ 掉的不再出现，没删的（选没选都算）全保留
+    this.setData({ interestItems: loadInterests() });
+    // 拖动排序用：卡片高度固定 240rpx，换算成 px
+    const winW = (wx.getWindowInfo && wx.getWindowInfo().windowWidth) || 375;
+    this._itemH = Math.round((winW / 750) * 240);
+    this.setData({ itemH: this._itemH });
     this.updateDaysText();
   },
 
@@ -136,6 +164,9 @@ Page({
   onLoginSuccess() {
     this.setData({ needLogin: false });
   },
+
+  // 遮罩层事件穿透拦截（catchtouchmove 用）
+  noop() {},
 
   // ---------- 表单交互 ----------
 
@@ -229,7 +260,7 @@ Page({
     if (!item) return;
     const key = `interestItems[${idx}].on`;
     if (item.on) {
-      this.setData({ [key]: false });
+      this.setData({ [key]: false }, () => saveInterests(this.data.interestItems));
       return;
     }
     const onCount = this.data.interestItems.filter((i) => i.on).length;
@@ -237,7 +268,17 @@ Page({
       wx.showToast({ title: '最多选 5 个偏好', icon: 'none' });
       return;
     }
-    this.setData({ [key]: true });
+    this.setData({ [key]: true }, () => saveInterests(this.data.interestItems));
+  },
+
+  // ✕ 掉一个偏好：以后制定攻略时不再出现（预置和自定义一视同仁）
+  onRemoveInterest(e) {
+    const idx = Number(e.currentTarget.dataset.idx);
+    const item = this.data.interestItems[idx];
+    if (!item) return;
+    const rest = this.data.interestItems.filter((_, i) => i !== idx);
+    this.setData({ interestItems: rest }, () => saveInterests(rest));
+    wx.showToast({ title: `已移除「${item.name}」`, icon: 'none', duration: 1200 });
   },
 
   onCustomInput(e) {
@@ -261,10 +302,18 @@ Page({
       wx.showToast({ title: '最多选 5 个偏好', icon: 'none' });
       return;
     }
-    this.setData({
-      interestItems: items.concat([{ name, on: true }]),
-      customText: '',
-    });
+    const next = items.concat([{ name, on: true }]);
+    this.setData({ interestItems: next, customText: '' }, () => saveInterests(next));
+  },
+
+  // ---------- 去程 / 返程时刻 ----------
+
+  onGoTime(e) {
+    this.setData({ goTime: e.detail.value });
+  },
+
+  onBackTime(e) {
+    this.setData({ backTime: e.detail.value });
   },
 
   onInput(e) {
@@ -281,6 +330,8 @@ Page({
       dest: (d.dest || '').trim(),
       startDate: d.startDate,
       endDate: d.endDate,
+      startTime: d.goTime,      // 去程时刻（分钟级）
+      endTime: d.backTime,      // 返程时刻（分钟级）
       people: d.people,
       party: PARTY[d.partyIdx],
       budget: BUDGET[d.budgetIdx],
@@ -319,11 +370,18 @@ Page({
       const days = (res.outline && res.outline.days) || [];
       const outlineDays = days.map((d, i) => ({
         idx: i,
+        __src: i,               // 对应 outline.days 的下标，拖动排序后据此重排
         date: d.d || d.date || '',
         theme: d.t || d.theme || '',
         city: d.city || '',
         overnight: d.ov || d.overnight || d.city || '',
+        note: d.n || d.note || '',
+        moveText: ((d.mv || d.moves) || []).map((m) => {
+          const p = [m.c || m.code, `${m.f || m.from || ''}→${m.to || ''}`, `${m.s || m.startTime || ''}${m.e || m.endTime ? '-' + (m.e || m.endTime) : ''}`];
+          return p.filter(Boolean).join(' ');
+        }).join('；'),
         highlights: (d.hl || d.highlights || []).join(' · '),
+        y: i * this._itemH,
       }));
       this.setData({
         step: 'outline',
@@ -333,6 +391,7 @@ Page({
         outlineTitle: res.title || '我的行程',
         outlineSummary: res.summary || '',
         outlineDays,
+        areaH: outlineDays.length * this._itemH,
         title: res.title,
         summary: res.summary,
       });
@@ -350,17 +409,160 @@ Page({
     this.setData({ step: 'form', outline: null });
   },
 
-  // 阶段二：展开逐天详情并入库
+  // ---------- 大纲：编辑某一天 ----------
+
+  onEditDay(e) {
+    const idx = Number(e.currentTarget.dataset.idx);
+    const d = this.data.outlineDays[idx];
+    if (!d) return;
+    this.setData({
+      dayFormIdx: idx,
+      dayForm: {
+        theme: d.theme || '',
+        city: d.city || '',
+        highlights: d.highlights || '',
+        overnight: d.overnight || '',
+        note: d.note || '',
+        moveText: d.moveText || '',
+      },
+    });
+  },
+
+  onDayFormInput(e) {
+    const { field } = e.currentTarget.dataset;
+    this.setData({ [`dayForm.${field}`]: e.detail.value });
+  },
+
+  onCancelDayForm() {
+    this.setData({ dayForm: null, dayFormIdx: -1 });
+  },
+
+  // 保存对某一天的修改（同步回 outline，最后生成时用的就是改过的版本）
+  onSaveDayForm() {
+    const idx = this.data.dayFormIdx;
+    const f = this.data.dayForm;
+    if (idx < 0 || !f) return;
+    const hl = String(f.highlights || '').split(/[、,，·\s]+/).map((s) => s.trim()).filter(Boolean);
+    const key = (k) => `outlineDays[${idx}].${k}`;
+    this.setData({
+      [key('theme')]: f.theme,
+      [key('city')]: f.city,
+      [key('highlights')]: (f.highlights || '').trim(),
+      [key('overnight')]: f.overnight,
+      [key('note')]: f.note,
+      [key('moveText')]: f.moveText,
+      dayForm: null,
+      dayFormIdx: -1,
+    }, () => {
+      this.syncOutlineDay(idx, { theme: f.theme, city: f.city, highlights: hl, overnight: f.overnight, note: f.note });
+      wx.showToast({ title: '已更新第 ' + (idx + 1) + ' 天', icon: 'none', duration: 1200 });
+    });
+  },
+
+  // 把编辑结果写回 this.data.outline（发给云函数的那份数据）
+  syncOutlineDay(idx, patch) {
+    const outline = this.data.outline;
+    if (!outline || !outline.days || !outline.days[idx]) return;
+    const day = Object.assign({}, outline.days[idx], { hl: patch.highlights, highlights: patch.highlights });
+    day.city = patch.city;
+    day.t = patch.theme; day.theme = patch.theme;
+    day.ov = patch.overnight; day.overnight = patch.overnight;
+    day.n = patch.note; day.note = patch.note;
+    const days = outline.days.slice();
+    days[idx] = day;
+    this.setData({ outline: Object.assign({}, outline, { days }) });
+  },
+
+  // ---------- 大纲：拖动排序 ----------
+
+  onDayMove(e) {
+    if (e.detail && e.detail.source && e.detail.source !== 'touch') return;
+    this._dragY = e.detail.y;
+    this._dragIdx = Number(e.currentTarget.dataset.idx);
+  },
+
+  // 松手：按落点算出目标位置 → 重排 → 自动重算第几天和日期
+  onDayMoveEnd(e) {
+    const idx = Number(e.currentTarget.dataset.idx);
+    const y = typeof this._dragY === 'number' ? this._dragY : idx * this._itemH;
+    const h = this._itemH || 1;
+    let target = Math.round(y / h);
+    target = Math.max(0, Math.min(this.data.outlineDays.length - 1, target));
+    this._dragY = null;
+    if (target === idx) {
+      // 没换位置：把卡片弹回原位
+      this.setData({ [`outlineDays[${idx}].y`]: idx * h });
+      return;
+    }
+    const list = this.data.outlineDays.slice();
+    const moved = list.splice(idx, 1)[0];
+    list.splice(target, 0, moved);
+    this.applyDayOrder(list);
+    wx.vibrateShort && wx.vibrateShort({ type: 'light' });
+  },
+
+  // 重排后统一刷新：序号 / 日期 / 纵坐标 / 云函数用的 outline
+  applyDayOrder(list) {
+    const h = this._itemH || 1;
+    const outlineDays = list.map((d, i) => Object.assign({}, d, {
+      idx: i,
+      date: plusDays(this.data.startDate, i),   // 日期跟着顺序重新连续排
+      y: i * h,
+    }));
+    const endDate = outlineDays.length ? outlineDays[outlineDays.length - 1].date : this.data.startDate;
+
+    // 云函数用的 outline.days 也按新顺序重排，并重算每天日期
+    const outline = this.data.outline;
+    let newDays = null;
+    const srcDays = (outline && outline.days) || [];
+    if (srcDays.length === outlineDays.length) {
+      newDays = outlineDays.map((d) => {
+        const src = srcDays[d.__src == null ? d.idx : d.__src] || srcDays[d.idx];
+        return src ? Object.assign({}, src, { d: d.date, date: d.date }) : null;
+      }).filter(Boolean);
+    }
+
+    this.setData({
+      outlineDays,
+      areaH: outlineDays.length * h,
+      endDate,
+      endRange: pickRange(endDate),
+      endVal: pickVal(endDate),
+      outline: newDays ? Object.assign({}, outline, { days: newDays }) : outline,
+    }, () => this.updateDaysText());
+  },
+
+  // ---------- 阶段二：展开逐天详情并入库 ----------
+  //
+  // 无感续跑：云函数一次最多跑 45 秒，天多的时候会返回 partial=true
+  // （已生成的天已经存进库里了）。这里立刻接着调下一次，loading 文案与遮罩
+  // 全程不中断，用户只会觉得"AI 一直在细化"，感觉不到中间续过。
   async onConfirmOutline() {
     if (this.data.generating) return;
     this.setData({ generating: true, genTip: '正在细化每天的安排…' });
+
+    const base = Object.assign({}, this._input, {
+      title: this.data.title,
+      summary: this.data.summary,
+      outline: this.data.outline,
+    });
+
+    let result = null;
+    let payload = base;
     try {
-      const payload = Object.assign({}, this._input, {
-        title: this.data.title,
-        summary: this.data.summary,
-        outline: this.data.outline,
-      });
-      const result = await api.buildPlan(payload, payload);
+      for (let round = 0; round < 6; round++) {
+        const res = await api.buildPlan(payload, payload);
+        result = res;
+        if (!res || !res.partial) break;
+        // 还有天没生成完：带上 tripId 和已完成的天继续，界面上不做任何提示
+        payload = Object.assign({}, base, {
+          tripId: res.tripId,
+          doneDayIndexes: res.doneDayIndexes || [],
+        });
+        this.setData({ genTip: '正在细化每天的安排…' });
+      }
+      if (!result || !result.tripId) throw new Error('生成失败，请重试');
+
       wx.showToast({ title: '攻略已生成', icon: 'success' });
       app.globalData.currentTripId = result.tripId;
       homeCache.clear();

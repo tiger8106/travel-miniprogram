@@ -69,6 +69,8 @@ function normalizeInput(input) {
   const pace = String(i.pace || '适中');
   const interests = Array.isArray(i.interests) ? i.interests.slice(0, 8) : [];
   const transport = String(i.transport || '高铁优先');
+  // 分钟级的去/返程时刻：用户指定后，首末两天的大交通必须落在这个时刻上
+  const validTime = (s) => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(s || '').trim()) ? String(s).trim() : '';
 
   return {
     origin: String(i.origin || i.fromCity || '').trim(),
@@ -77,6 +79,8 @@ function normalizeInput(input) {
     endDate: end,
     days,
     party, peopleNum, budget, pace, interests, transport,
+    goTime: validTime(i.startTime || i.goTime),
+    backTime: validTime(i.endTime || i.backTime),
     mustGo: String(i.mustGo || '').trim(),
     extra: String(i.extra || '').trim(),
     holiday: isHolidayRange(startDate, end),
@@ -88,11 +92,14 @@ function profileText(p) {
   const bits = [
     `${p.origin || '?'}出发 → ${p.dest || '?'}`,
     `${p.days}天（${p.startDate} 至 ${p.endDate}）`,
-    `${p.party} ${p.peopleNum}人`,
-    `预算${p.budget}`,
-    `节奏${p.pace}`,
-    p.transport,
   ];
+  // 去/返程时刻精确到分钟，LLM 必须照这个时刻排首末两天的大交通
+  if (p.goTime) bits.push(`去程 ${p.goTime} 从${p.origin || '出发地'}出发`);
+  if (p.backTime) bits.push(`返程 ${p.backTime} 从目的地启程返回`);
+  bits.push(`${p.party} ${p.peopleNum}人`);
+  bits.push(`预算${p.budget}`);
+  bits.push(`节奏${p.pace}`);
+  bits.push(p.transport);
   if (p.interests.length) bits.push('偏好：' + p.interests.join('、'));
   if (p.mustGo) bits.push('必去：' + p.mustGo);
   if (p.extra) bits.push('特殊要求：' + p.extra);
@@ -116,9 +123,16 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
 {"d":"YYYY-MM-DD","city":"城市","t":"当天主题短语","mv":[{"f":"出发站","to":"到达站","m":"train/plane/car/bus/ship","c":"车次/航班号","s":"HH:mm","e":"HH:mm"}],"hl":["必玩1","必玩2","必玩3"],"ml":["餐1","餐2"],"ov":"当晚住宿城市或片区","n":"关键提示（30字内）"}]}
 
 # 硬性要求
+0. **城市串联原则（最重要）**：把出发地和所有目的地按「总路程最短 + 换乘最少 + 单程耗时最短」串成一条线。
+   - 先判断各城市间的交通方式：有高铁/动车直达的优先走高铁，没有直达高铁再看飞机，近距离（≤3 小时车程）优先高铁/直通车大巴。
+   - 走法要单向推进，禁止来回折返（例：重庆→桂林→阳朔→南宁→重庆，不要 重庆→南宁→桂林→重庆 这种回头路）。
+   - 相邻城市间移动尽量控制在 3 小时内；需要更久的，安排在整天里并给出具体班次与运行时长。
+   - 同一城市的景点连片玩完再换下一城，避免同城反复往返。
 1. ds 恰好 ${p.days} 天，日期从 ${p.startDate} 连续到 ${p.endDate}，每天一个元素，顺序递增。
 2. 路线顺路：相邻两天不来回折返；同一城市连片玩完再换城。
 3. 第一天从（或抵达）目的地${p.origin ? `（出发地 ${p.origin}）` : ''}，最后一天返回${p.origin || '出发地'}。
+3.1 ${p.goTime ? `**去程时刻已由用户指定**：第一天的大交通必须在 ${p.goTime} 从${p.origin || '出发地'}出发（mv 里 s 字段写 ${p.goTime}，e 按实际运行时长推算）。` : '去程班次请给出一个具体、合理的发车/起飞时刻（s/e 都要精确到分钟）。'}
+3.2 ${p.backTime ? `**返程时刻已由用户指定**：最后一天的大交通必须在 ${p.backTime} 从目的地启程返回${p.origin || '出发地'}（mv 里 s 字段写 ${p.backTime}）。` : '返程班次请给出合理的发车/起飞时刻（精确到分钟）。'}
 4. mv 只写城际大交通：火车给参考车次走向（如 G2249）与运行时刻，飞机给航线；市内交通不写。
 5. hl 每天 3-4 个**具体景点/片区名称**，别写"逛逛市区"这种废话；兼顾${p.pace}节奏${p.interests.length ? '和偏好' : ''}。
 6. ${p.mustGo ? `用户必去：${p.mustGo}，必须排进合适的一天。` : ''}${p.extra ? `特殊要求：${p.extra}` : ''}
@@ -197,8 +211,8 @@ dayIndex 全部填 ${idx}。
 4. activity 要写得像真人行程："14:44 乘 G2249 前往桂林西（约 4 小时 54 分）"、"20:10 去崇善米粉吃第一顿桂林米粉，点卤菜粉/锅烧粉"、"21:00 步行前往杉湖，看日月双塔夜景"。**要有具体名称**（店名/菜品/景点具体区域/观景台），不要写"吃晚饭""逛逛"这种空话。
 5. 涉及移动的动作必须填 startLocation / endLocation（起点空着时，用上一条的位置或昨晚住宿地），并填 transportType：步行=walk，打车/包车=car，公交地铁/电动车=ride，火车=train，飞机=plane。没有移动（吃饭、休息、游览）三项都留空。
 6. 备注写进 note：预约要求、末班车时间、门票信息、行李寄存、拍照机位、当地支付/语言提示等实用信息。
-7. ${isFirst ? `第一天：从${p.origin || '出发地'}出发，先写前往车站/机场的集合与安检预留时间（国内高铁至少提前 45 分钟到站，飞机提前 2 小时）。` : ''}
-8. ${isLast ? `最后一天：以返回${p.origin || '出发地'}结束，写到家/到站为止，并预留返程交通时间。` : ''}
+7. ${isFirst ? `第一天：从${p.origin || '出发地'}出发，先写前往车站/机场的集合与安检预留时间（国内高铁至少提前 45 分钟到站，飞机提前 2 小时）。${p.goTime ? `**大交通班次必须卡在 ${p.goTime} 发车/起飞**，请按这个时刻倒推集合、安检、候车时间，不要写成别的时刻。` : ''}` : ''}
+8. ${isLast ? `最后一天：以返回${p.origin || '出发地'}结束，写到家/到站为止，并预留返程交通时间。${p.backTime ? `**返程班次必须卡在 ${p.backTime} 启程**，按这个时刻倒推退房、前往车站/机场的时间。` : ''}` : ''}
 9. category 取值：景点游览=sight，餐饮=food，住宿/回酒店=hotel，交通=transport，门票预订/取票=ticket，其他=other。
 10. 输出顺序按时间先后。只输出数组，不要任何解释。`;
 
@@ -208,29 +222,67 @@ dayIndex 全部填 ${idx}。
   ];
 }
 
-async function genDayItems(p, outline) {
+/**
+ * 逐天细化：分批并行 + 时间预算，撞上限就返回已完成的部分（续跑模式）
+ *
+ * 为什么要分批：8 天一次性并行要 35~40s，遇到慢模型随时撞上云函数 60s 上限，
+ * 一撞就前功尽弃。改成"每批 N 天、跑完一批看一眼剩余时间"，时间不够就先把
+ * 已经生成好的天交回去（partial=true），前端静默再调一次接着生成剩下几天。
+ * 用户全程只看到"正在细化…"，感觉不到中间断过。
+ *
+ * @param {object} p 归一化输入
+ * @param {object} outline 大纲
+ * @param {object} opts { doneDayIndexes: 已完成的天（续跑时跳过）, deadline: 本次调用的截止时间戳 }
+ */
+async function genDayItems(p, outline, opts = {}) {
   const days = outline.days;
-  const tasks = days.map((day, idx) =>
-    chatWithRetry(dayDetailPrompt(p, day, idx, outline), 3500)
-      .then((t) => ({ i: idx, items: asArray(parseJSONFromText(t)) }))
-      .catch((e) => ({ i: idx, error: e.message }))
-  );
-  const rs = await Promise.all(tasks);
+  const done = new Set(asArray(opts.doneDayIndexes).map(Number));
+  const pending = days.map((_, i) => i).filter((i) => !done.has(i));
+  const deadline = opts.deadline || (Date.now() + 40 * 1000);
+  // 一批 3 天：单次并行约 12-18s，既够快又留得出判断时间的余地
+  const WAVE = 3;
+  // 剩余时间不足以安全跑完下一批就收工（一批最坏约 20s，留 12s 余量给写库和返回）
+  const WAVE_RESERVE = 12 * 1000;
 
   const items = [];
+  const finished = [];
   const failed = [];
-  rs.forEach((r) => {
-    if (r.error) { failed.push(r.i); console.error(`[generatePlan] 第${r.i + 1}天细化失败:`, r.error); return; }
-    r.items.forEach((it) => {
-      if (!it || !String(it.activity || '').trim()) return;
-      items.push(Object.assign({}, it, { dayIndex: r.i })); // dayIndex 由代码强制写入，不信任 LLM
+
+  for (let k = 0; k < pending.length; k += WAVE) {
+    const batch = pending.slice(k, k + WAVE);
+    if (Date.now() + WAVE_RESERVE > deadline) {
+      console.log('[generatePlan] 时间预算不足，停止在已完成部分（续跑）: 已完成=%d 剩余=%d',
+        finished.length, pending.length - finished.length - failed.length);
+      break;
+    }
+    const rs = await Promise.all(batch.map((idx) =>
+      chatWithRetry(dayDetailPrompt(p, days[idx], idx, outline), 3500)
+        .then((t) => ({ i: idx, items: asArray(parseJSONFromText(t)) }))
+        .catch((e) => ({ i: idx, error: e.message }))
+    ));
+    rs.forEach((r) => {
+      if (r.error) { failed.push(r.i); console.error(`[generatePlan] 第${r.i + 1}天细化失败:`, r.error); return; }
+      if (!r.items.length) { failed.push(r.i); return; }
+      r.items.forEach((it) => {
+        if (!it || !String(it.activity || '').trim()) return;
+        items.push(Object.assign({}, it, { dayIndex: r.i })); // dayIndex 由代码强制写入，不信任 LLM
+      });
+      finished.push(r.i);
     });
-  });
+  }
 
-  if (!items.length) throw new Error('逐天细化全部失败，未能生成任何行程项');
-  if (failed.length === days.length) throw new Error('逐天细化全部失败');
+  const doneAll = Array.from(done).concat(finished);
+  const stillTodo = days.map((_, i) => i).filter((i) => !doneAll.includes(i) && !failed.includes(i));
 
-  return { items, failedDayIndexes: failed };
+  if (!items.length && !stillTodo.length) throw new Error('逐天细化全部失败，未能生成任何行程项');
+  if (!items.length && !done.size) throw new Error('逐天细化全部失败');
+
+  return {
+    items,                       // 本次新生成的条目（续跑时只含剩余天）
+    doneDayIndexes: doneAll,     // 已完成（含之前轮次）
+    failedDayIndexes: failed,
+    partial: stillTodo.length > 0,  // 还有没生成的天 → 前端继续调
+  };
 }
 
 // ============================================================
@@ -356,14 +408,32 @@ function buildFallbackAlarms(p, outline) {
     if (i === outline.days.length - 1) return; // 返程日的景点不值得预约
     asArray(d.highlights).forEach((h) => h && allHighlights.push(String(h)));
   });
-  const hotSpot = allHighlights.find((h) => TICKET_HINT.test(h)) || allHighlights[0] || '';
-  if (hotSpot) {
+  // 门票：最多盯 3 个最像"需要预约"的景点，别只给一条
+  const hotSpots = allHighlights.filter((h) => TICKET_HINT.test(h)).slice(0, 3);
+  const spots = hotSpots.length ? hotSpots : allHighlights.slice(0, 1);
+  spots.forEach((s, i) => {
     push(
-      `开始盯${String(hotSpot).slice(0, 20)}门票/预约放票`,
-      shiftDate(p.startDate, -TICKET_PRESALE_DAYS), '09:00', 'ticket',
-      '热门景区多提前 1-7 天限额放票，国庆等假期需每天查看余票公告，具体规则以景区官方通知为准。'
+      `开始盯${String(s).slice(0, 20)}门票/预约放票`,
+      shiftDate(p.startDate, -TICKET_PRESALE_DAYS + i), '09:00', 'ticket',
+      '热门景区多提前 1-7 天限额放票，假期需每天查看余票公告，具体规则以景区官方通知为准，下单前请核对。'
+    );
+  });
+
+  // 4. 包车/租车：用户选了自驾或包车时，提前 7 天定车
+  if (/自驾|包车/.test(p.transport)) {
+    push(
+      '预订包车/租车（含保险与取还车点）',
+      shiftDate(p.startDate, -7), '10:00', 'other',
+      '长假车辆紧张，提前锁定车型与取还车网点，确认是否支持异地还车，下单前请核对。'
     );
   }
+
+  // 5. 行前准备：证件 / 订单 / 装备核对（行程前 2 天）
+  push(
+    '核对证件、订单与装备清单',
+    shiftDate(p.startDate, -2), '20:00', 'other',
+    '把车票/门票/酒店订单、身份证、充电宝与药品逐项过一遍，缺的当晚补齐。'
+  );
 
   return list;
 }
@@ -374,27 +444,40 @@ async function genAlarms(p, outline) {
     return `第${i + 1}天 ${d.date}｜${d.theme}｜住${d.overnight || d.city}${mv ? '｜交通：' + mv : ''}`;
   }).join('\n');
 
-  const prompt = `一份${p.days}天行程（${p.startDate} ~ ${p.endDate}）需要提前抢票/预约的事项日历。今天按北京时间计算。
+  const prompt = `一份${p.days}天行程（${p.startDate} ~ ${p.endDate}）的「待办日历」。今天按北京时间计算。
 
 【行程】
 ${lines}
 
 【旅行需求】${profileText(p)}
 
-请列出**必须提前动手**的事项，输出 JSON 数组，每个元素：
-{"title":"...","fireAt":"YYYY-MM-DD HH:mm","type":"train/plane/ticket/hotel/bus/other","note":"..."}
+请**穷举**这份行程里所有需要提前预订、抢购、预约或提前准备的事项，输出 JSON 数组，每个元素：
+{"title":"...","fireAt":"YYYY-MM-DD HH:mm","type":"train/plane/bus/ticket/hotel/other","note":"..."}
 
-# 严格规则
-1. title 用中文，写清楚是抢什么（例："抢去程票：重庆北→桂林西 G2249（9月30日车次）"）。
-2. fireAt 必须是**未来**的具体日期+时刻。
-   - 火车票按 12306 预售期 15 天（含乘车当日）：乘车日减 14 天 = 开票日；开票时刻一般取 09:00（各站起售时间不同，在 note 里说明）。
-   - 机票提前 30 天起关注。
-   - 酒店在出发前 7 天左右锁定可免费取消房型，时间取 20:00。
-   - 热门景区门票提前 1-7 天开始预约/盯放票，时间取 09:00。
-3. 需要"提前 X 分钟进 App 准备"的，单独生成一条准备闹钟（比正式开抢早 5 分钟）。
-4. **拒绝编造**：日期一定要用上面的日期推算，不要输出模糊或已过去的日期；算不准的事项宁可不输出。
-5. ${p.holiday ? '这是法定长假行程，抢票/预约压力很大，宁多勿漏。' : ''}
-6. 同一件事不要重复。只输出数组。`;
+# 必须覆盖的类别（漏了要补）
+1. 大交通票：去程/返程火车票（type=train）、机票（plane）、长途汽车票/直通车票（bus）。
+2. 行程内每一段城际交通：跨城高铁、城际大巴、轮渡、包车/租车（对应 train/bus/other）。
+3. 酒店：行程涉及的每一晚住宿都要单独一条（type=hotel），注明城市和日期。
+4. 门票/预约：每一个需要实名预约、限量放票或分时段入园的景区/项目（type=ticket）。
+5. 体验项目：竹筏/游船/漂流/潜水/温泉/跟拍/演出等需提前预订的项目（type=ticket 或 other）。
+6. 行前准备：证件（身份证/护照/签证/边境通行证）、租车驾照、宠物寄养、装备采购、药品、外币/流量卡等（type=other），按"出发前 N 天"排。
+
+# 时间推算规则（按中国各平台实际能查到的开放时间）
+- 火车票 12306 预售期 15 天（含乘车当日）：乘车日减 14 天 = 开票日，时刻取 09:00（各站起售时刻不同）。
+- 机票：普遍提前 30 天以上放票/开卖，取 30 天前的 10:00 开始关注。
+- 长途汽车票/直通车：一般提前 3-7 天开售，取 5 天前的 09:00。
+- 酒店：出发前 7 天 20:00 锁定可免费取消房型（长假再提前 3 天复查一次价格）。
+- 景区门票：按国内主流 OTA/景区公众号，普遍提前 1-7 天放票，热门景区取 7 天前 09:00 开始盯。
+- 行前准备类：证件/装备取出发前 3-5 天，值机/选座取出发前 1 天。
+
+# 输出要求
+1. title 写清楚抢什么、对应哪一天（例："抢去程票：重庆北→桂林西 G2249（9月30日车次）"）。
+2. fireAt 必须是**未来的具体日期+时刻**，且**按时间从早到晚排序**。
+3. note 里写明推算依据，并以「具体放票/开放时间以官方 App 或景区公告为准，下单前请核对」结尾。
+4. 需要"提前进 App 准备"的，另起一条准备闹钟（比正式开抢早 5 分钟）。
+5. **拒绝编造**：只用上面的日期推算；算不准宁可不输出，不要输出模糊或已过去的日期。
+6. ${p.holiday ? '这是法定长假行程，抢票/预约压力极大，宁多勿漏。' : ''}
+7. 同一件事不要重复。只输出数组。`;
 
   let nominated = [];
   try {
@@ -494,30 +577,60 @@ async function generateOutline(rawInput) {
  * @param {object} rawInput 与第一阶段相同的用户输入
  * @param {object} outlineData 第一阶段返回的 outline（含 days / nights / title / summary）
  */
-async function buildPlan(rawInput, outlineData) {
+async function buildPlan(rawInput, outlineData, opts = {}) {
   const p = normalizeInput(rawInput);
   const outline = (outlineData && outlineData.outline) || outlineData || {};
   if (!asArray(outline.days).length) throw new Error('缺少行程大纲，无法展开详情');
 
   const t1 = Date.now();
-  const [detail, alarms, suggestions] = await Promise.all([
-    genDayItems(p, outline),
+  // 时间预算：默认 45s，留 15s 给写库和返回（云函数上限 60s）
+  const budget = opts.budgetMs || 45 * 1000;
+  const deadline = t1 + budget;
+
+  const detail = await genDayItems(p, outline, {
+    doneDayIndexes: opts.doneDayIndexes,
+    deadline,
+  });
+  console.log('[generatePlan] 细化完成 %dms, 原始条目=%d, partial=%s',
+    Date.now() - t1, detail.items.length, detail.partial);
+
+  const items = sanitizeItems(detail.items);
+
+  // 还有天没生成完（撞时间预算）→ 只交回已完成的部分，闹钟/建议留到最后一次生成，
+  // 前端拿到 partial=true 会立刻静默再调一次，用户全程只看到"正在细化…"
+  if (detail.partial) {
+    return {
+      title: String((outlineData && outlineData.title) || outline.title || '我的行程').slice(0, 60),
+      summary: String((outlineData && outlineData.summary) || outline.summary || '').slice(0, 200),
+      startDate: p.startDate,
+      endDate: p.endDate,
+      items,
+      partial: true,
+      doneDayIndexes: detail.doneDayIndexes,
+      meta: {
+        days: p.days,
+        failedDayIndexes: detail.failedDayIndexes,
+        elapsedMs: Date.now() - t1,
+      },
+    };
+  }
+
+  const [alarms, suggestions] = await Promise.all([
     genAlarms(p, outline),
     genSuggestions(p, outline),
   ]);
-  console.log('[generatePlan] 细化完成 %dms, 原始条目=%d', Date.now() - t1, detail.items.length);
-
-  const items = sanitizeItems(detail.items);
   console.log('[generatePlan] 清洗后条目=%d, 闹钟=%d', items.length, alarms.length);
 
   return {
-    title: String(outlineData.title || outline.title || '我的行程').slice(0, 60),
-    summary: String(outlineData.summary || outline.summary || '').slice(0, 200),
+    title: String((outlineData && outlineData.title) || outline.title || '我的行程').slice(0, 60),
+    summary: String((outlineData && outlineData.summary) || outline.summary || '').slice(0, 200),
     startDate: p.startDate,
     endDate: p.endDate,
     items,
-    alarms,
+    alarms: alarms.sort((a, b) => a.fireAt - b.fireAt),  // 待办按时间先后排，用户照着做就行
     suggestions,
+    partial: false,
+    doneDayIndexes: detail.doneDayIndexes,
     meta: {
       days: p.days,
       failedDayIndexes: detail.failedDayIndexes,
