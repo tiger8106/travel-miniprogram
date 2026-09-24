@@ -1,0 +1,116 @@
+<view class="container">
+  <view wx:if="{{loading}}" class="loading">加载中…</view>
+
+  <block wx:else>
+    <view class="head-card">
+      <text class="head-icon">{{icon}}</text>
+      <view class="head-main">
+        <view class="head-title">{{label}}</view>
+        <view class="head-sub">{{pendingCount ? pendingCount + ' 项待办 / ' : ''}}共 {{alarms.length}} 条提醒</view>
+      </view>
+      <view class="head-add" bindtap="onAdd">＋ 添加</view>
+    </view>
+
+    <view wx:if="{{!alarms.length}}" class="empty">
+      <text class="empty-icon">{{icon}}</text>
+      <view>这个分类还没有提醒</view>
+      <view class="empty-sub">点右上角「＋ 添加」手动加一条</view>
+    </view>
+
+    <view wx:else class="list">
+      <ticket-alarm wx:for="{{alarms}}" wx:key="_id"
+                    item="{{item}}"
+                    devMode="{{devMode}}"
+                    bind:tapcalendar="onTapCalendar"
+                    bind:tapedit="onTapEdit"
+                    bind:tapdelete="onDelete" />
+    </view>
+  </block>
+
+  <!-- ===== 添加 / 编辑 · 底部抽屉 ===== -->
+  <view wx:if="{{editForm}}" class="sheet-mask" bindtap="onCancelEdit" catchtouchmove="noop">
+    <view class="sheet" catchtap="noop">
+      <view class="sheet-handle"></view>
+
+      <view class="sheet-head">
+        <view class="sheet-head-left">
+          <view class="sheet-title">{{editingId === 'new' ? '添加提醒' : '编辑提醒'}}</view>
+          <view class="sheet-sub">{{editForm.fireAtDate}} {{editForm.fireAtTime}}</view>
+        </view>
+        <view class="sheet-close" bindtap="onCancelEdit">✕</view>
+      </view>
+
+      <scroll-view scroll-y class="sheet-body">
+        <view class="field">
+          <view class="field-label">🔔 标题</view>
+          <input class="input-line" placeholder="如：抢 G2249 高铁票" placeholder-class="ph"
+                 value="{{editForm.title}}" data-field="title"
+                 bindinput="onEditInput" maxlength="30" />
+        </view>
+
+        <view class="field">
+          <view class="field-label">⏰ 提醒时间</view>
+          <view class="time-row-edit">
+            <picker mode="date" value="{{editForm.fireAtDate}}" bindchange="onDateChange" class="time-picker">
+              <view class="time-pill">
+                <text class="time-pill-label">日期</text>
+                <text class="time-pill-value">{{editForm.fireAtDate}}</text>
+              </view>
+            </picker>
+            <text class="time-dash">—</text>
+            <picker mode="time" value="{{editForm.fireAtTime}}" bindchange="onTimeChange" class="time-picker">
+              <view class="time-pill">
+                <text class="time-pill-label">时间</text>
+                <text class="time-pill-value">{{editForm.fireAtTime}}</text>
+              </view>
+            </picker>
+          </view>
+        </view>
+
+        <view class="field">
+          <view class="field-label">🏷️ 类型</view>
+          <view class="chip-wrap">
+            <view wx:for="{{typeOptions}}" wx:key="value"
+                  class="chip {{editForm.type === item.value ? 'chip-on' : ''}}"
+                  data-value="{{item.value}}" bindtap="onEditType">
+              <text class="chip-icon">{{item.icon}}</text>{{item.label}}
+            </view>
+          </view>
+        </view>
+
+        <view class="field">
+          <view class="field-label">🗒️ 备注</view>
+          <textarea class="input-area" placeholder="车次、检票口、注意事项等（选填）" placeholder-class="ph"
+                    value="{{editForm.note}}" data-field="note"
+                    bindinput="onEditInput" auto-height maxlength="100" />
+        </view>
+      </scroll-view>
+
+      <view class="sheet-foot">
+        <view class="btn-cancel" bindtap="onCancelEdit">取消</view>
+        <view class="btn-save" bindtap="onSheetSave">{{editingId === 'new' ? '添加提醒' : '保存修改'}}</view>
+      </view>
+    </view>
+  </view>
+
+  <!-- ===== 删除确认 ===== -->
+  <view wx:if="{{delItem}}" class="sheet-mask confirm-mask" bindtap="onCancelDelete" catchtouchmove="noop">
+    <view class="confirm-card" catchtap="noop">
+      <view class="confirm-icon">🗑</view>
+      <view class="confirm-title">删除这个提醒？</view>
+      <view class="confirm-text">{{delItem.title}}</view>
+      <view class="confirm-hint">删除后将不再提醒</view>
+      <view class="confirm-actions">
+        <view class="btn-cancel" bindtap="onCancelDelete">取消</view>
+        <view class="btn-del" bindtap="onConfirmDelete">删除</view>
+      </view>
+    </view>
+  </view>
+
+  <!-- 用户隐私保护授权弹窗（写入系统日历前由微信触发） -->
+  <privacy-popup show="{{showPrivacy}}"
+                 feature="写入系统日历"
+                 desc="我们只会在你主动点击写入时把这条提醒加进系统日历，不会读取你日历里的其他日程。"
+                 denyTip="未同意则无法写入系统日历"
+                 bind:close="onClosePrivacy" />
+</view>

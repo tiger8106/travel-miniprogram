@@ -182,6 +182,10 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
    - 走法要单向推进，禁止来回折返（例：重庆→桂林→阳朔→南宁→重庆，不要 重庆→南宁→桂林→重庆 这种回头路）。
    - 相邻城市间移动尽量控制在 3 小时内；需要更久的，安排在整天里并给出具体班次与运行时长。
    - 同一城市的景点连片玩完再换下一城，避免同城反复往返。
+0.1 **按真实地理方位聚类，绝不南北来回跑**：先按实际地理位置把目的地分组（例：龙脊梯田在桂林北面约 2.5 小时车程，阳朔/兴坪在桂林南面，明仕田园/德天瀑布在桂西南崇左），**同一方位的景点连片玩完再去下一方位**。一般规律：先去离主基地最远的一端玩（如先去北面的龙脊），回到主基地后再顺着返程方向一路玩过去（南面的阳朔→更南的崇左/德天），让整条线只有"前进"没有"回头"。
+0.2 **住宿闭环（铁律）**：每一天的 ov（当晚住宿地）就是**第二天早上出发的地方**，两天之间不许断链。同一片区的多天写**同一个 ov**（同一家酒店连住，如"桂林市区（两江四湖片区）"连住两晚）；中途去远郊景区（如山中梯田）就近住一晚，大行李寄存在基地酒店（写进 n 提示），回来续住同一家。禁止出现"昨晚住 A，第二天一早却从 B 出发"的安排。
+0.3 **一个基地管一片**：同一片景点（如阳朔的西街/遇龙河/十里画廊/兴坪）住在同一个基地辐射游览，不要每天换酒店搬行李；能当天往返的远景点就当天往返。
+0.4 **交通+游览二合一的段优先这样串**：游船/观光列车这类"坐上去本身就是游览"的交通（如漓江游船桂林→阳朔），直接作为当天的转移方式（mv 的 m 填 ship，同时写进 hl），下船即开始玩，**不要"游完再原路坐车回来、再重新坐车过去"**。
 1. ds 恰好 ${p.days} 天，日期从 ${p.startDate} 连续到 ${p.endDate}，每天一个元素，顺序递增。
 2. 路线顺路：相邻两天不来回折返；同一城市连片玩完再换城。
 3. 第一天从（或抵达）目的地${p.origin ? `（出发地 ${p.origin}）` : ''}，最后一天返回${p.origin || '出发地'}。
@@ -357,7 +361,8 @@ dayIndex 全部填 ${idx}。
     - 写的是 plane/航班 → 按机场流程安排（提前 2 小时到机场），transportType 填 plane。
     - 不要自作主张把火车改飞机、把飞机改火车，也不要改车次和时刻；即便你觉得另一种方式更快也不行，这是用户的选择。
 ${/高铁/.test(p.transport) ? '12. 用户交通偏好是「高铁优先」：后续所有城际段一律按高铁/动车安排，不要生成任何航班。' : ''}
-13. **activity 里只写"要做什么"，禁止写你的推理过程**：不要出现"注：根据大纲…""此处假设…""若用户…""我无法/我需要"这类自我纠错或向我的解释。这段文字会原样显示在用户的行程里，写了就很难看。`;
+13. **activity 里只写"要做什么"，禁止写你的推理过程**：不要出现"注：根据大纲…""此处假设…""若用户…""我无法/我需要"这类自我纠错或向我的解释。这段文字会原样显示在用户的行程里，写了就很难看。
+14. **住宿闭环（铁律）**：昨晚住哪，今天第 1 条就从哪出发——${prev ? `昨晚住「${prev.overnight || prev.city}」，第 1 条应写成"从该酒店出发/退房寄存行李"，startLocation 填它` : '今天从出发地启程'}；当天最后 1 条必须是"回到${day.overnight || day.city}住宿地休息"（category=hotel，endLocation 填住宿地）。绝不允许昨晚住 A 今早却凭空从 B 出发、或晚上收在 C 但住宿地是 D。若今天去远郊当天往返，可在早上加一条"寄存大行李于前台"（note 里说明回来续住）。`;
 
   return [
     { role: 'system', content: SYS_PROMPT },
@@ -435,6 +440,20 @@ async function genDayItems(p, outline, opts = {}) {
         if (!it || !String(it.activity || '').trim()) return;
         items.push(Object.assign({}, it, { dayIndex: r.i })); // dayIndex 由代码强制写入，不信任 LLM
       });
+      // 住宿闭环兜底：LLM 偶尔忘了把"昨晚住宿"写成第一条的起点。
+      // 这里做确定性修补：当天第一条的 startLocation 为空 → 补昨晚住宿地；
+      // 当天最后一条的 endLocation 为空且 category=hotel → 补今晚住宿地。
+      const prevOv = r.i > 0 ? (days[r.i - 1].overnight || days[r.i - 1].city || '') : '';
+      const tonightOv = days[r.i].overnight || days[r.i].city || '';
+      const dayItems = items.filter((it) => it.dayIndex === r.i);
+      if (dayItems.length) {
+        const first = dayItems[0];
+        if (!String(first.startLocation || '').trim() && prevOv) first.startLocation = prevOv;
+        const last = dayItems[dayItems.length - 1];
+        if (last.category === 'hotel' && !String(last.endLocation || '').trim() && tonightOv) {
+          last.endLocation = tonightOv;
+        }
+      }
       finished.push(r.i);
     });
   }
@@ -506,29 +525,31 @@ function sanitizeAlarmCandidates(list, p) {
 }
 
 /**
- * 代码兜底：无论如何都要有的几条硬闹钟
- *   · 去程/返程火车票开票日（12306 提前 15 天含当日 → T-14）
- *   · 酒店：出发前 7 天锁定可免费取消房型
- *   · 热门景区门票：提前 N 天开始预约
- * 只有当这些日期还没过去时才生成。
+ * 规则闹钟工厂：统一处理"算出的开票日已过去 → 降级成近期提醒"，
+ * 供 buildFallbackAlarms（底线闹钟）和 backfillMissingAlarms（查漏补齐）共用。
  */
-function buildFallbackAlarms(p, outline) {
-  const now = Date.now();
-  const list = [];
-  const tripStartTs = parseCnTime(`${p.startDate}T00:00:00`);
-  const tripEndTs = parseCnTime(`${p.endDate}T23:59:00`);
+function makeRuleAlarmPusher(list, tripStartTs, tripEndTs) {
   let overdueCount = 0; // 已经过了开票日的条数：错开提醒时间，别一堆闹钟挤在同一分钟
-  const push = (title, dateStr, timeStr, type, note) => {
+  const nowMs = () => Date.now();
+  return function push(title, dateStr, timeStr, type, note) {
     let ts = parseCnTime(`${dateStr}T${timeStr}:00`);
     if (!ts || isNaN(ts)) return;
     let finalNote = note || '';
-    if (ts < now) {
+    if (ts < nowMs()) {
       // 算出来的开票日已经过去了：行程还没出发的话，降级成"赶紧去看"的近期提醒
       // （用户多半是临时才规划，这一步能救回大量"本该早就抢票"的场景）
-      if (tripEndTs < now) return;          // 行程都结束了，不再打扰
-      if (tripStartTs < now - DAY_MS) return; // 出发超过一天 → 购票窗口已过
+      if (tripEndTs < nowMs()) return;          // 行程都结束了，不再打扰
+      if (tripStartTs < nowMs() - DAY_MS) return; // 出发超过一天 → 购票窗口已过
       overdueCount += 1;
-      ts = now + (1 + overdueCount) * 3600 * 1000;
+      ts = nowMs() + (1 + overdueCount) * 3600 * 1000;
+      // 半夜别打扰：降级提醒落在 22:00~08:00 的推到早上 9 点（同一时刻扎堆由后续错峰逻辑处理）
+      const h = new Date(ts).getHours();
+      if (h >= 22 || h < 8) {
+        const d9 = new Date(ts);
+        d9.setHours(9, 0, 0, 0);
+        if (h >= 22) d9.setDate(d9.getDate() + 1);
+        ts = d9.getTime();
+      }
       finalNote = `按常规 ${dateStr} 就该开票/预订了，现在已经进入抢票期：${finalNote}`;
     }
     list.push({
@@ -540,6 +561,21 @@ function buildFallbackAlarms(p, outline) {
       source: 'ai-rule',
     });
   };
+}
+
+/**
+ * 代码兜底：无论如何都要有的几条硬闹钟
+ *   · 去程/返程火车票开票日（12306 提前 15 天含当日 → T-14）
+ *   · 酒店：出发前 7 天锁定可免费取消房型
+ *   · 热门景区门票：提前 N 天开始预约
+ * 只有当这些日期还没过去时才生成。
+ */
+function buildFallbackAlarms(p, outline) {
+  const now = Date.now();
+  const list = [];
+  const tripStartTs = parseCnTime(`${p.startDate}T00:00:00`);
+  const tripEndTs = parseCnTime(`${p.endDate}T23:59:00`);
+  const push = makeRuleAlarmPusher(list, tripStartTs, tripEndTs);
 
   // 1. 大交通：找第一天和最后一天里的火车/飞机班次
   // LLM 可能写 "train" 也可能写 "高铁"/"动车"，两边都要认，否则会被误判成机票（提前 30 天）
@@ -617,6 +653,62 @@ function buildFallbackAlarms(p, outline) {
   return list;
 }
 
+/**
+ * 查漏补齐：LLM 提名经常"只挑重点"，导致某段城际车票或某一晚酒店漏掉。
+ * 这里对着大纲逐项清点：每段城际交通（按乘车日-预售期无同类型闹钟 → 补开票提醒）、
+ * 每一晚住宿（无 hotel 闹钟 → 补预订提醒），确定性补齐，用户才不用逐条手工加。
+ */
+function backfillMissingAlarms(p, outline, nominated) {
+  const list = [];
+  const tripStartTs = parseCnTime(`${p.startDate}T00:00:00`);
+  const tripEndTs = parseCnTime(`${p.endDate}T23:59:00`);
+  const push = makeRuleAlarmPusher(list, tripStartTs, tripEndTs);
+  const dayKey = (ts) => tsToDateStr(ts);
+
+  const days = asArray(outline.days);
+
+  // ① 城际交通段：每一段（train/plane/bus）都该有一条"开抢"提醒
+  days.forEach((d) => {
+    asArray(d.moves).forEach((m) => {
+      const mode = String(m.mode || '').toLowerCase();
+      const isTrain = /train|高铁|动车|火车/.test(mode + (m.code || ''));
+      const isPlane = /plane|航班|飞机/.test(mode + (m.code || ''));
+      if (!isTrain && !isPlane && !/bus|大巴|直通/.test(mode)) return;
+      const type = isTrain ? 'train' : isPlane ? 'plane' : 'bus';
+      const presale = isTrain ? TRAIN_PRESALE_DAYS : isPlane ? 30 : 5;
+      const buyDate = shiftDate(d.date, -presale);
+      // 该乘车日前后 1 天内已有同类型闹钟 → 视为已覆盖
+      const covered = nominated.some((a) => a.type === type
+        && Math.abs(parseCnTime(`${dayKey(a.fireAt)}T00:00:00`) - parseCnTime(`${buyDate}T00:00:00`)) <= DAY_MS);
+      if (covered) return;
+      push(
+        `开抢${d.date} ${m.from || ''}→${m.to || ''}${m.code ? '（参考 ' + m.code + '）' : ''}票`,
+        buyDate, '09:00', type,
+        `这段城际交通（第${days.indexOf(d) + 1}天）AI 提名时漏了，按预售期自动补上。具体放票时间以官方 App 为准。`
+      );
+    });
+  });
+
+  // ② 住宿：每一晚（含同一酒店连住）都该有一条预订提醒
+  const nights = asArray(outline.nights).length ? asArray(outline.nights)
+    : days.slice(0, Math.max(0, days.length - 1)).map((d) => ({ d: d.date, c: d.overnight || d.city }));
+  nights.forEach((n, i) => {
+    const nightDate = validDate(n.d) ? n.d : days[i] && days[i].date;
+    if (!nightDate) return;
+    const bookDate = shiftDate(nightDate, -7);
+    const covered = nominated.some((a) => a.type === 'hotel'
+      && Math.abs(parseCnTime(`${dayKey(a.fireAt)}T00:00:00`) - parseCnTime(`${bookDate}T00:00:00`)) <= 2 * DAY_MS);
+    if (covered) return;
+    push(
+      `预订 ${nightDate} ${n.c || ''}住宿（可免费取消房型）`,
+      bookDate, '20:00', 'hotel',
+      'AI 提名时漏了这一晚，按出发前 7 天自动补上。长假房源紧张，先锁可免费取消房型。'
+    );
+  });
+
+  return list;
+}
+
 async function genAlarms(p, outline, deadline) {
   const lines = outline.days.map((d, i) => {
     const mv = asArray(d.moves).map((m) => `${m.mode || ''}${m.code ? ' ' + m.code : ''} ${m.from || ''}→${m.to || ''} ${m.startTime || ''}${m.endTime ? '-' + m.endTime : ''}`).join('；');
@@ -650,6 +742,7 @@ ${lines}
 - 行前准备类：证件/装备取出发前 3-5 天，值机/选座取出发前 1 天。
 
 # 输出要求
+0. **先在心里点数，再逐一输出**：城际交通共几段（含去程/返程/行程内中转）、住宿共几晚、需要门票/预约的点有几个——每一段/每一晚/每一个都要有对应条目，一个都不许少。宁多勿漏，这是硬要求。
 1. title 写清楚抢什么、对应哪一天（例："抢去程票：重庆北→桂林西 G2249（9月30日车次）"）。
 2. fireAt 必须是**未来的具体日期+时刻**，且**按时间从早到晚排序**。
 3. note 里写明推算依据，并以「具体放票/开放时间以官方 App 或景区公告为准，下单前请核对」结尾。
@@ -663,11 +756,14 @@ ${lines}
     const text = await llm.chatWithRetry([
       { role: 'system', content: SYS_PROMPT },
       { role: 'user', content: prompt },
-    ], 2000, deadline ? { deadline } : undefined);
+    ], 3600, deadline ? { deadline } : undefined);   // 20+ 条闹钟很常见，2000 会截断丢尾巴
     nominated = sanitizeAlarmCandidates(asArray(parseJSONFromText(text)), p);
   } catch (e) {
     console.error('[generatePlan] 闹钟提名失败，只走规则兜底:', e.message);
   }
+
+  // 查漏补齐：LLM 漏提的城际段/酒店晚数，按规则确定性补上（用户别再手工加）
+  nominated = nominated.concat(backfillMissingAlarms(p, outline, nominated));
 
   // 规则兜底补上必需的几条（去重：同一天同类型已有 LLM 提名的就跳过）
   const fallback = buildFallbackAlarms(p, outline);

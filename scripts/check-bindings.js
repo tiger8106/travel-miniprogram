@@ -112,7 +112,13 @@ ok('云函数支持 test 即时推送', /action === 'test'/.test(fs.readFileSync
 
 ok('调试入口受 devMode 控制', /wx:if="\{\{devMode\}\}"/.test(tkWxml) && /devMode: env\.showDevTools\(\)/.test(tkJs));
 ok('测试按钮仅在 devMode 显示', /wx:if="\{\{devMode\}\}"[^>]*bindtap="onTapTest"/.test(taWxml));
-ok('组件声明 devMode 属性', /devMode:\s*\{/.test(taJs) && /devMode="\{\{devMode\}\}"/.test(tkWxml));
+// 分类列表已迁移到 alarm-group 分类详情页；组件 devMode 属性仍要声明，
+// 且分类页用到 ticket-alarm 时也要能传 devMode（组件默认 false，安全）
+const agWxml = fs.readFileSync(path.join(MP, 'pages/alarm-group/alarm-group.wxml'), 'utf8');
+const agJs = fs.readFileSync(path.join(MP, 'pages/alarm-group/alarm-group.js'), 'utf8');
+ok('组件声明 devMode 属性', /devMode:\s*\{/.test(taJs));
+ok('分类详情页复用 ticket-alarm 组件并具备编辑/删除能力',
+  /<ticket-alarm/.test(agWxml) && /onTapEdit/.test(agJs) && /onConfirmDelete/.test(agJs));
 ok('存在环境判断工具 utils/env.js', /showDevTools/.test(fs.readFileSync(path.join(MP, 'utils/env.js'), 'utf8')));
 
 // ---------- ⑤.5 引用完整性：用了 config 必须先 require ----------

@@ -94,21 +94,22 @@
       <view class="now-empty-sub">{{alarms.length ? '所有事项都还早，见下方分类待办' : '还没有任何提醒事项'}}</view>
     </view>
 
-    <!-- ===== 分类待办：车票 / 门票 / 酒店 / 其他 ===== -->
-    <view wx:for="{{groups}}" wx:key="key" wx:for-item="g" class="group-block">
-      <view class="group-head">
+    <!-- ===== 分类待办：折叠卡，点击进入分类详情页 ===== -->
+    <view wx:for="{{groups}}" wx:key="key" wx:for-item="g"
+          class="group-card" data-key="{{g.key}}" bindtap="onTapGroup" hover-class="group-card-hover">
+      <view class="group-left">
         <text class="group-icon">{{g.icon}}</text>
-        <text class="group-label">{{g.label}}</text>
-        <text class="group-count">{{g.pending ? g.pending + ' 项待办 / ' : ''}}共 {{g.count}} 项</text>
+        <view class="group-main">
+          <view class="group-line1">
+            <text class="group-label">{{g.label}}</text>
+            <text class="group-count">{{g.pending ? g.pending + ' 项待办' : '共 ' + g.count + ' 项'}}</text>
+          </view>
+          <view wx:if="{{g.nextTitle}}" class="group-next">下一条：{{g.nextTitle}} · {{g.nextTime}}</view>
+        </view>
       </view>
-      <ticket-alarm wx:for="{{g.items}}" wx:for-item="al" wx:key="_id"
-                    item="{{al}}"
-                    devMode="{{devMode}}"
-                    bind:tapcalendar="onTapCalendar"
-                    bind:tapedit="onTapEdit"
-                    bind:tapdelete="onDelete"
-                    bind:taptest="onTapTest" />
+      <text class="group-arrow">›</text>
     </view>
+    <view wx:if="{{!groups.length}}" class="group-empty">所有分类都是空的</view>
 
     <view wx:if="{{!editForm}}" class="add-btn" bindtap="onAdd">+ 添加提醒事项</view>
   </block>

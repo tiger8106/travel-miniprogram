@@ -187,8 +187,8 @@ console.log('第二部分：真实 LLM 生成（国庆广西场景）');
 console.log('============================================');
 
 const INPUT = {
-  origin: '重庆',
-  dest: '广西（桂林、龙脊梯田、阳朔、崇左、南宁）',
+  origin: '重庆金童路',
+  dest: '桂林、阳朔、龙脊梯田、明仕庄园和德天瀑布',
   startDate: '2026-09-30',
   endDate: '2026-10-07',
   people: 2,
@@ -281,6 +281,32 @@ return (async () => {
   });
   ok(backward === 0, '同天内没有时间倒退的条目', backward);
 
+  // 住宿闭环：昨天住的地方，今天第一条就该从那里出发（跨城大交通日除外）
+  let chainBreak = 0;
+  const outlineDays = (phase1.outline.days || []);
+  for (let d = 1; d < outlineDays.length; d++) {
+    const dayItems = plan.items.filter((it) => it.dayIndex === d)
+      .sort((a, b) => String(a.startTime).localeCompare(String(b.startTime)));
+    if (!dayItems.length) continue;
+    const prevOv = outlineDays[d - 1].overnight || outlineDays[d - 1].city || '';
+    const first = dayItems[0];
+    const loc = String(first.startLocation || '') + String(first.activity || '') + String(first.endLocation || '');
+    const sameCity = prevOv && outlineDays[d].overnight
+      && (outlineDays[d].overnight.includes(prevOv) || prevOv.includes(outlineDays[d].overnight)
+        || outlineDays[d].city === outlineDays[d - 1].city);
+    // 同城连住才检查闭环；跨城日第一件事本来就是赶路，不查
+    if (sameCity && prevOv && !loc.includes(prevOv.slice(0, 2))) chainBreak++;
+  }
+  ok(chainBreak === 0, '同城连住的天，早上从昨晚住宿地出发（闭环）', chainBreak);
+  // 闭环兜底：每天"第一条"的 startLocation 都不该是空的（吃饭/游览留空是正常的）
+  let emptyFirst = 0;
+  for (let d = 1; d < outlineDays.length; d++) {
+    const dayItems = plan.items.filter((it) => it.dayIndex === d)
+      .sort((a, b) => String(a.startTime).localeCompare(String(b.startTime)));
+    if (dayItems.length && !String(dayItems[0].startLocation || '').trim()) emptyFirst++;
+  }
+  ok(emptyFirst === 0, '每天第一条都有起点（兜底已补齐）', emptyFirst);
+
   console.log('\n闹钟清单：');
   (plan.alarms || []).forEach((a) => {
     console.log(`  [${a.fireAtStr}] ${a.title}  (${a.type}${a.source ? '/' + a.source : ''})`);
@@ -290,7 +316,9 @@ return (async () => {
   // 临近出发场景下，已过开票日的抢票闹钟会被规则收敛掉一部分，
   // 数量随 LLM 提名波动（实测 4~7 条）——质量门槛看下面的类型覆盖
   ok(alarms.length >= 4, '至少 4 条待办（车票/门票/酒店/准备）', alarms.length);
-  const goA = alarms.find((a) => /去程/.test(a.title));
+  // 去程票闹钟：LLM 提名或规则补齐都行，标题里认得"出发地→目的地"即可
+  const goA = alarms.find((a) => /去程/.test(a.title)
+    || (a.type === 'train' && /重庆|金童/.test(a.title) && /桂林/.test(a.title)));
   ok(!!goA, '存在去程抢票闹钟');
   ok(alarms.every((a) => a.fireAt > Date.now()), '所有闹钟都在未来');
   // 待办必须按时间先后排好（用户照着做就行）
@@ -299,6 +327,12 @@ return (async () => {
   ok(sortedOk, '待办按时间从早到晚排序');
   const types = [...new Set(alarms.map((a) => a.type))];
   ok(types.length >= 3, `覆盖至少 3 类待办（${types.join('/')}）`, types.length);
+
+  // 查漏补齐后：每一晚住宿都该有自己的预订提醒（同酒店连住按晚各算）
+  const outlineNights = (phase1.outline.days || []).length - 1;
+  const hotelAlarms = alarms.filter((a) => a.type === 'hotel');
+  ok(hotelAlarms.length >= Math.min(outlineNights, 5),
+    `酒店提醒覆盖住宿（${hotelAlarms.length} 条 / ${outlineNights} 晚，≥5 即算全覆盖同类）`, hotelAlarms.length);
 
   if (plan.suggestions && Object.keys(plan.suggestions).length) {
     console.log('\n建议字段:', Object.keys(plan.suggestions).join(', '));

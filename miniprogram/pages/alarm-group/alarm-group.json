@@ -1,0 +1,7 @@
+{
+  "navigationBarTitleText": "分类提醒",
+  "usingComponents": {
+    "ticket-alarm": "/components/ticket-alarm/ticket-alarm",
+    "privacy-popup": "/components/privacy-popup/privacy-popup"
+  }
+}

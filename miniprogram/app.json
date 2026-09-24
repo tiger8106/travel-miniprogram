@@ -5,6 +5,7 @@
     "pages/upload/upload",
     "pages/planner/planner",
     "pages/tickets/tickets",
+    "pages/alarm-group/alarm-group",
     "pages/suggestions/suggestions",
     "pages/mine/mine",
     "pages/mytrips/mytrips"

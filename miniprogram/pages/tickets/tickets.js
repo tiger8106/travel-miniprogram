@@ -215,22 +215,27 @@ Page({
     }
   },
 
-  // 派生视图：① 顶部「正在进行/即将进行」 ② 按板块分类的待办列表
+  // 派生视图：① 顶部「正在进行/即将进行」 ② 分类折叠卡（点击进分类详情页）
   // 分类 = 车票（火车/飞机/汽车）、门票、酒店、其他，类内按时间先后排
   buildViews(items) {
     const now = Date.now();
 
+    // 分类只出摘要卡：数量 + 下一条最近的提醒，全量列表在 alarm-group 分类页
     const groups = GROUP_DEFS.map((def) => {
       const list = items.filter((a) => def.types.indexOf(a.type || 'other') >= 0);
+      const upcoming = list
+        .filter((a) => a.triggerAt && a.triggerAt > now)
+        .sort((a, b) => a.triggerAt - b.triggerAt)[0];
       return {
         key: def.key,
         label: def.label,
         icon: def.icon,
-        items: list,
         count: list.length,
         pending: list.filter((a) => a.triggerAt && a.triggerAt > now).length,
+        nextTitle: upcoming ? upcoming.title : '',
+        nextTime: upcoming ? upcoming.friendly : '',
       };
-    }).filter((g) => g.items.length);
+    }).filter((g) => g.count);
 
     // 正在进行：提醒已经触发但还在 2 小时窗口内（比如"正在开抢"）
     // 即将进行：7 天内要动手的
@@ -267,6 +272,16 @@ Page({
     const idx = Number(e.currentTarget.dataset.idx);
     const item = this.data.nowAlarms[idx];
     if (item) this.onTapEdit({ detail: { item } });
+  },
+
+  // 点分类折叠卡 → 跳到分类详情页看该类全部闹钟
+  onTapGroup(e) {
+    const key = e.currentTarget.dataset.key;
+    const def = GROUP_DEFS.find((d) => d.key === key);
+    if (!def) return;
+    wx.navigateTo({
+      url: `/pages/alarm-group/alarm-group?key=${key}&label=${encodeURIComponent(def.label)}&icon=${encodeURIComponent(def.icon)}`,
+    });
   },
 
   computeStatus(triggerAt) {
