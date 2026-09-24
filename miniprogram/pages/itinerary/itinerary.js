@@ -356,9 +356,25 @@ Page({
     }
     try {
       wx.showLoading({ loading: true, title: '保存中' });
+      const old = (trip.items || []).find((it) => this.itemKeyOf(it) === editForm.id) || {};
+
+      // 地点改了 → 重新地理编码：地图导航用的是经纬度，不改会导航到旧地点
+      const needStart = !!editForm.startLocation && editForm.startLocation !== (old.startLocation || '');
+      const needEnd = !!editForm.endLocation && editForm.endLocation !== (old.endLocation || '');
+      let startCoord = null;
+      let endCoord = null;
+      if (needStart || needEnd) {
+        const [a, b] = await Promise.all([
+          needStart ? this.tryGeocode(editForm.startLocation) : null,
+          needEnd ? this.tryGeocode(editForm.endLocation) : null,
+        ]);
+        startCoord = a;
+        endCoord = b;
+      }
+
       const items = (trip.items || []).map((it) => {
         if (this.itemKeyOf(it) !== editForm.id) return it;
-        return {
+        const next = {
           ...it,
           startTime: editForm.startTime,
           endTime: editForm.endTime,
@@ -369,6 +385,16 @@ Page({
           category: editForm.category,
           note: editForm.note,
         };
+        if (needStart) {
+          // 查不到就清空旧坐标，导航时会按新地名实时再查一次，不会导到旧地点
+          next.startLon = startCoord ? startCoord.lon : '';
+          next.startLat = startCoord ? startCoord.lat : '';
+        }
+        if (needEnd) {
+          next.endLon = endCoord ? endCoord.lon : '';
+          next.endLat = endCoord ? endCoord.lat : '';
+        }
+        return next;
       });
       await api.updateItinerary(tripId, { items });
       homeCache.clear();
@@ -385,6 +411,21 @@ Page({
   onCancelEdit() {
     this.setData({ editingId: '', editForm: null });
     this.applyTimeFlags();
+  },
+
+  // 地名 → 经纬度（失败返回 null，交给导航时的实时查询兜底）
+  async tryGeocode(name) {
+    if (!name) return null;
+    try {
+      const r = await api.geocode(name);
+      if (!r) return null;
+      const lon = r.lon != null ? r.lon : (r.lng != null ? r.lng : r.longitude);
+      const lat = r.lat != null ? r.lat : r.latitude;
+      return (typeof lon === 'number' && typeof lat === 'number' && !isNaN(lon) && !isNaN(lat))
+        ? { lon, lat } : null;
+    } catch (e) {
+      return null;
+    }
   },
 
   // 交换起终点（编辑抽屉里的 ⇅ 按钮）

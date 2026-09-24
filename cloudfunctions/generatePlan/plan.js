@@ -112,6 +112,19 @@ function profileText(p) {
 // ============================================================
 
 async function genOutline(p) {
+  // 交通偏好的硬约束：用户选了「高铁优先」就全程不许飞（长距离也一样），
+  // 改走近目的地的高铁站 + 短途接驳；选了自驾/包车就别排航班。
+  const railFirst = /高铁/.test(p.transport);
+  const driveFirst = /自驾|包车/.test(p.transport);
+  const planeFirst = /飞机/.test(p.transport);
+  const modeRule = railFirst
+    ? '**用户已选「高铁优先」：全程禁止安排飞机（含长距离路段）**。没有直达高铁时，走到离目的地最近的高铁站（允许一次中转），再衔接直通车/大巴/打车接驳（接驳时长写进 n 提示），绝不要排航班。'
+    : driveFirst
+      ? '**用户已选「自驾/包车」：城际段一律按自驾或包车安排**（给出大致里程与驾驶时长），不要安排飞机或高铁。'
+      : planeFirst
+        ? '**用户已选「飞机优先」：单程超过 6 小时的跨城段优先飞机**，但同城/近郊仍走地面交通。'
+        : '有高铁/动车直达的优先走高铁，没有直达高铁再看飞机；近距离（≤3 小时车程）走高铁/直通车大巴。';
+
   // 用短键名：一份 8 天大纲能省 30%+ 的输出 token（时间就是成本，也直接决定会不会撞上 max_tokens）
   const prompt = `为以下旅行需求制定逐日路线大纲。
 
@@ -124,7 +137,7 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
 
 # 硬性要求
 0. **城市串联原则（最重要）**：把出发地和所有目的地按「总路程最短 + 换乘最少 + 单程耗时最短」串成一条线。
-   - 先判断各城市间的交通方式：有高铁/动车直达的优先走高铁，没有直达高铁再看飞机，近距离（≤3 小时车程）优先高铁/直通车大巴。
+   - 交通方式判定：${modeRule}
    - 走法要单向推进，禁止来回折返（例：重庆→桂林→阳朔→南宁→重庆，不要 重庆→南宁→桂林→重庆 这种回头路）。
    - 相邻城市间移动尽量控制在 3 小时内；需要更久的，安排在整天里并给出具体班次与运行时长。
    - 同一城市的景点连片玩完再换下一城，避免同城反复往返。
@@ -190,7 +203,7 @@ function dayDetailPrompt(p, day, idx, outline) {
     `所在城市：${day.city}\n` +
     `大纲要点：${asArray(day.highlights).join('、')}\n` +
     (asArray(day.moves).length
-      ? `跨城交通：${asArray(day.moves).map(
+      ? `【已确认的跨城交通（用户可能手工改过，必须原样执行）】${asArray(day.moves).map(
           (m) => `${m.from || '?'}→${m.to || '?'} ${m.mode || ''} ${m.code || ''} ${m.startTime || ''}-${m.endTime || ''}`
         ).join('；')}\n`
       : '') +
@@ -214,7 +227,12 @@ dayIndex 全部填 ${idx}。
 7. ${isFirst ? `第一天：从${p.origin || '出发地'}出发，先写前往车站/机场的集合与安检预留时间（国内高铁至少提前 45 分钟到站，飞机提前 2 小时）。${p.goTime ? `**大交通班次必须卡在 ${p.goTime} 发车/起飞**，请按这个时刻倒推集合、安检、候车时间，不要写成别的时刻。` : ''}` : ''}
 8. ${isLast ? `最后一天：以返回${p.origin || '出发地'}结束，写到家/到站为止，并预留返程交通时间。${p.backTime ? `**返程班次必须卡在 ${p.backTime} 启程**，按这个时刻倒推退房、前往车站/机场的时间。` : ''}` : ''}
 9. category 取值：景点游览=sight，餐饮=food，住宿/回酒店=hotel，交通=transport，门票预订/取票=ticket，其他=other。
-10. 输出顺序按时间先后。只输出数组，不要任何解释。`;
+10. 输出顺序按时间先后。只输出数组，不要任何解释。
+11. **【已确认的跨城交通】是最终决定，一个字都不许改**：交通方式、出发站/到达站、车次、起止时刻全部照抄。
+    - 写的是 train/高铁/动车 → 按火车站流程安排（提前 45 分钟到站、安检、候车、上车），全程不得出现"机场""航站楼""航班""值机"等字样，transportType 填 train。
+    - 写的是 plane/航班 → 按机场流程安排（提前 2 小时到机场），transportType 填 plane。
+    - 不要自作主张把火车改飞机、把飞机改火车，也不要改车次和时刻；即便你觉得另一种方式更快也不行，这是用户的选择。
+${/高铁/.test(p.transport) ? '12. 用户交通偏好是「高铁优先」：后续所有城际段一律按高铁/动车安排，不要生成任何航班。' : ''}`;
 
   return [
     { role: 'system', content: SYS_PROMPT },
@@ -583,14 +601,36 @@ async function generateOutline(rawInput) {
  * @param {object} rawInput 与第一阶段相同的用户输入
  * @param {object} outlineData 第一阶段返回的 outline（含 days / nights / title / summary）
  */
+/**
+ * 给 Promise 加硬超时：到点没回来就用兜底值继续，不再干等。
+ * （原 Promise 仍在后台跑，但云函数返回后进程会被回收，不影响结果）
+ */
+function withTimeout(promise, ms, fallback) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(v);
+    };
+    const timer = setTimeout(() => {
+      console.warn('[generatePlan] 子任务超时，走兜底');
+      done(fallback);
+    }, Math.max(1000, ms));
+    promise.then(done).catch(() => done(fallback));
+  });
+}
+
 async function buildPlan(rawInput, outlineData, opts = {}) {
   const p = normalizeInput(rawInput);
   const outline = (outlineData && outlineData.outline) || outlineData || {};
   if (!asArray(outline.days).length) throw new Error('缺少行程大纲，无法展开详情');
 
   const t1 = Date.now();
-  // 时间预算：默认 42s，留 18s 给写库和返回（云函数上限 60s）
+  // 时间预算：细化默认 42s；整轮硬上限 55s（云函数 60s，留 5s 给写库和返回）
   const budget = opts.budgetMs || 42 * 1000;
+  const hardDeadline = t1 + (opts.hardBudgetMs || 55 * 1000);
   const deadline = t1 + budget;
 
   const detail = await genDayItems(p, outline, {
@@ -621,11 +661,23 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
     };
   }
 
-  const [alarms, suggestions] = await Promise.all([
-    genAlarms(p, outline),
-    genSuggestions(p, outline),
-  ]);
-  console.log('[generatePlan] 清洗后条目=%d, 闹钟=%d', items.length, alarms.length);
+  // 闹钟/建议同样要卡时间：细化跑满后它们还能再跑 30s+，会把整轮顶穿 60s 上限。
+  // 时间不够就降级——闹钟走规则兜底（抢票/酒店那些硬规则），建议留空，
+  // 用户在建议页点"重新生成"就能补回来，总比整个调用超时失败强。
+  const remain = hardDeadline - Date.now() - 5 * 1000; // 再留 5s 给写库
+  let alarms = [];
+  let suggestions = {};
+  if (remain > 3 * 1000) {
+    const [a, s] = await Promise.all([
+      withTimeout(genAlarms(p, outline), remain, null),
+      withTimeout(genSuggestions(p, outline), remain, null),
+    ]);
+    alarms = a || buildFallbackAlarms(p, outline);
+    suggestions = s || {};
+  } else {
+    alarms = buildFallbackAlarms(p, outline);
+  }
+  console.log('[generatePlan] 清洗后条目=%d, 闹钟=%d, 剩余预算=%dms', items.length, alarms.length, remain);
 
   return {
     title: String((outlineData && outlineData.title) || outline.title || '我的行程').slice(0, 60),

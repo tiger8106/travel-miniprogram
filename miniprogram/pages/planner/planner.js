@@ -132,7 +132,13 @@ Page({
     outlineSummary: '',
     outlineDays: [],
     itemH: 0,                     // 每天卡片高度（px，拖动排序用）
-    areaH: 0,                     // 拖动区总高度
+    areaH: 0,                     // 列表内容总高度（n × itemH）
+    listH: 0,                     // 可视区高度（超出才滚动）
+    // 拖动排序状态：长按才开始拖，拖动中卡片悬浮置顶并显示参考线
+    dragging: false,
+    dragIdx: -1,
+    dragShift: 0,                 // 拖动卡片的纵向位移（px）
+    guideTop: 0,                  // 参考线位置（px）
     dayForm: null,                // 正在编辑的那一天（null = 抽屉关闭）
     dayFormIdx: -1,
   },
@@ -142,8 +148,12 @@ Page({
     // 兴趣偏好从本地恢复：上次 ✕ 掉的不再出现，没删的（选没选都算）全保留
     this.setData({ interestItems: loadInterests() });
     // 拖动排序用：卡片高度固定 240rpx，换算成 px
-    const winW = (wx.getWindowInfo && wx.getWindowInfo().windowWidth) || 375;
+    const info = (wx.getWindowInfo && wx.getWindowInfo()) || {};
+    const winW = info.windowWidth || 375;
+    const winH = info.windowHeight || 667;
     this._itemH = Math.round((winW / 750) * 240);
+    // 列表可视区：屏幕减去上方卡片和底部按钮，给滚动留出空间
+    this._listMaxH = Math.max(280, Math.round(winH - 330));
     this.setData({ itemH: this._itemH });
     this.updateDaysText();
   },
@@ -386,6 +396,7 @@ Page({
         highlights: (d.hl || d.highlights || []).join(' · '),
         y: i * this._itemH,
       }));
+      const areaH = outlineDays.length * this._itemH;
       this.setData({
         step: 'outline',
         generating: false,
@@ -394,7 +405,8 @@ Page({
         outlineTitle: res.title || '我的行程',
         outlineSummary: res.summary || '',
         outlineDays,
-        areaH: outlineDays.length * this._itemH,
+        areaH,
+        listH: Math.min(areaH, this._listMaxH),
         title: res.title,
         summary: res.summary,
       });
@@ -478,42 +490,58 @@ Page({
 
   // ---------- 大纲：拖动排序 ----------
 
-  onDayMove(e) {
-    if (e.detail && e.detail.source && e.detail.source !== 'touch') return;
-    this._dragY = e.detail.y;
+  // 长按卡片进入拖动模式（避免上下滑页面时误拖）
+  onDayLongPress(e) {
+    if (this.data.generating) return;
+    const idx = Number(e.currentTarget.dataset.idx);
+    const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]);
+    this._dragStartY = t ? t.clientY : 0;
+    this._dragTarget = idx;
+    this.setData({
+      dragging: true,
+      dragIdx: idx,
+      dragShift: 0,
+      guideTop: idx * (this._itemH || 0),
+    });
+    wx.vibrateShort && wx.vibrateShort({ type: 'medium' });
   },
 
-  // 松手：按"中心点比较"算落点 → 重排 → 自动重算第几天和日期
-  // 例：第1天拖到第3、4天之间（y 在 2h~3h 之间）→ 数出 2 张卡片在其上方
-  //     → 插到位置 2 → 顺序变为 [原第2天, 原第3天, 原第1天, 原第4天...]，
-  //     原第1天变成第3天，日期自动重排，内容不变。
-  onDayMoveEnd(e) {
-    const idx = Number(e.currentTarget.dataset.idx);
-    const list0 = this.data.outlineDays;
-    const n = list0.length;
+  // 拖动中：卡片跟着手指走，实时算出落点并画参考线
+  onDayTouchMove(e) {
+    if (!this.data.dragging) return;
+    const idx = this.data.dragIdx;
+    const n = this.data.outlineDays.length;
     const h = this._itemH || 1;
-    const y = this._dragY;
-    this._dragY = null;
+    const t = (e.touches && e.touches[0]) || {};
+    if (typeof t.clientY !== 'number') return;
 
-    // 没有拖动过程（只是点了一下卡片/✏️）：复位即可，不做重排
-    if (typeof y !== 'number') {
-      this.setData({ [`outlineDays[${idx}].y`]: idx * h });
-      return;
-    }
+    // 位移限制在列表内，拖不出界
+    let dy = t.clientY - this._dragStartY;
+    dy = Math.max(-idx * h, Math.min((n - 1 - idx) * h, dy));
 
-    // 落点 = 有几张"其他"卡片的顶部在这张卡上方（i*h < y）
+    // 落点 = 有几张"其他"卡片的顶部在这张卡上方（i*h < 拖动卡当前顶部）
+    const pos = idx + dy / h;
     let target = 0;
     for (let i = 0; i < n; i++) {
-      if (i !== idx && i * h < y) target++;
+      if (i !== idx && i < pos) target++;
     }
     target = Math.max(0, Math.min(n - 1, target));
 
-    if (target === idx) {
-      // 没换位置：把卡片弹回原位
-      this.setData({ [`outlineDays[${idx}].y`]: idx * h });
-      return;
-    }
-    const list = list0.slice();
+    const shift = Math.round(dy);
+    if (shift === this.data.dragShift && target === this._dragTarget) return; // 节流
+    this._dragTarget = target;
+    this.setData({ dragShift: shift, guideTop: target * h });
+  },
+
+  // 松手：落到参考线所在位置
+  onDayTouchEnd() {
+    if (!this.data.dragging) return;
+    const idx = this.data.dragIdx;
+    const target = typeof this._dragTarget === 'number' ? this._dragTarget : idx;
+    this.setData({ dragging: false, dragIdx: -1, dragShift: 0 });
+    this._dragTarget = null;
+    if (target === idx) return;   // 没换位置
+    const list = this.data.outlineDays.slice();
     const moved = list.splice(idx, 1)[0];
     list.splice(target, 0, moved);
     this.applyDayOrder(list);

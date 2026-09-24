@@ -94,7 +94,17 @@ function sanitizeItems(rawItems) {
   // ---------- Pass 2：跨天位置继承 ----------
   // 逐天解析时每天是独立请求，"当天第一条移动"常因原文没写出发点而缺失起点。
   // 行程是连续的：人昨晚在哪，今天早上就从哪出发。按天序全局遍历，维护"当前所在位置"。
-  const sorted = items.slice().sort((a, b) => a.dayIndex - b.dayIndex); // 稳定排序，同天内保持原顺序
+  // 稳定排序：先按天，再按开始时间升序。LLM 偶尔会把某条排在前面却给了更晚的
+  // 时刻（实测约 2 处/8 天），展示出来就是"时间倒退"。这里只理顺顺序，不改内容。
+  // 缺时间的条目 (toMin → null) 排在当天最后，不打断正常条目。
+  const tOf = (t) => {
+    const v = toMin(t);
+    return v == null ? Number.MAX_SAFE_INTEGER : v;
+  };
+  const sorted = items.slice().sort((a, b) =>
+    (a.dayIndex - b.dayIndex) ||
+    (tOf(a.startTime) - tOf(b.startTime)) ||
+    (tOf(a.endTime) - tOf(b.endTime)));
   let lastKnown = ''; // 上一步结束时人所在的位置
   sorted.forEach((it) => {
     if (it.endLocation && !it.startLocation && lastKnown && lastKnown !== it.endLocation) {
