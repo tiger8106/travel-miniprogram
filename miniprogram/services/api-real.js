@@ -91,6 +91,11 @@ async function buildPlan(input, outlineData) {
   return callFn('generatePlan', Object.assign({ action: 'build' }, input, outlineData));
 }
 
+// 云函数体检：环境变量齐不齐、模型连不连得上（生成失败时前端自动调，帮用户自助排查）
+async function generateDiag() {
+  return callFn('generatePlan', { action: 'diag' });
+}
+
 // 上传 / 下载
 async function uploadDoc(localPath) {
   const ts = Date.now();
@@ -120,6 +125,7 @@ module.exports = {
   getDayTips,
   generateOutline,
   buildPlan,
+  generateDiag,
   uploadDoc,
   downloadFromCloud,
 };

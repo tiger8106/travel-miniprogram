@@ -25,7 +25,7 @@ const COL_ALARM = 'ticket_alarms';
 const COL_SUG = 'suggestions';
 
 // 生成引擎版本（用于确认线上跑的是哪一版）
-const GEN_VERSION = 'v1.0-gen';
+const GEN_VERSION = 'v1.1-gen';
 
 /** 给一批条目补经纬度（供 wx.openLocation 打开微信原生地图） */
 async function geocodeItems(items) {
@@ -59,6 +59,26 @@ async function savePlan(openid, plan, tripId) {
   const db = cloud.database();
   const now = Date.now();
   await geocodeItems(plan.items);
+
+  // 首轮颗粒无收（天天都失败）但还要续跑：别先建一个空行程，
+  // 等哪一轮真有内容了再建，否则中途放弃会在「我的行程」里留下一条 0 条的空攻略。
+  if (!tripId && !plan.items.length && plan.partial) {
+    console.log('[generatePlan] 本轮没有新条目，暂不建库，等下一轮续跑');
+    return {
+      tripId: '',
+      title: plan.title,
+      startDate: plan.startDate,
+      endDate: plan.endDate,
+      itemCount: 0,
+      alarmCount: 0,
+      partial: true,
+      doneDayIndexes: plan.doneDayIndexes || [],
+      attempts: plan.attempts || {},
+      gaveUpDayIndexes: plan.gaveUpDayIndexes || [],
+      progress: plan.progress || null,
+      version: GEN_VERSION,
+    };
+  }
 
   let finalTripId = tripId;
   let title = plan.title;
@@ -167,8 +187,52 @@ async function savePlan(openid, plan, tripId) {
     alarmCount,
     partial: !!plan.partial,
     doneDayIndexes: plan.doneDayIndexes || [],
+    attempts: plan.attempts || {},          // 前端原样带回，才知道哪些天还能重试
+    gaveUpDayIndexes: plan.gaveUpDayIndexes || [],  // 重试耗尽的天 → 前端提示用户
+    progress: plan.progress || null,        // { done, total } 给前端显示进度
     version: GEN_VERSION,
   };
+}
+
+/**
+ * ④ 自检：真机上「生成失败」时一键看清缺什么。
+ *    只回报"配了 / 没配"的布尔值，绝不把密钥内容吐出去。
+ *    排查顺序永远是：环境变量齐不齐 → 模型/端点对不对 → 网络连不连得上。
+ */
+async function runDiag(withPing) {
+  const llm = require('./llm');
+  const KEYS = ['LLM_PROVIDER', 'LLM_BASE_URL', 'LLM_MODEL', 'LLM_API_KEY', 'AMAP_KEY'];
+  const env = {};
+  KEYS.forEach((k) => { env[k] = !!process.env[k]; });
+
+  let cfg = null;
+  let cfgError = '';
+  try { cfg = llm.getConfig(); } catch (e) { cfgError = e.message; }
+
+  const out = {
+    version: GEN_VERSION,
+    env,
+    provider: process.env.LLM_PROVIDER || '(未设置)',
+    model: cfg ? cfg.model : null,
+    baseURL: cfg ? cfg.baseURL : null,
+    cfgError,
+    ping: '未探测',
+  };
+
+  if (withPing && cfg) {
+    const t0 = Date.now();
+    let timer = null;
+    const timeout = new Promise((res) => { timer = setTimeout(() => res('探测超时(12s)'), 12000); });
+    const call = llm.chat([{ role: 'user', content: '只回复两个字：正常' }], 16)
+      .then(() => null)
+      .catch((e) => e.message);
+    const raced = await Promise.race([call, timeout]);
+    clearTimeout(timer);
+    out.ping = raced ? `失败：${raced}` : `正常（${Date.now() - t0}ms）`;
+  } else if (withPing) {
+    out.ping = '跳过（配置不全，先补齐再测）';
+  }
+  return out;
 }
 
 exports.main = async (event, context) => {
@@ -184,6 +248,15 @@ exports.main = async (event, context) => {
       return { code: 0, data: { days: dayDiff(event.startDate, event.endDate) } };
     } catch (e) {
       return { code: -1, msg: '日期不合法' };
+    }
+  }
+
+  // ①.5 自检：不烧 token 也能看清配置状态（前端在生成失败时自动调它）
+  if (action === 'diag') {
+    try {
+      return { code: 0, data: await runDiag(event.ping !== false) };
+    } catch (e) {
+      return { code: -1, msg: e.message || '自检失败' };
     }
   }
 
@@ -218,9 +291,12 @@ exports.main = async (event, context) => {
     const budget = event.budgetMs ? Number(event.budgetMs) : undefined;
     const plan = await buildPlan(event, event, {
       doneDayIndexes: event.doneDayIndexes,
+      attempts: event.attempts,     // 续跑时带回上一轮的失败次数
       budgetMs: budget,
     });
-    if (!plan || !plan.items.length) {
+    // 续跑中途可能这一轮只完成了重试、没产出新条目（partial=true），这时要放行让它继续；
+    // 只有彻底没有内容、也没有 tripId 可合并时才算失败。
+    if (!plan || (!plan.items.length && !plan.partial && !event.tripId)) {
       return { code: -1, msg: 'AI 没有生成出有效行程，请调整需求后重试' };
     }
     return { code: 0, data: await savePlan(openid, plan, event.tripId) };

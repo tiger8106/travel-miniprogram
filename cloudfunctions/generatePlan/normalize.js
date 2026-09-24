@@ -64,6 +64,40 @@ function samePlace(a, b) {
   return s !== '' && s === e;
 }
 
+// LLM 的"内心独白"特征：推理、假设、自我纠错、把 prompt 里的字段名说出来。
+// 实测真跑时第 2 天出现了一整段：
+//   "*注：根据大纲『桂林磨盘山码头→阳朔龙头山码头』，若人已在阳朔…此处严格遵循【已确认跨城交通】"
+// 用户是会直接看到这段文字的，必须清掉。
+const META_PAT = [
+  /\*\s*注\s*[:：]/,
+  /[（(]\s*注\s*[:：]/,
+  /^\s*注\s*[:：]/,
+  /根据大纲|鉴于大纲|遵循大纲|依据大纲/,
+  /此处假设|此处严格|若用户|如果用户强制/,
+  /【已确认|【已确认的跨城交通】|【今天】|【昨天】|【明天】/,
+  /作为\s*(一个\s*)?(AI|人工智能|助手)|我无法|我需要|我将为你|让我/,
+];
+
+/**
+ * 剔掉句子里的元叙述（推理/假设/自我纠错），只留"要做什么"
+ * 逐句判断，整段都被判为元叙述时保留原文——宁可啰嗦，也不能把行程说成空白。
+ */
+function stripMeta(text) {
+  const s = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  const tokens = s.split(/([。；;！!？?\n])/);
+  const kept = [];
+  for (let i = 0; i < tokens.length; i += 2) {
+    const body = tokens[i] || '';
+    const delim = tokens[i + 1] || '';
+    if (!body.trim()) continue;
+    if (META_PAT.some((re) => re.test(body))) continue;
+    kept.push(body + delim);
+  }
+  const out = kept.join('').trim();
+  return out || s;
+}
+
 /**
  * 清洗 LLM 输出的行程项数组
  * @param {Array} rawItems LLM 返回的 items
@@ -80,14 +114,14 @@ function sanitizeItems(rawItems) {
         dayIndex: di,
         startTime: normTime(it.startTime),
         endTime: normTime(it.endTime),
-        activity: String(it.activity).trim().slice(0, 200),
+        activity: stripMeta(it.activity).slice(0, 200),
         category: ['sight', 'food', 'hotel', 'transport', 'ticket', 'other'].includes(it.category)
           ? it.category
           : 'other',
         startLocation: String(it.startLocation || '').trim().slice(0, 60),
         endLocation: String(it.endLocation || '').trim().slice(0, 60),
         transportType: it.transportType || '',
-        note: String(it.note || '').trim().slice(0, 300),
+        note: stripMeta(it.note).slice(0, 300),
       };
     });
 
@@ -214,4 +248,4 @@ function sanitizeItems(rawItems) {
   return items;
 }
 
-module.exports = { normTime, samePlace, sanitizeItems, toMin, fmtMin, parseDurationMin };
+module.exports = { normTime, samePlace, sanitizeItems, toMin, fmtMin, parseDurationMin, stripMeta };

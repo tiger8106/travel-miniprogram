@@ -30,6 +30,7 @@ fs.readFileSync(envPath, 'utf-8').split('\n').forEach((line) => {
 
 const P = require('../cloudfunctions/generatePlan/plan.js');
 const { normalizeInput, shiftDate, dayDiff, isHolidayRange, buildFallbackAlarms, sanitizeAlarmCandidates } = P;
+const { stripMeta } = require('../cloudfunctions/generatePlan/normalize.js');
 
 let pass = 0, fail = 0;
 const ok = (cond, msg, extra) => {
@@ -88,11 +89,71 @@ const clean = sanitizeAlarmCandidates([
 ], { startDate: '2026-09-30', endDate: '2026-10-07' });
 ok(clean.length === 1 && clean[0].title === '未来的票', '闹钟清洗：过去/超期/重复各被拦掉', clean.length);
 
-if (process.argv.includes('--unit')) {
-  console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
-  process.exit(fail ? 1 : 0);
-}
+// 5b. 剔除 LLM 的"内心独白"（真跑时第2天出现过一整段自我纠错）
+//     用户会原样看到这段，必须只留"要做什么"
+const meta1 = stripMeta(
+  '08:00-08:30 打车前往磨盘山码头。*注：根据大纲，若人已在阳朔需调整，此处严格遵循【已确认跨城交通】。');
+ok(!/注：/.test(meta1) && !/大纲/.test(meta1), '清掉"*注：根据大纲…"的推理段', meta1);
+ok(/打车前往磨盘山码头/.test(meta1), '正常行程内容被保留', meta1);
+const meta2 = stripMeta('20:10 去崇善米粉吃第一顿桂林米粉，点卤菜粉/锅烧粉');
+ok(meta2 === '20:10 去崇善米粉吃第一顿桂林米粉，点卤菜粉/锅烧粉', '没有元叙述的原文原样不动');
+const meta3 = stripMeta('注：作为AI我无法确认班次');
+ok(meta3.length > 0, '整段都是元叙述时保留原文（不把行程清成空白）', meta3);
 
+// 6. 失败天重试链路（不调真实 LLM：把 llm.chatWithRetry 换成假实现）
+//
+//    背景：之前某天细化失败会被直接排除在续跑队列外，partial=false 就结束了，
+//    用户只会发现"行程少了第 3 天"，云函数日志之外没有任何提示。
+//    现在失败天最多重试 3 次，耗尽后放进 gaveUpDayIndexes 交给前端明文提示。
+const llm = require('../cloudfunctions/generatePlan/llm.js');
+const realChat = llm.chatWithRetry;
+const mkDay = (date) => ({
+  date, theme: '主题', city: '某城', highlights: ['景点A'],
+  moves: [], meals: [], overnight: '某城', note: '',
+});
+const fakeOutline = { days: [mkDay('2026-12-20'), mkDay('2026-12-21'), mkDay('2026-12-22')] };
+const fakeProfile = normalizeInput({ dest: '某城', startDate: '2026-12-20', endDate: '2026-12-22' });
+
+// 第 2 天（12-21）永远返回一段没有 JSON 的废话 → 模拟 LLM 抽风/超时
+llm.chatWithRetry = async (messages) => {
+  const txt = String((messages[1] && messages[1].content) || '');
+  if (/【今天】2026-12-21/.test(txt)) return '抱歉，我无法完成这个请求';
+  return JSON.stringify([
+    { dayIndex: 0, startTime: '09:00', endTime: '10:00', activity: '游览景点A', category: 'sight' },
+  ]);
+};
+
+(async () => {
+  let r = await P.genDayItems(fakeProfile, fakeOutline, { deadline: Date.now() + 60000 });
+  ok(r.partial === true, '第2天失败后仍在续跑队列（partial=true，不再被静默丢弃）');
+  ok((r.failedDayIndexes || []).includes(1), '第2天被记为失败', JSON.stringify(r.failedDayIndexes));
+  ok(((r.attempts || {})[1] || 0) === 1, '第2天失败次数记为 1', JSON.stringify(r.attempts));
+  ok(!(r.gaveUpDayIndexes || []).length, '还没到放弃的时候', JSON.stringify(r.gaveUpDayIndexes));
+
+  r = await P.genDayItems(fakeProfile, fakeOutline,
+    { deadline: Date.now() + 60000, doneDayIndexes: r.doneDayIndexes, attempts: r.attempts });
+  ok(((r.attempts || {})[1] || 0) === 2 && r.partial, '第2次失败后仍重试', JSON.stringify(r.attempts));
+
+  r = await P.genDayItems(fakeProfile, fakeOutline,
+    { deadline: Date.now() + 60000, doneDayIndexes: r.doneDayIndexes, attempts: r.attempts });
+  const gaveUp = r.gaveUpDayIndexes || [];
+  ok(gaveUp.includes(1), '第3次失败后放弃并上报 gaveUpDayIndexes', JSON.stringify(gaveUp));
+  ok(r.partial === false, '放弃后不再无限续跑（否则前端会死循环）', r.partial);
+  ok((r.doneDayIndexes || []).sort().join() === '0,2', '其余两天正常完成', JSON.stringify(r.doneDayIndexes));
+
+  llm.chatWithRetry = realChat;
+
+  if (process.argv.includes('--unit')) {
+    console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
+    process.exit(fail ? 1 : 0);
+  }
+  await runRealGeneration();
+})().catch((e) => {
+  console.error('❌ 失败:', e.message);
+  process.exit(1);
+});
+
+function runRealGeneration() {
 console.log('\n============================================');
 console.log('第二部分：真实 LLM 生成（国庆广西场景）');
 console.log('============================================');
@@ -112,7 +173,7 @@ const INPUT = {
   extra: '不想全程自驾，尽量公共交通+当地直通车',
 };
 
-(async () => {
+return (async () => {
   // 线上是两次云函数调用（大纲 / 展开），分别都不能超过 60s，这里分开计时验证
   const t0 = Date.now();
   const phase1 = await P.generateOutline(INPUT);
@@ -133,7 +194,11 @@ const INPUT = {
   const allItems = [];
   for (let r = 0; r < 6; r++) {
     const rt = Date.now();
-    plan = await P.buildPlan(INPUT, Object.assign({}, INPUT, phase1), { doneDayIndexes: plan && plan.doneDayIndexes });
+    // attempts 要跟着回传，否则失败的天不会被重试（与前端续跑逻辑保持一致）
+    plan = await P.buildPlan(INPUT, Object.assign({}, INPUT, phase1), {
+      doneDayIndexes: plan && plan.doneDayIndexes,
+      attempts: plan && plan.attempts,
+    });
     const cost = (Date.now() - rt) / 1000;
     slowest = Math.max(slowest, cost);
     rounds = r + 1;
@@ -207,7 +272,5 @@ const INPUT = {
 
   console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
   process.exit(fail ? 1 : 0);
-})().catch((e) => {
-  console.error('❌ 生成失败:', e.message);
-  process.exit(1);
-});
+})();
+}

@@ -160,6 +160,31 @@ Page({
 
   onUnload() {
     if (this._offAuth) { this._offAuth(); this._offAuth = null; }
+    this.stopTicker();
+  },
+
+  // ---------- 生成计时器 ----------
+  // 等 AI 的时候最怕"不知道还要多久"。每秒刷新已用秒数 + 已细化天数，
+  // 用户能判断是正常在跑还是卡死了，也方便截图告诉我卡在第几天。
+  startTicker(baseText) {
+    this.stopTicker();
+    this._tipBase = baseText;
+    this._tipExtra = '';
+    this._t0 = Date.now();
+    this.setData({ genTip: `${baseText} 0s` });
+    this._ticker = setInterval(() => {
+      const s = Math.round((Date.now() - this._t0) / 1000);
+      const extra = this._tipExtra ? ` · ${this._tipExtra}` : '';
+      this.setData({ genTip: `${this._tipBase} ${s}s${extra}` });
+    }, 1000);
+  },
+
+  setTipExtra(text) {
+    this._tipExtra = text || '';
+  },
+
+  stopTicker() {
+    if (this._ticker) { clearInterval(this._ticker); this._ticker = null; }
   },
 
   async onShow() {
@@ -360,6 +385,8 @@ Page({
   },
 
   async onSubmit() {
+    // 防连点：连按两下会并发两次大纲请求，钱花两份、结果还互相覆盖
+    if (this.data.generating) return;
     const input = this.buildInput();
     const err = this.checkInput(input);
     if (err) {
@@ -374,7 +401,8 @@ Page({
 
   // 阶段一：出路线大纲
   async genOutline() {
-    this.setData({ generating: true, genTip: 'AI 正在规划路线…' });
+    this.setData({ generating: true });
+    this.startTicker('AI 正在规划路线');
     try {
       const res = await api.generateOutline(this._input);
       const days = (res.outline && res.outline.days) || [];
@@ -397,6 +425,7 @@ Page({
         y: i * this._itemH,
       }));
       const areaH = outlineDays.length * this._itemH;
+      this.stopTicker();
       this.setData({
         step: 'outline',
         generating: false,
@@ -411,12 +440,43 @@ Page({
         summary: res.summary,
       });
     } catch (err) {
+      this.stopTicker();
       this.setData({ generating: false, genTip: '' });
-      wx.showToast({ title: err.message || '路线规划失败', icon: 'none', duration: 3000 });
+      this.showDiag(err);
     }
   },
 
+  // 生成失败时顺手跑一次云函数体检，把"缺哪个环境变量 / 模型连不连得上"
+  // 直接弹给用户看 —— 省掉翻云开发日志、来回截图确认的功夫。
+  async showDiag(err) {
+    const msg = (err && err.message) || '生成失败';
+    let report = '';
+    try {
+      const d = await api.generateDiag();
+      const NEED = ['LLM_PROVIDER', 'LLM_MODEL', 'LLM_API_KEY'];
+      // LLM_BASE_URL 是可选项（配了 provider 就不用配），缺了不算问题
+      const miss = NEED.filter((k) => !(d.env || {})[k]);
+      report = [
+        `云函数版本：${d.version || '未知'}`,
+        `模型：${d.model || '未取到'}`,
+        `端点：${d.baseURL || '未取到'}`,
+        `连通性：${d.ping || '未探测'}`,
+        miss.length ? `❌ 缺少环境变量：${miss.join('、')}（AMAP_KEY 只影响导航，可后补）` : '✅ 必需环境变量已配齐',
+        d.cfgError ? `配置错误：${d.cfgError}` : '',
+      ].filter(Boolean).join('\n');
+    } catch (e) {
+      report = '（云函数体检也失败了，多半是这个云函数还没上传部署）';
+    }
+    wx.showModal({
+      title: msg.slice(0, 20) || '生成失败',
+      content: `${msg}\n\n—— 体检报告 ——\n${report}`,
+      showCancel: false,
+      confirmText: '知道了',
+    });
+  },
+
   onRegenOutline() {
+    if (this.data.generating) return;   // 同上：别让"换个方案"连点出两个并发请求
     this.genOutline();
   },
 
@@ -586,39 +646,69 @@ Page({
   // 全程不中断，用户只会觉得"AI 一直在细化"，感觉不到中间续过。
   async onConfirmOutline() {
     if (this.data.generating) return;
-    this.setData({ generating: true, genTip: '正在细化每天的安排…' });
+    this.setData({ generating: true });
+    this.startTicker('正在细化每天的安排');
 
     const base = Object.assign({}, this._input, {
       title: this.data.title,
       summary: this.data.summary,
       outline: this.data.outline,
     });
+    const totalDays = this.data.outlineDays.length || 1;
 
     let result = null;
     let payload = base;
+    let attempts = {};        // 每轮云函数回传的失败次数，下一轮原样带回（决定谁能再重试）
     try {
       for (let round = 0; round < 6; round++) {
         const res = await api.buildPlan(payload, payload);
         result = res;
         if (!res || !res.partial) break;
-        // 还有天没生成完：带上 tripId 和已完成的天继续，界面上不做任何提示
+        attempts = res.attempts || attempts;
+        const done = (res.doneDayIndexes || []).length;
+        this.setTipExtra(`已细化 ${Math.min(done, totalDays)}/${totalDays} 天`);
+        // 还有天没生成完（或某天失败要重试）：带上 tripId 继续，loading 全程不中断
         payload = Object.assign({}, base, {
           tripId: res.tripId,
           doneDayIndexes: res.doneDayIndexes || [],
+          attempts,
         });
-        this.setData({ genTip: '正在细化每天的安排…' });
       }
       if (!result || !result.tripId) throw new Error('生成失败，请重试');
+      this.stopTicker();
 
-      wx.showToast({ title: '攻略已生成', icon: 'success' });
       app.globalData.currentTripId = result.tripId;
       homeCache.clear();
-      setTimeout(() => {
-        wx.switchTab({ url: '/pages/index/index' });
-      }, 800);
+      this.gotoTrip(result);
     } catch (err) {
+      this.stopTicker();
       this.setData({ generating: false, genTip: '' });
-      wx.showToast({ title: err.message || '生成失败', icon: 'none', duration: 3000 });
+      this.showDiag(err);
     }
+  },
+
+  // 生成完直接进攻略详情（整份展开），而不是回首页 —— 刚生成的攻略，
+  // 用户第一眼想看的就是内容本身。返回时回到「我的」。
+  gotoTrip(result) {
+    const gaveUp = result.gaveUpDayIndexes || [];
+    const go = () => {
+      // 用 redirectTo 而不是 switchTab：itinerary 不是 tab 页，
+      // 替换掉向导页后返回栈更干净（不会退回已经没用的大纲页）
+      wx.redirectTo({ url: `/pages/itinerary/itinerary?tripId=${result.tripId}&all=1` });
+    };
+    if (gaveUp.length) {
+      // 有几天重试 3 次都没生成出来：明确告诉用户是哪几天，别让他自己发现行程少了
+      wx.showModal({
+        title: '有几天没生成出来',
+        content: `第 ${gaveUp.map((i) => i + 1).join('、')} 天 AI 几次都没生成成功，已跳过。\n` +
+          `其余 ${result.itemCount} 条安排都在，你可以在行程页手动补这几天。`,
+        showCancel: false,
+        confirmText: '去看看',
+        success: go,
+      });
+      return;
+    }
+    wx.showToast({ title: '攻略已生成', icon: 'success' });
+    setTimeout(go, 800);
   },
 });

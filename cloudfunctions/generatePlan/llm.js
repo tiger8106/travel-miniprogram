@@ -50,9 +50,11 @@ function getConfig() {
  * 原始 chat 调用
  * @param {Array} messages
  * @param {number} maxTokens
+ * @param {number} [timeoutMs] 本次请求的超时上限；不给就用环境变量/默认值
  * @returns {Promise<string>} content
  */
-function chat(messages, maxTokens) {
+function chat(messages, maxTokens, timeoutMs) {
+  const limit = timeoutMs || REQUEST_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
     const { apiKey, baseURL, model } = getConfig();
     const bodyObj = {
@@ -100,8 +102,8 @@ function chat(messages, maxTokens) {
       });
     });
 
-    req.setTimeout(REQUEST_TIMEOUT_MS, () => {
-      req.destroy(new Error(`单次 LLM 请求超时(${REQUEST_TIMEOUT_MS / 1000}s)：model=${model} baseURL=${baseURL}`));
+    req.setTimeout(limit, () => {
+      req.destroy(new Error(`单次 LLM 请求超时(${limit / 1000}s)：model=${model} baseURL=${baseURL}`));
     });
     req.on('error', reject);
     req.write(body);
@@ -109,13 +111,37 @@ function chat(messages, maxTokens) {
   });
 }
 
-/** 带一次重试 */
-async function chatWithRetry(messages, maxTokens) {
+/**
+ * 带一次重试，但**重试要看时间够不够**。
+ *
+ * ⚠️ 血泪教训：之前每次请求固定 45s 超时、失败必然重试一次 ——
+ *    实测一次 45s 超时 + 重试 = 69.2s，直接顶穿云函数 60s 硬上限，
+ *    整轮被系统杀掉，已生成的天虽然入库了，用户却只看到"执行超时"。
+ *    现在按调用方给的 deadline 动态算：
+ *      · 单次超时 = min(45s, 剩余时间 - 3s 安全边际)
+ *      · 只有"剩下的时间还够再来一次"才重试，否则宁可让这一天失败进入下轮续跑
+ *        （续跑只是慢一点，总好过整轮超时被杀）
+ *
+ * @param {Array} messages
+ * @param {number} maxTokens
+ * @param {object} [opts] { deadline: 本次调用截止时间戳 }
+ */
+async function chatWithRetry(messages, maxTokens, opts) {
+  const deadline = opts && opts.deadline;
+  const budget = () => (deadline ? deadline - Date.now() : Infinity);
+  const single = Math.max(8000, Math.min(REQUEST_TIMEOUT_MS, deadline ? budget() - 3000 : REQUEST_TIMEOUT_MS));
   try {
-    return await chat(messages, maxTokens);
+    return await chat(messages, maxTokens, single);
   } catch (e) {
-    console.error('[generatePlan.llm] 调用失败，重试一次:', e.message);
-    return chat(messages, maxTokens);
+    const left = budget();
+    // 重试至少还要留 12s，否则这一轮大概率整体超时
+    if (deadline && left < 12000) {
+      console.error('[generatePlan.llm] 调用失败且剩余时间不足，不重试:', e.message, `剩余=${left}ms`);
+      throw e;
+    }
+    console.error('[generatePlan.llm] 调用失败，重试一次:', e.message, `剩余=${deadline ? left + 'ms' : '不限'}`);
+    const again = Math.max(8000, Math.min(single, deadline ? budget() - 3000 : REQUEST_TIMEOUT_MS));
+    return chat(messages, maxTokens, again);
   }
 }
 

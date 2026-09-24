@@ -12,7 +12,10 @@
 // 本文件是纯逻辑：只在内存里生成数据，不碰数据库（写库在 index.js）。
 // 本地可以直接 require 跑测试（见 scripts/test-generate.js）。
 
-const { chatWithRetry, parseJSONFromText, asArray, SYS_PROMPT } = require('./llm');
+// 走 llm.chatWithRetry（而不是解构出来的局部引用）是为了让测试能替换成假实现，
+// 这样"某天失败 → 重试 → 耗尽放弃"这条链路可以脱离真实 LLM 确定性验证。
+const llm = require('./llm');
+const { parseJSONFromText, asArray, SYS_PROMPT } = require('./llm');
 const { sanitizeItems } = require('./normalize');
 const { parseCnTime, tsToDateStr, tsToCnDateTimeStr } = require('./cn-time');
 
@@ -153,10 +156,11 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
 8. ov 写住宿城市或片区（最后一天写"返程"）；nt 长度 = ${p.days - 1} 晚。
 9. 所有文本简体中文，n 字段控制在 30 字以内。只输出 JSON 对象。`;
 
-  const text = await chatWithRetry([
+  // 大纲是单独一次云函数调用（60s 上限），留 8s 给返回，单次最多等 52s
+  const text = await llm.chatWithRetry([
     { role: 'system', content: SYS_PROMPT },
     { role: 'user', content: prompt },
-  ], 3000);
+  ], 3000, { deadline: Date.now() + 52 * 1000 });
 
   const raw = parseJSONFromText(text);
   const days = asArray(raw.ds).map((d, i) => ({
@@ -232,7 +236,8 @@ dayIndex 全部填 ${idx}。
     - 写的是 train/高铁/动车 → 按火车站流程安排（提前 45 分钟到站、安检、候车、上车），全程不得出现"机场""航站楼""航班""值机"等字样，transportType 填 train。
     - 写的是 plane/航班 → 按机场流程安排（提前 2 小时到机场），transportType 填 plane。
     - 不要自作主张把火车改飞机、把飞机改火车，也不要改车次和时刻；即便你觉得另一种方式更快也不行，这是用户的选择。
-${/高铁/.test(p.transport) ? '12. 用户交通偏好是「高铁优先」：后续所有城际段一律按高铁/动车安排，不要生成任何航班。' : ''}`;
+${/高铁/.test(p.transport) ? '12. 用户交通偏好是「高铁优先」：后续所有城际段一律按高铁/动车安排，不要生成任何航班。' : ''}
+13. **activity 里只写"要做什么"，禁止写你的推理过程**：不要出现"注：根据大纲…""此处假设…""若用户…""我无法/我需要"这类自我纠错或向我的解释。这段文字会原样显示在用户的行程里，写了就很难看。`;
 
   return [
     { role: 'system', content: SYS_PROMPT },
@@ -248,14 +253,27 @@ ${/高铁/.test(p.transport) ? '12. 用户交通偏好是「高铁优先」：�
  * 已经生成好的天交回去（partial=true），前端静默再调一次接着生成剩下几天。
  * 用户全程只看到"正在细化…"，感觉不到中间断过。
  *
+ * ⚠️ 失败的天必须重试，不能静默丢弃：
+ *    之前 failed 的天被排除在 stillTodo 之外，导致 partial=false、整轮直接结束，
+ *    用户只能事后发现"行程少了第 3 天"，而且云函数日志之外没有任何提示。
+ *    现在失败天重新进队列（同一天最多 MAX_RETRY 次），耗尽才放弃，
+ *    并把 gaveUpDayIndexes 交回前端明确提示。
+ *
  * @param {object} p 归一化输入
  * @param {object} outline 大纲
- * @param {object} opts { doneDayIndexes: 已完成的天（续跑时跳过）, deadline: 本次调用的截止时间戳 }
+ * @param {object} opts { doneDayIndexes: 已完成的天（续跑时跳过）,
+ *                        attempts: { [dayIndex]: 已尝试次数 }（续跑时回传，避免无限重试）,
+ *                        deadline: 本次调用的截止时间戳 }
  */
+const MAX_DAY_RETRY = 3;
+
 async function genDayItems(p, outline, opts = {}) {
   const days = outline.days;
   const done = new Set(asArray(opts.doneDayIndexes).map(Number));
-  const pending = days.map((_, i) => i).filter((i) => !done.has(i));
+  const attempts = Object.assign({}, opts.attempts || {});
+  // 只排队"没完成 且 还没试满"的天：失败的天会再排进来重试一次
+  const pending = days.map((_, i) => i)
+    .filter((i) => !done.has(i) && (attempts[i] || 0) < MAX_DAY_RETRY);
   const deadline = opts.deadline || (Date.now() + 40 * 1000);
   // 一批 3 天：并行一次约 20-33s（视模型快慢）
   const WAVE = 3;
@@ -279,14 +297,20 @@ async function genDayItems(p, outline, opts = {}) {
     }
     const waveStart = Date.now();
     const rs = await Promise.all(batch.map((idx) =>
-      chatWithRetry(dayDetailPrompt(p, days[idx], idx, outline), 3500)
+      // 把本轮 deadline 传进去：单次超时会按剩余时间收敛，重试也会先问时间够不够
+      llm.chatWithRetry(dayDetailPrompt(p, days[idx], idx, outline), 3500, { deadline })
         .then((t) => ({ i: idx, items: asArray(parseJSONFromText(t)) }))
         .catch((e) => ({ i: idx, error: e.message }))
     ));
     lastCost = Date.now() - waveStart;
     rs.forEach((r) => {
-      if (r.error) { failed.push(r.i); console.error(`[generatePlan] 第${r.i + 1}天细化失败:`, r.error); return; }
-      if (!r.items.length) { failed.push(r.i); return; }
+      if (r.error || !r.items.length) {
+        failed.push(r.i);
+        attempts[r.i] = (attempts[r.i] || 0) + 1;   // 记一次失败，续跑时才知道还能不能再试
+        console.error(`[generatePlan] 第${r.i + 1}天细化失败（第${attempts[r.i]}次）:`,
+          r.error || 'LLM 返回了空数组');
+        return;
+      }
       r.items.forEach((it) => {
         if (!it || !String(it.activity || '').trim()) return;
         items.push(Object.assign({}, it, { dayIndex: r.i })); // dayIndex 由代码强制写入，不信任 LLM
@@ -296,15 +320,26 @@ async function genDayItems(p, outline, opts = {}) {
   }
 
   const doneAll = Array.from(done).concat(finished);
-  const stillTodo = days.map((_, i) => i).filter((i) => !doneAll.includes(i) && !failed.includes(i));
+  // 还要再跑的天 = 没完成 且 还有重试机会；试满 3 次的进 gaveUp，不再占用后续轮次
+  // 注意用 doneAll（含本轮刚成功的天）排除，否则本轮成功的天会被误判成"待续"
+  const stillTodo = days.map((_, i) => i)
+    .filter((i) => !doneAll.includes(i) && (attempts[i] || 0) < MAX_DAY_RETRY);
+  const gaveUp = days.map((_, i) => i)
+    .filter((i) => !doneAll.includes(i) && (attempts[i] || 0) >= MAX_DAY_RETRY);
 
-  if (!items.length && !stillTodo.length) throw new Error('逐天细化全部失败，未能生成任何行程项');
-  if (!items.length && !done.size) throw new Error('逐天细化全部失败');
+  if (!items.length && !stillTodo.length && !done.size) {
+    throw new Error('逐天细化全部失败，未能生成任何行程项');
+  }
+
+  console.log('[generatePlan] 本轮：完成=%d 失败=%d 放弃=%d 待续=%d',
+    finished.length, failed.length, gaveUp.length, stillTodo.length);
 
   return {
     items,                       // 本次新生成的条目（续跑时只含剩余天）
     doneDayIndexes: doneAll,     // 已完成（含之前轮次）
-    failedDayIndexes: failed,
+    failedDayIndexes: failed,    // 本轮失败的天（还有重试机会）
+    gaveUpDayIndexes: gaveUp,    // 重试耗尽、彻底放弃的天 → 前端要提示用户
+    attempts,                    // 回传尝试次数，前端原样带回下一轮
     partial: stillTodo.length > 0,  // 还有没生成的天 → 前端继续调
   };
 }
@@ -462,7 +497,7 @@ function buildFallbackAlarms(p, outline) {
   return list;
 }
 
-async function genAlarms(p, outline) {
+async function genAlarms(p, outline, deadline) {
   const lines = outline.days.map((d, i) => {
     const mv = asArray(d.moves).map((m) => `${m.mode || ''}${m.code ? ' ' + m.code : ''} ${m.from || ''}→${m.to || ''} ${m.startTime || ''}${m.endTime ? '-' + m.endTime : ''}`).join('；');
     return `第${i + 1}天 ${d.date}｜${d.theme}｜住${d.overnight || d.city}${mv ? '｜交通：' + mv : ''}`;
@@ -505,10 +540,10 @@ ${lines}
 
   let nominated = [];
   try {
-    const text = await chatWithRetry([
+    const text = await llm.chatWithRetry([
       { role: 'system', content: SYS_PROMPT },
       { role: 'user', content: prompt },
-    ], 2000);
+    ], 2000, deadline ? { deadline } : undefined);
     nominated = sanitizeAlarmCandidates(asArray(parseJSONFromText(text)), p);
   } catch (e) {
     console.error('[generatePlan] 闹钟提名失败，只走规则兜底:', e.message);
@@ -549,7 +584,7 @@ ${lines}
 // ④ 旅行建议
 // ============================================================
 
-async function genSuggestions(p, outline) {
+async function genSuggestions(p, outline, deadline) {
   const brief = outline.days.map((d) => `${d.date} ${d.theme}`).join('\n');
   const prompt = `为以下${p.days}天行程生成旅行建议 JSON 对象：{"weather":"天气与穿着建议","gear":"装备清单","food":"必吃推荐","tips":"注意事项","transport":"交通贴士","budget":"预算参考，纯文本每行一条「项目：金额元」"}。
 
@@ -560,10 +595,10 @@ ${brief}
 要求：全部简体中文，结合目的地与出行季节给出具体建议（不要正确的废话）。budget 按 ${p.budget} 档、${p.peopleNum} 人估算。只输出对象。`;
 
   try {
-    const text = await chatWithRetry([
+    const text = await llm.chatWithRetry([
       { role: 'system', content: SYS_PROMPT },
       { role: 'user', content: prompt },
-    ], 1200);
+    ], 1200, deadline ? { deadline } : undefined);
     const obj = parseJSONFromText(text);
     return obj && typeof obj === 'object' ? obj : {};
   } catch (e) {
@@ -628,15 +663,19 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
   if (!asArray(outline.days).length) throw new Error('缺少行程大纲，无法展开详情');
 
   const t1 = Date.now();
-  // 时间预算：细化默认 42s；整轮硬上限 55s（云函数 60s，留 5s 给写库和返回）
-  const budget = opts.budgetMs || 42 * 1000;
+  // 时间预算：细化默认 38s；整轮硬上限 55s（云函数 60s，留 5s 给写库和返回）
+  // 为什么是 38 而不是 42：这轮结束后还要做地理编码（几十个地址）和写库，
+  // 实测最坏一轮细化 47s + 写库就贴着上限了，收紧一点让续跑多一轮更稳。
+  const budget = opts.budgetMs || 38 * 1000;
   const hardDeadline = t1 + (opts.hardBudgetMs || 55 * 1000);
   const deadline = t1 + budget;
 
   const detail = await genDayItems(p, outline, {
     doneDayIndexes: opts.doneDayIndexes,
+    attempts: opts.attempts,     // 上一轮回传的失败次数，决定哪些天还能再试
     deadline,
   });
+  const progress = { done: detail.doneDayIndexes.length, total: asArray(outline.days).length };
   console.log('[generatePlan] 细化完成 %dms, 原始条目=%d, partial=%s',
     Date.now() - t1, detail.items.length, detail.partial);
 
@@ -653,9 +692,13 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
       items,
       partial: true,
       doneDayIndexes: detail.doneDayIndexes,
+      attempts: detail.attempts,
+      gaveUpDayIndexes: detail.gaveUpDayIndexes,
+      progress,
       meta: {
         days: p.days,
         failedDayIndexes: detail.failedDayIndexes,
+        gaveUpDayIndexes: detail.gaveUpDayIndexes,
         elapsedMs: Date.now() - t1,
       },
     };
@@ -669,8 +712,8 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
   let suggestions = {};
   if (remain > 3 * 1000) {
     const [a, s] = await Promise.all([
-      withTimeout(genAlarms(p, outline), remain, null),
-      withTimeout(genSuggestions(p, outline), remain, null),
+      withTimeout(genAlarms(p, outline, Date.now() + remain), remain, null),
+      withTimeout(genSuggestions(p, outline, Date.now() + remain), remain, null),
     ]);
     alarms = a || buildFallbackAlarms(p, outline);
     suggestions = s || {};
@@ -689,9 +732,13 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
     suggestions,
     partial: false,
     doneDayIndexes: detail.doneDayIndexes,
+    attempts: detail.attempts,
+    gaveUpDayIndexes: detail.gaveUpDayIndexes,
+    progress,
     meta: {
       days: p.days,
       failedDayIndexes: detail.failedDayIndexes,
+      gaveUpDayIndexes: detail.gaveUpDayIndexes,
       elapsedMs: Date.now() - t1,
     },
   };
@@ -711,6 +758,6 @@ async function generate(rawInput) {
 }
 
 module.exports = {
-  generate, generateOutline, buildPlan,
+  generate, generateOutline, buildPlan, genDayItems,
   normalizeInput, sanitizeAlarmCandidates, buildFallbackAlarms, shiftDate, dayDiff, isHolidayRange,
 };

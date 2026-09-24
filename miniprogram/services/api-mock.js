@@ -228,6 +228,15 @@ module.exports = {
   getDayTips,
   generateOutline,
   buildPlan,
+  // mock 模式没有真实云函数，体检直接返回"全部就绪"，方便本地跑通界面
+  generateDiag: async function () {
+    await delay(200);
+    return {
+      version: 'mock',
+      env: { LLM_PROVIDER: true, LLM_BASE_URL: false, LLM_MODEL: true, LLM_API_KEY: true, AMAP_KEY: true },
+      provider: 'mock', model: 'mock-model', baseURL: 'mock://', cfgError: '', ping: '正常（mock）',
+    };
+  },
   uploadDoc,
   downloadFromCloud,
 };

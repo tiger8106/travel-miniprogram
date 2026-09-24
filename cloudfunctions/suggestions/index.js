@@ -249,6 +249,18 @@ function parseJsonLoose(text) {
   try {
     return JSON.parse(json);
   } catch (e) {
+    // 截断抢救：模型偶尔写到一半（撞 max_tokens 或输出被截断），
+    // 直接判失败用户就得点"重新生成"，其实前面大部分内容是可用的。
+    const cut = json.lastIndexOf('}');
+    if (cut > 0) {
+      const salvaged = json.slice(0, cut + 1)
+        .replace(/,\s*"[^"]*"\s*:\s*[^,}]*$/, '');  // 丢掉写到一半的键值对
+      try {
+        const o = JSON.parse(salvaged);
+        console.warn('[suggestions] JSON 被截断，已抢救出部分结果');
+        return o;
+      } catch (e2) { /* 抢救失败，返回 null */ }
+    }
     return null;
   }
 }

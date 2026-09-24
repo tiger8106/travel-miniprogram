@@ -1,6 +1,10 @@
 // 验证 parseTravelPlan/index.js 里的日期清洗逻辑（从源文件抽取函数后执行）
 const fs = require('fs');
-const src = fs.readFileSync('../cloudfunctions/parseTravelPlan/index.js', 'utf8');
+const path = require('path');
+// 必须用 __dirname 定位：写相对路径时，从项目根目录跑（node scripts/test-xxx.js）
+// 会去找 <根>/../cloudfunctions，直接 ENOENT 崩掉
+const src = fs.readFileSync(
+  path.resolve(__dirname, '..', 'cloudfunctions', 'parseTravelPlan', 'index.js'), 'utf8');
 
 // 抽取 validDateStr / tsToDateStr 两个函数体
 function extract(name) {
@@ -10,7 +14,10 @@ function extract(name) {
   return m[0];
 }
 eval(extract('validDateStr'));
-eval(extract('tsToDateStr'));
+// tsToDateStr 早就被抽到 cn-time.js 了（index.js 里只剩 require），
+// 从源文件里 eval 是找不到的 —— 直接 require 真实模块，测的才是线上跑的那份代码
+const { tsToDateStr } = require(
+  path.resolve(__dirname, '..', 'cloudfunctions', 'parseTravelPlan', 'cn-time.js'));
 
 const assert = require('assert');
 

@@ -14,6 +14,18 @@ const ok = (name, pass, extra) => {
 };
 
 // ---------- ① JS 语法 ----------
+// ⚠️ 别用 spawnSync(process.execPath, ['--check', f])：本机（Windows + 沙箱）会随机
+//    EBUSY，6 个文件恒报"语法失败"，是假警报。改用 vm.Script 在同进程内编译，
+//    效果一样（都是只编译不执行），但不会被子进程的调度问题坑到。
+const vm = require('vm');
+const syntaxOk = (abs) => {
+  try {
+    new vm.Script(fs.readFileSync(abs, 'utf8'), { filename: abs });
+    return null;
+  } catch (e) {
+    return e.message;
+  }
+};
 const jsFiles = [
   'pages/itinerary/itinerary.js',
   'pages/tickets/tickets.js',
@@ -23,9 +35,17 @@ const jsFiles = [
   'components/map-button/map-button.js',
 ];
 jsFiles.forEach((rel) => {
-  const abs = path.join(MP, rel);
-  const r = cp.spawnSync(process.execPath, ['--check', abs], { encoding: 'utf8' });
-  ok(`JS 语法 ${rel}`, r.status === 0, r.status === 0 ? '' : (r.stderr || '').trim().split('\n')[0]);
+  const err = syntaxOk(path.join(MP, rel));
+  ok(`JS 语法 ${rel}`, !err, err || '');
+});
+
+// 顺带把云函数也过一遍（云函数改动只跑 test-*.js 容易漏掉语法错）
+const CF = path.join(ROOT, 'cloudfunctions');
+fs.readdirSync(CF).forEach((dir) => {
+  const abs = path.join(CF, dir, 'index.js');
+  if (!fs.existsSync(abs)) return;
+  const err = syntaxOk(abs);
+  ok(`JS 语法 cloudfunctions/${dir}/index.js`, !err, err || '');
 });
 
 // ---------- ② 事件绑定对齐 ----------
