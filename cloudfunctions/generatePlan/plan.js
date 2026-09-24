@@ -239,27 +239,33 @@ async function genDayItems(p, outline, opts = {}) {
   const done = new Set(asArray(opts.doneDayIndexes).map(Number));
   const pending = days.map((_, i) => i).filter((i) => !done.has(i));
   const deadline = opts.deadline || (Date.now() + 40 * 1000);
-  // 一批 3 天：单次并行约 12-18s，既够快又留得出判断时间的余地
+  // 一批 3 天：并行一次约 20-33s（视模型快慢）
   const WAVE = 3;
-  // 剩余时间不足以安全跑完下一批就收工（一批最坏约 20s，留 12s 余量给写库和返回）
-  const WAVE_RESERVE = 12 * 1000;
+  // 下一批要留多少时间：首轮按 25s 估，之后按上一批实际耗时 ×1.2（最多 40s）。
+  // 用固定值会翻车——实测一批慢起来 33s，只留 12s 就会顶穿 60s 上限。
+  const FIRST_WAVE_ESTIMATE = 25 * 1000;
+  const MAX_WAVE_ESTIMATE = 40 * 1000;
 
   const items = [];
   const finished = [];
   const failed = [];
+  let lastCost = 0;
 
   for (let k = 0; k < pending.length; k += WAVE) {
     const batch = pending.slice(k, k + WAVE);
-    if (Date.now() + WAVE_RESERVE > deadline) {
+    const estimate = lastCost ? Math.min(Math.ceil(lastCost * 1.2), MAX_WAVE_ESTIMATE) : FIRST_WAVE_ESTIMATE;
+    if (Date.now() + estimate > deadline) {
       console.log('[generatePlan] 时间预算不足，停止在已完成部分（续跑）: 已完成=%d 剩余=%d',
         finished.length, pending.length - finished.length - failed.length);
       break;
     }
+    const waveStart = Date.now();
     const rs = await Promise.all(batch.map((idx) =>
       chatWithRetry(dayDetailPrompt(p, days[idx], idx, outline), 3500)
         .then((t) => ({ i: idx, items: asArray(parseJSONFromText(t)) }))
         .catch((e) => ({ i: idx, error: e.message }))
     ));
+    lastCost = Date.now() - waveStart;
     rs.forEach((r) => {
       if (r.error) { failed.push(r.i); console.error(`[generatePlan] 第${r.i + 1}天细化失败:`, r.error); return; }
       if (!r.items.length) { failed.push(r.i); return; }
@@ -583,8 +589,8 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
   if (!asArray(outline.days).length) throw new Error('缺少行程大纲，无法展开详情');
 
   const t1 = Date.now();
-  // 时间预算：默认 45s，留 15s 给写库和返回（云函数上限 60s）
-  const budget = opts.budgetMs || 45 * 1000;
+  // 时间预算：默认 42s，留 18s 给写库和返回（云函数上限 60s）
+  const budget = opts.budgetMs || 42 * 1000;
   const deadline = t1 + budget;
 
   const detail = await genDayItems(p, outline, {
