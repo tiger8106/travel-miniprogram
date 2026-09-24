@@ -13,6 +13,16 @@ function isTimeout(err) {
 }
 
 /**
+ * 检测云函数不存在（-501000 FUNCTION_NOT_FOUND）
+ * 绝大多数情况 = 这个云函数还没在开发者工具里「上传并部署」到云端
+ * @param {object} err 原始错误
+ */
+function isFnNotFound(err) {
+  const raw = `${(err && (err.errMsg || err.message)) || ''}${(err && err.errCode) || ''}`;
+  return /-501000|FUNCTION_NOT_FOUND|could not be found/i.test(raw);
+}
+
+/**
  * 调用云函数
  * @param {string} name 云函数名
  * @param {object} data 参数
@@ -39,6 +49,10 @@ function callFn(name, data = {}) {
         // 超时不丢原始 errCode，改成能直接照做的人话提示
         if (isTimeout(err)) {
           reject(new Error(`「${name}」执行超时：请在云开发控制台把该云函数的超时时间改成 60 秒（默认只有 3 秒）`));
+          return;
+        }
+        if (isFnNotFound(err)) {
+          reject(new Error(`云函数「${name}」还没上传到云端：请在开发者工具左侧目录找到它，右键 →「上传并部署：云端安装依赖」`));
           return;
         }
         reject(err);

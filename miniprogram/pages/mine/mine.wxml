@@ -32,19 +32,25 @@
 
   <view class="card">
     <view class="card-title">🧳 行程管理</view>
-    <view class="menu-item menu-item-hl" bindtap="onTapPlanner">
+    <view class="menu-item" bindtap="onTapMyTrips">
+      <view class="menu-item-left">
+        <text>🗂️ 我的行程</text>
+        <text class="menu-item-sub">查看已保存的攻略与行程安排</text>
+      </view>
+      <text class="text-placeholder">›</text>
+    </view>
+    <view class="menu-item" bindtap="onTapUpload">
+      <view class="menu-item-left">
+        <text>📤 上传新攻略</text>
+        <text class="menu-item-sub">上传现成攻略文档，自动解析成行程</text>
+      </view>
+      <text class="text-placeholder">›</text>
+    </view>
+    <view class="menu-item" bindtap="onTapPlanner">
       <view class="menu-item-left">
         <text>✨ 制定新攻略</text>
         <text class="menu-item-sub">没现成攻略？填几个问题，AI 直接生成</text>
       </view>
-      <text class="text-placeholder">›</text>
-    </view>
-    <view class="menu-item" bindtap="onTapMyTrips">
-      <text>🗂️ 我的行程</text>
-      <text class="text-placeholder">›</text>
-    </view>
-    <view class="menu-item" bindtap="onTapUpload">
-      <text>📤 上传新攻略</text>
       <text class="text-placeholder">›</text>
     </view>
   </view>

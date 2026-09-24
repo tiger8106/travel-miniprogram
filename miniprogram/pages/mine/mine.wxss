@@ -125,18 +125,8 @@
   border-bottom: none;
 }
 
-/* 「制定新攻略」主推入口：两行排版 + 淡蓝底强调 */
-.menu-item-hl {
-  background: linear-gradient(90deg, var(--primary-light), transparent);
-  border-radius: 12rpx;
-  padding-left: 20rpx;
-  padding-right: 20rpx;
-  margin: 0 0 4rpx;
-  border-bottom: none;
-  color: var(--primary);
-  font-weight: 600;
-}
-
+/* 「制定新攻略」曾经的强调样式已移除：行程管理三项统一为
+   「图标 + 标题 + 副标题」两行排版，视觉一致 */
 .menu-item-left {
   display: flex;
   flex-direction: column;

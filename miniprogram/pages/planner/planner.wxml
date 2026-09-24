@@ -29,13 +29,15 @@
         <view class="card-title">📅 什么时候去</view>
         <view class="field">
           <text class="field-label">出发日期</text>
-          <picker mode="date" value="{{startDate}}" start="{{todayStr}}" bindchange="onStartDate">
+          <picker mode="multiSelector" range="{{startRange}}" value="{{startVal}}"
+                  bindcolumnchange="onStartDateCol" bindchange="onStartDate">
             <view class="field-picker">{{startDate}}</view>
           </picker>
         </view>
         <view class="field">
           <text class="field-label">返程日期</text>
-          <picker mode="date" value="{{endDate}}" start="{{startDate}}" bindchange="onEndDate">
+          <picker mode="multiSelector" range="{{endRange}}" value="{{endVal}}"
+                  bindcolumnchange="onEndDateCol" bindchange="onEndDate">
             <view class="field-picker">{{endDate}}</view>
           </picker>
         </view>
@@ -81,9 +83,14 @@
       <view class="card">
         <view class="card-title">🎨 兴趣偏好（最多 5 个）</view>
         <view class="chips">
-          <view wx:for="{{interests}}" wx:key="*this"
-                class="chip {{interestOn.indexOf(index) >= 0 ? 'chip-on' : ''}}"
-                data-idx="{{index}}" bindtap="onToggleInterest">{{item}}</view>
+          <view wx:for="{{interestItems}}" wx:key="name"
+                class="chip {{item.on ? 'chip-on' : ''}}"
+                data-idx="{{index}}" bindtap="onToggleInterest">{{item.name}}</view>
+        </view>
+        <view class="custom-row">
+          <input class="custom-input" value="{{customText}}" placeholder="自定义偏好，如：滑雪、看展、赶海"
+                 maxlength="20" bindinput="onCustomInput" bindconfirm="onAddCustom" />
+          <view class="custom-add {{customText ? '' : 'custom-add-off'}}" bindtap="onAddCustom">＋ 添加</view>
         </view>
       </view>
 
