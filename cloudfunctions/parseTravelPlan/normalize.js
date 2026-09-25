@@ -125,6 +125,38 @@ function stripMeta(text) {
 }
 
 /**
+ * 从 activity 文本里抽一个目的地（确定性，仅在起终点全空时兜底用）：
+ *   「在崇善米粉（依仁路总店）吃桂林米粉」→ 崇善米粉（依仁路总店）
+ *   「前往鼎鼎香农家菜吃饭」             → 鼎鼎香农家菜
+ *   「游览兴坪古镇、20元人民币背景观景点」→ 兴坪古镇（截到第一个顿号）
+ * 实测（广西七日攻略）：餐饮/游览条目 LLM 经常不填 startLocation/endLocation，
+ * 卡片上连导航按钮都没有。抽不出或抽出的是泛词（酒店/附近）就放弃，宁缺毋滥。
+ */
+const DEST_STOP_RE = /^(酒店|民宿|客栈|宾馆|饭店|旅馆|家|住宿地|出发地|酒店大堂|餐厅|景区|景区附近|附近|周边|目的地)$/;
+function inferDestination(act) {
+  const s = String(act || '').replace(/[。．.！!？?]+$/, '').trim();
+  if (!s) return '';
+  let m = s.match(/在(.{2,20}?)(?:吃|喝|用早|用午|用晚|用餐|办)/);
+  let dest = m ? m[1] : '';
+  if (!dest) {
+    m = s.match(/(?:前往|开往|驶往|到达|抵达|打车去|开车去|乘车去|步行去|骑行去|坐船去|乘船去|坐车去|去|到)(.{2,20}?)(?:[，,、；;]|$)/);
+    dest = m ? m[1] : '';
+  }
+  if (!dest) {
+    m = s.match(/(?:游览|参观|逛|打卡)(.{2,20}?)(?:[，,、；;]|$)/);
+    dest = m ? m[1] : '';
+  }
+  if (!dest) return '';
+  // 砍掉句尾的动词尾巴（"…吃饭""…入住"）
+  dest = dest.replace(/(吃|喝|饭|早餐|午餐|晚餐|晚饭|早饭|夜宵|游玩|游览|观光|打卡|拍照|办理入住|入住|休息|集合|候车|等车|购物|买东西|散步|排队|取票|看日落|看日出|买|点)+$/, '');
+  dest = dest.trim();
+  if (dest.length < 2 || dest.length > 20) return '';
+  if (/附近|周边|旁边|路上|途中/.test(dest)) return '';
+  if (DEST_STOP_RE.test(dest)) return '';
+  return dest;
+}
+
+/**
  * 清洗 LLM 输出的行程项数组
  * @param {Array} rawItems LLM 返回的 items
  * @returns {Array} 清洗后的 items（不含经纬度，地理编码由主流程负责）
@@ -175,6 +207,16 @@ function sanitizeItems(rawItems) {
       };
     })
     .filter(Boolean);
+
+  // ---------- Pass 1.5：无起终点条目的终点回填 ----------
+  // 餐饮/游览条目经常两个字段全空 → 卡片连导航按钮都没有。
+  // 从 activity 里确定性抽一个目的地当 endLocation；
+  // startLocation 留给 Pass 2 按行程连续性继承（人上一站在哪就从哪出发）。
+  items.forEach((it) => {
+    if (it.startLocation || it.endLocation) return;
+    const dest = inferDestination(it.activity);
+    if (dest) it.endLocation = dest;
+  });
 
   // ---------- Pass 2：跨天位置继承 ----------
   // 逐天解析时每天是独立请求，"当天第一条移动"常因原文没写出发点而缺失起点。
@@ -299,4 +341,4 @@ function sanitizeItems(rawItems) {
   return items;
 }
 
-module.exports = { normTime, samePlace, sanitizeItems, toMin, fmtMin, parseDurationMin, stripMeta, META_PAT, META_HARD };
+module.exports = { normTime, samePlace, sanitizeItems, toMin, fmtMin, parseDurationMin, stripMeta, inferDestination, META_PAT, META_HARD };

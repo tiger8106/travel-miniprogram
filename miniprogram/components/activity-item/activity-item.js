@@ -48,6 +48,11 @@ Component({
       type: String,
       value: '',
     },
+    // 条目城市查不到时的兜底（整条行程的大地名）
+    fallbackRegion: {
+      type: String,
+      value: '',
+    },
   },
 
   data: {
@@ -55,18 +60,54 @@ Component({
     transportOptions: TRANSPORT_OPTIONS,
     categoryOptions: CATEGORY_OPTIONS,
     showDel: false, // 删除确认弹层
+    navLegs: [],    // 导航段列表：[{ from, to, lat, lon }]，有中间点时一段一个按钮
   },
 
   observers: {
     item(item) {
       if (item) {
-        this.setData({ icon: CATEGORY_ICONS[item.category] || '📌' });
+        this.setData({
+          icon: CATEGORY_ICONS[item.category] || '📌',
+          navLegs: this.buildNavLegs(item),
+        });
       }
     },
   },
 
   methods: {
     noop() {},
+
+    // 导航段拆分：起点 → [中间点…] → 终点，每段一个"直达目的地"按钮。
+    // 用户在编辑抽屉加的中间点（如 漓江漂流沿途的 九马画山/黄布倒影/兴坪）
+    // 会依次生成导航链接，点到哪段就导航到哪段。
+    buildNavLegs(item) {
+      if (!item) return [];
+      const wps = Array.isArray(item.waypoints) ? item.waypoints : [];
+      const stops = [];
+      wps.forEach((w) => {
+        const name = typeof w === 'string' ? w : (w && w.name);
+        if (name) {
+          stops.push({
+            to: name,
+            lat: (typeof w === 'object' && Number(w.lat)) || 0,
+            lon: (typeof w === 'object' && Number(w.lon)) || 0,
+          });
+        }
+      });
+      if (item.endLocation) {
+        stops.push({ to: item.endLocation, lat: Number(item.endLat) || 0, lon: Number(item.endLon) || 0 });
+      }
+      if (!stops.length && item.startLocation) {
+        // 只有起点（少见）：定位到起点让用户规划
+        stops.push({ to: item.startLocation, lat: Number(item.startLat) || 0, lon: Number(item.startLon) || 0 });
+      }
+      let prev = item.startLocation || '';
+      return stops.map((s) => {
+        const leg = { from: prev, to: s.to, lat: s.lat, lon: s.lon };
+        prev = s.to;
+        return leg;
+      });
+    },
 
     onTapNav() {
       const { item } = this.data;
@@ -129,6 +170,26 @@ Component({
     // 交换起终点
     onSwapLocation() {
       this.triggerEvent('swaplocation', {});
+    },
+
+    // ---------- 中间点（途经地）----------
+    onAddWaypoint() {
+      this.triggerEvent('editwaypoint', { op: 'add' });
+    },
+
+    onRemoveWaypoint(e) {
+      this.triggerEvent('editwaypoint', {
+        op: 'remove',
+        index: e.currentTarget.dataset.index,
+      });
+    },
+
+    onWaypointInput(e) {
+      this.triggerEvent('editwaypoint', {
+        op: 'input',
+        index: e.currentTarget.dataset.index,
+        value: e.detail.value,
+      });
     },
 
     // ---------- 删除（先弹确认卡） ----------

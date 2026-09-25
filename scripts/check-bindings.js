@@ -81,7 +81,7 @@ const itJs = fs.readFileSync(path.join(MP, 'pages/itinerary/itinerary.js'), 'utf
 ok('编辑/删除已独立成行（无 action-row）',
   !/class="action-row"/.test(actWxml) && !/class="spacer"/.test(actWxml));
 ok('导航行 nav-row + 操作行 btn-row 均存在',
-  /class="nav-row"/.test(actWxml) && /class="btn-row"/.test(actWxml));
+  /class="nav-row/.test(actWxml) && /class="btn-row"/.test(actWxml));
 ok('btn-row 样式已定义', /\.btn-row\s*\{/.test(actWxss));
 ok('组件绑定不再用 editingId 做比较', !/editing="\{\{editingId/.test(itWxml));
 ok('WXML 使用 item.editing', /editing="\{\{item\.editing\}\}"/.test(itWxml));
@@ -302,6 +302,35 @@ ok('收尾闭环有代码兜底（enforceDayClosure 挂在 sanitize 之后）',
 ok('返程日不补"回酒店"（ov=返程）', /返程\|回家\/\.test\(tonight\)/.test(planJs));
 ok('收尾判定认"酒店/民宿"字样，不被"眉山站⊃眉山"骗过',
   /酒店\|民宿\|客栈\|宾馆\|青旅\|住宿/.test(planJs));
+
+// ---------- ⑮ 地理编码与导航（多城市候选 / 中间点 / 目的地直连） ----------
+ok('geocode 支持多候选城市（跨城行程不再只用第一个城市词搜）',
+  /const candidates = tokens\.filter/.test(geoJs) && /candidates\.forEach/.test(geoJs)
+    && bodyOf(geoJs) === bodyOf(genGeoJs));
+ok('geocode 搜前剥掉括号补注（「XX酒店（XX景区店）」不再拖垮 POI 搜索）',
+  /const bare = String\(address\)\.replace/.test(geoJs));
+ok('geocode 有关键词放宽兜底（砍开头两字，「大新明仕酒店」→「明仕酒店」）',
+  /poi\/relax/.test(geoJs));
+ok('geocode 回传命中的城市（item.city 按条目落准，前端实时定位直接用对城市）',
+  /cityTagOf/.test(geoJs));
+ok('parseTravelPlan 把整串 region 传给地理编码（不再只传第一个城市词）',
+  /geocodeBatch\(\[\.\.\.addrSet\], region \? \(\) => region : undefined\)/.test(fs.readFileSync(path.join(ROOT, 'cloudfunctions/parseTravelPlan/index.js'), 'utf8')));
+ok('无起终点条目有终点回填（inferDestination 挂在 Pass 2 之前）',
+  /function inferDestination/.test(genNormJs) && /inferDestination\(it\.activity\)/.test(genNormJs));
+ok('map-button 文案只显示目的地（打开地图只有目的地信息，不误导）',
+  !/\$\{s\} → \$\{e\}/.test(fs.readFileSync(path.join(MP, 'components/map-button/map-button.js'), 'utf8'))
+    && /label: target, target \}/.test(fs.readFileSync(path.join(MP, 'components/map-button/map-button.js'), 'utf8'))
+    && /region: this\.data\.region/.test(fs.readFileSync(path.join(MP, 'components/map-button/map-button.js'), 'utf8')));
+const aiWxml = fs.readFileSync(path.join(MP, 'components/activity-item/activity-item.wxml'), 'utf8');
+const aiJs = fs.readFileSync(path.join(MP, 'components/activity-item/activity-item.js'), 'utf8');
+ok('activity-item 导航区支持多段链接（中间点依次生成导航按钮）',
+  /wx:for="\{\{navLegs\}\}"/.test(aiWxml) && /buildNavLegs\(item\)/.test(aiJs));
+ok('编辑抽屉支持添加中间点（途 / 删除 / 添加按钮齐备）',
+  /place-dot mid/.test(aiWxml) && /onAddWaypoint/.test(aiWxml) && /onRemoveWaypoint/.test(aiWxml));
+ok('行程页接入中间点编辑与 fallbackRegion',
+  /bind:editwaypoint="onEditWaypoint"/.test(fs.readFileSync(path.join(MP, 'pages/itinerary/itinerary.wxml'), 'utf8'))
+    && /onEditWaypoint\(e\)/.test(fs.readFileSync(path.join(MP, 'pages/itinerary/itinerary.js'), 'utf8'))
+    && /fallbackRegion="\{\{trip\.region\}\}"/.test(fs.readFileSync(path.join(MP, 'pages/itinerary/itinerary.wxml'), 'utf8')));
 
 console.log(failed ? `\n${failed} 项失败 ✗` : '\n全部通过 ✓');
 process.exit(failed ? 1 : 0);

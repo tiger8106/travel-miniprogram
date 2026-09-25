@@ -114,17 +114,25 @@ exports.main = async (event, context) => {
         if (it.startLocation) addrSet.add(it.startLocation);
         if (it.endLocation) addrSet.add(it.endLocation);
       });
-      const coordMap = await geocodeBatch([...addrSet], cityHint ? () => cityHint : undefined);
+      // ⚠️ 传整串 region（「广西 桂林 阳朔 南宁 崇左」），不要只传 pickCity 的
+      // 第一个城市词——跨城行程里桂林那天的条目完全可能是「南宁东站」「崇左南站」，
+      // 只拿第一个城市词搜索会把后面几站全部定位失败或乱定位（实测踩过）。
+      // geocodeOne 内部会把 region 拆成候选城市逐个试。
+      const coordMap = await geocodeBatch([...addrSet], region ? () => region : undefined);
       if (coordMap.size) {
         items.forEach((it) => {
           const s = coordMap.get(it.startLocation);
           const e = coordMap.get(it.endLocation);
           if (s) { it.startLon = s.lon; it.startLat = s.lat; }
           if (e) { it.endLon = e.lon; it.endLat = e.lat; }
+          // 命中的是哪个城市就记哪个（geocodeOne 校验通过时回传），
+          // 前端点导航时用它做城市消歧——比整条行程共用一个城市词准得多
+          const hitCity = (e && e.city) || (s && s.city) || '';
+          if (hitCity) it.city = hitCity;
+          else if (cityHint && !it.city) it.city = cityHint;
         });
-      }
-      // 每条记下城市：前端点导航时用它消歧（解析出的攻略只有一个 region，粒度不够）
-      if (cityHint) {
+      } else if (cityHint) {
+        // 没查到坐标的老兜底：至少给前端一个行程级城市词
         items.forEach((it) => {
           const to = it.endLocation || it.startLocation;
           if (to && !it.city) it.city = cityHint;

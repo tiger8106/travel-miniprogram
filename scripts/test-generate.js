@@ -410,6 +410,26 @@ const fixedMono = sanitizeItems([
 ok(fixedMono.length === 0, '"错误修正/此处应为/既定路线"独白条目整条丢弃',
   JSON.stringify(fixedMono));
 
+// 5k. 无起终点条目的终点回填（餐饮/游览条目经常全空，卡片连导航都没有）
+const { inferDestination } = require('../cloudfunctions/generatePlan/normalize.js');
+ok(inferDestination('在崇善米粉（依仁路总店）吃桂林米粉') === '崇善米粉（依仁路总店）',
+  '「在…吃…」抽出门店全名', inferDestination('在崇善米粉（依仁路总店）吃桂林米粉'));
+ok(inferDestination('前往鼎鼎香农家菜吃饭') === '鼎鼎香农家菜',
+  '「前往…吃饭」砍掉句尾动词尾巴', inferDestination('前往鼎鼎香农家菜吃饭'));
+ok(inferDestination('游览兴坪古镇、20元人民币背景观景点及老寨山（可选）') === '兴坪古镇',
+  '「游览…」截到第一个顿号', inferDestination('游览兴坪古镇、20元人民币背景观景点及老寨山（可选）'));
+ok(inferDestination('在酒店吃早餐') === '', '泛词不回填（酒店/附近不算目的地）',
+  inferDestination('在酒店吃早餐'));
+ok(inferDestination('回酒店休息') === '', '没有移动动词就不抽', inferDestination('回酒店休息'));
+const backfilled = sanitizeItems([
+  { dayIndex: 0, startTime: '20:20', endTime: '21:00', activity: '在崇善米粉（依仁路总店）吃桂林米粉', category: 'food' },
+  { dayIndex: 0, startTime: '21:00', endTime: '21:10', activity: '步行前往杉湖', startLocation: '崇善米粉（依仁路总店）', endLocation: '杉湖', category: 'transport' },
+]);
+ok(backfilled[0].endLocation === '崇善米粉（依仁路总店）',
+  '回填后餐饮条目有了导航终点', backfilled[0].endLocation);
+ok(backfilled[1].endLocation === '杉湖' && backfilled[1].startLocation === '崇善米粉（依仁路总店）',
+  '本来就有起终点的条目不受回填影响', `${backfilled[1].startLocation}→${backfilled[1].endLocation}`);
+
 // 6. 失败天重试链路（不调真实 LLM：把 llm.chatWithRetry 换成假实现）
 //
 //    背景：之前某天细化失败会被直接排除在续跑队列外，partial=false 就结束了，

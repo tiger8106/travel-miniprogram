@@ -373,6 +373,10 @@ Page({
         activity: item.activity || '',
         startLocation: item.startLocation || '',
         endLocation: item.endLocation || '',
+        // 中间点编辑态用纯名字数组（坐标在保存时重查）
+        waypoints: (Array.isArray(item.waypoints) ? item.waypoints : [])
+          .map((w) => (typeof w === 'string' ? w : (w && w.name) || ''))
+          .filter((n) => String(n || '').trim()),
         transportType: item.transportType || 'car',
         category: item.category || 'sight',
         note: item.note || '',
@@ -394,6 +398,24 @@ Page({
 
   onEditCategory(e) {
     this.setData({ 'editForm.category': e.detail.value });
+  },
+
+  // 中间点（途经地）增删改：{ op: 'add' | 'remove' | 'input', index, value }
+  onEditWaypoint(e) {
+    const d = (e && e.detail) || {};
+    const wps = ((this.data.editForm && this.data.editForm.waypoints) || []).slice();
+    if (d.op === 'add') {
+      if (wps.length >= 5) {
+        wx.showToast({ title: '中间点最多 5 个', icon: 'none' });
+        return;
+      }
+      wps.push('');
+    } else if (d.op === 'remove') {
+      wps.splice(d.index, 1);
+    } else if (d.op === 'input') {
+      wps[d.index] = d.value;
+    }
+    this.setData({ 'editForm.waypoints': wps });
   },
 
   async onSaveEdit() {
@@ -422,6 +444,24 @@ Page({
         endCoord = b;
       }
 
+      // 中间点：没改过的沿用旧坐标，改过/新增的现场查一次（查不到先存名字，导航时实时再查）
+      const oldWps = Array.isArray(old.waypoints) ? old.waypoints : [];
+      const oldNames = oldWps.map((w) => (typeof w === 'string' ? w : (w && w.name) || ''));
+      const newNames = (editForm.waypoints || [])
+        .map((n) => String(n || '').trim())
+        .filter(Boolean);
+      const wpCoords = await Promise.all(newNames.map((n, i) => {
+        const prev = oldWps[i];
+        if (oldNames[i] === n && prev && Number(prev.lon) && Number(prev.lat)) {
+          return { lon: Number(prev.lon), lat: Number(prev.lat) };
+        }
+        return this.tryGeocode(n, old.city || this.tripRegion());
+      }));
+      const waypoints = newNames.map((n, i) => {
+        const c = wpCoords[i];
+        return c ? { name: n, lon: c.lon, lat: c.lat } : { name: n, lon: '', lat: '' };
+      });
+
       const items = (trip.items || []).map((it) => {
         if (this.itemKeyOf(it) !== editForm.id) return it;
         const next = {
@@ -431,6 +471,7 @@ Page({
           activity: editForm.activity,
           startLocation: editForm.startLocation,
           endLocation: editForm.endLocation,
+          waypoints,
           transportType: editForm.transportType,
           category: editForm.category,
           note: editForm.note,

@@ -211,6 +211,51 @@ async function caseH() {
   return G.geocodeOne('大新县硕龙镇', '桂林');
 }
 
+async function caseI() {
+  // 实测翻车（广西七日攻略）：「锦江都城酒店（桂林两江四湖象山景区店）」
+  // 全名 POI 搜不到 → 剥掉括号补注搜「锦江都城酒店」就命中
+  stubHttp([
+    { match: (u) => u.includes('keywords=锦江都城酒店（'), resp: { status: '1', pois: [] } },
+    {
+      match: (u) => u.includes('keywords=锦江都城酒店') && u.includes('city=桂林'),
+      resp: { status: '1', pois: [poi('锦江都城酒店(桂林两江四湖象山景区店)', '110.29,25.26', '桂林市', '象山区', '滨江路')] },
+    },
+    { match: (u) => u.includes('place/text'), resp: { status: '1', pois: [] } },
+    { match: (u) => u.includes('geocode/geo'), resp: { status: '1', geocodes: [] } },
+  ]);
+  return G.geocodeOne('锦江都城酒店（桂林两江四湖象山景区店）', '广西 桂林 阳朔 南宁 崇左');
+}
+
+async function caseJ() {
+  // 实测翻车：「崇左南站」挂在桂林/南宁的行程里。候选城市逐个试——
+  // 南宁搜不到，崇左命中；且必须回传 city=崇左 供前端下次直接用对城市
+  stubHttp([
+    { match: (u) => u.includes('place/text') && u.includes('city=南宁'), resp: { status: '1', pois: [] } },
+    {
+      match: (u) => u.includes('place/text') && u.includes('city=崇左'),
+      resp: { status: '1', pois: [poi('崇左南站', '107.36,22.38', '崇左市', '江州区', '太平街道')] },
+    },
+    { match: (u) => u.includes('place/text'), resp: { status: '1', pois: [] } },
+    { match: (u) => u.includes('geocode/geo'), resp: { status: '1', geocodes: [] } },
+  ]);
+  return G.geocodeOne('崇左南站', '广西 南宁 崇左 桂林');
+}
+
+async function caseK() {
+  // 实测翻车：「大新明仕酒店」直接搜不到 → 关键词放宽砍开头两字
+  // 变「明仕酒店」在崇左命中（结果照样过城市校验）
+  stubHttp([
+    { match: (u) => u.includes('keywords=大新明仕酒店'), resp: { status: '1', pois: [] } },
+    {
+      match: (u) => u.includes('keywords=明仕酒店') && u.includes('city=崇左'),
+      resp: { status: '1', pois: [poi('大新明仕酒店', '106.86,22.93', '崇左市', '大新县', '堪圩乡明仕村')] },
+    },
+    { match: (u) => u.includes('place/text'), resp: { status: '1', pois: [] } },
+    { match: (u) => u.includes('geocode/geo'), resp: { status: '1', geocodes: [] } },
+  ]);
+  return G.geocodeOne('大新明仕酒店', '广西 崇左 桂林');
+}
+
 (async () => {
   console.log('\n【2】策略链路（桩模拟高德响应）');
   const a = await caseA();
@@ -238,6 +283,18 @@ async function caseH() {
   const h = await caseH();
   ok(h === null, '拼接兜底返回的桂林结果不含词根 → 拒绝，不给坐标', h);
 
+  const i = await caseI();
+  ok(i && i.lon === 110.29,
+    '「锦江都城酒店（…景区店）」→ 剥掉括号后命中桂林分店', i);
+
+  const j = await caseJ();
+  ok(j && j.lon === 107.36 && j.city === '崇左',
+    '「崇左南站」跨城候选逐个试 → 命中崇左并回传城市', j);
+
+  const k = await caseK();
+  ok(k && k.lon === 106.86,
+    '「大新明仕酒店」关键词放宽（砍开头两字）后命中', k);
+
   https.get = realGet;
 
   // ---------------------------------------------------------------- 真跑
@@ -247,9 +304,15 @@ async function caseH() {
     const path = require('path');
     const envPath = path.join(__dirname, '..', '.env.local');
     if (fs.existsSync(envPath)) {
+      const envVals = {};
       fs.readFileSync(envPath, 'utf8').split('\n').forEach((l) => {
         const m = l.trim().match(/^([A-Za-z_]+)\s*=\s*(.+)$/);
-        if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim();
+        if (m) envVals[m[1]] = m[2].trim();
+      });
+      // ⚠️ 脚本顶部已把 AMAP_KEY 兜底成 'TEST_KEY'（桩测试用），这里必须覆盖回真 Key，
+      // 否则真跑全部请求都被高德以无效 Key 拒掉，表现为"所有地址都放弃"
+      Object.keys(envVals).forEach((k) => {
+        if (!process.env[k] || process.env[k] === 'TEST_KEY') process.env[k] = envVals[k];
       });
     }
     if (!process.env.AMAP_KEY) {
@@ -265,6 +328,12 @@ async function caseH() {
         ['南宁东站', '南宁'],
         ['桂林北站', '桂林'],
         ['明仕田园', '广西 崇左'],
+        // 2026-09-25 广西七日攻略实测翻车的地址
+        ['南宁东站', '广西 桂林 阳朔 南宁 崇左'],
+        ['崇左南站', '广西 桂林 阳朔 南宁 崇左'],
+        ['崇左游客集散中心', '广西 桂林 阳朔 南宁 崇左'],
+        ['大新明仕酒店', '广西 桂林 阳朔 南宁 崇左'],
+        ['锦江都城酒店（桂林两江四湖象山景区店）', '广西 桂林 阳朔 南宁 崇左'],
       ];
       for (const [addr, city] of cases) {
         const r = await L.geocodeOne(addr, city);

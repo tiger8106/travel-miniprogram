@@ -25,6 +25,7 @@
       <view wx:for="{{group.items}}" wx:key="key" wx:for-item="item">
         <activity-item item="{{item}}"
                        region="{{item.city || trip.region}}"
+                       fallbackRegion="{{trip.region}}"
                        readonly="{{true}}" />
       </view>
     </block>
@@ -50,6 +51,7 @@
       <view wx:for="{{items}}" wx:key="key" wx:for-item="item">
         <activity-item item="{{item}}"
                        region="{{item.city || trip.region}}"
+                       fallbackRegion="{{trip.region}}"
                        editing="{{item.editing}}"
                        editForm="{{item.editing ? editForm : null}}"
                        readonly="{{readonly}}"
@@ -61,6 +63,7 @@
                        bind:editinput="onEditInput"
                        bind:edittransport="onEditTransport"
                        bind:editcategory="onEditCategory"
+                       bind:editwaypoint="onEditWaypoint"
                        bind:swaplocation="onSwapLocation" />
       </view>
 

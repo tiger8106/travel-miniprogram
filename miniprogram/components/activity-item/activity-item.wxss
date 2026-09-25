@@ -69,11 +69,20 @@
   line-height: 1.6;
 }
 
-/* 导航行：独占一行 */
+/* 导航行：独占一行；有中间点时多段按钮换行铺开 */
 .nav-row {
   display: flex;
   align-items: center;
   margin-top: 16rpx;
+}
+
+.nav-multi {
+  flex-wrap: wrap;
+  gap: 12rpx;
+}
+
+.nav-multi map-button {
+  max-width: 100%;
 }
 
 /* 操作行：编辑 / 删除 单独一行，右对齐 */
@@ -296,6 +305,34 @@
 
 .place-dot.end {
   background: #ff6b6b;
+}
+
+.place-dot.mid {
+  background: #1989fa;
+}
+
+.place-del {
+  width: 48rpx;
+  height: 48rpx;
+  border-radius: 50%;
+  background: #fff;
+  color: #c0c4cc;
+  font-size: 24rpx;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-left: 12rpx;
+}
+
+.place-add {
+  margin-top: 14rpx;
+  text-align: center;
+  padding: 16rpx 0;
+  border-radius: 20rpx;
+  border: 2rpx dashed #c8dff9;
+  color: var(--primary);
+  font-size: 26rpx;
 }
 
 .place-input {
