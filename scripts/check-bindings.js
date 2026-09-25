@@ -324,8 +324,27 @@ ok('geocode 有关键词放宽兜底（砍开头两字，「大新明仕酒店�
   /poi\/relax/.test(geoJs));
 ok('geocode 回传命中的城市（item.city 按条目落准，前端实时定位直接用对城市）',
   /cityTagOf/.test(geoJs));
-ok('parseTravelPlan 把整串 region 传给地理编码（不再只传第一个城市词）',
-  /geocodeBatch\(\[\.\.\.addrSet\], region \? \(\) => region : undefined\)/.test(fs.readFileSync(path.join(ROOT, 'cloudfunctions/parseTravelPlan/index.js'), 'utf8')));
+const parseIdxJs = fs.readFileSync(path.join(ROOT, 'cloudfunctions/parseTravelPlan/index.js'), 'utf8');
+ok('parseTravelPlan 分步模式齐备（init/day/collect/infer/geocode/commit 六步）',
+  /case 'init'/.test(parseIdxJs) && /case 'day'/.test(parseIdxJs)
+    && /case 'collect'/.test(parseIdxJs) && /case 'infer'/.test(parseIdxJs)
+    && /case 'geocode'/.test(parseIdxJs) && /case 'commit'/.test(parseIdxJs));
+ok('分步模式：day 步幂等（重试不重跑已成功的天）',
+  /task\.dayStatus && task\.dayStatus\[index\]/.test(parseIdxJs));
+ok('分步模式：geocode 步限墙钟（35s 预算，单次跑不完下次续跑）',
+  /GEOCODE_DEADLINE_MS/.test(parseIdxJs) && /Date\.now\(\) - t0 > GEOCODE_DEADLINE_MS/.test(parseIdxJs));
+ok('分步模式：commit 步幂等（防重复入库）',
+  /task\.tripId && task\.resultInfo/.test(parseIdxJs));
+ok('分步模式：地理编码传整串 region（geocodeOne 内部拆候选城市）',
+  /geocodeOne\(addr, region\)/.test(parseIdxJs));
+ok('分步模式与单次模式共用同一份文档元信息（docmeta）',
+  /require\('\.\/docmeta'\)/.test(fs.readFileSync(path.join(ROOT, 'cloudfunctions/parseTravelPlan/llm.js'), 'utf8'))
+    && /require\('\.\/docmeta'\)/.test(parseIdxJs));
+ok('upload 页走分步流水线（init→day→collect→infer→geocode→commit，断点重试）',
+  /runParsePipeline/.test(uploadJs) && /parseTravelPlanStep/.test(uploadJs)
+    && /this\._taskState/.test(uploadJs));
+ok('upload 页有分步进度文案（stageText）',
+  /stageText/.test(uploadJs) && /stageText/.test(fs.readFileSync(path.join(MP, 'pages/upload/upload.wxml'), 'utf8')));
 ok('无起终点条目有终点回填（inferDestination 挂在 Pass 2 之前）',
   /function inferDestination/.test(genNormJs) && /inferDestination\(it\.activity\)/.test(genNormJs));
 ok('map-button 文案只显示目的地（打开地图只有目的地信息，不误导）',

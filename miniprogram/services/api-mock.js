@@ -23,6 +23,31 @@ async function parseTravelPlan(/* fileID */) {
   };
 }
 
+// 分步解析（mock）：假装跑完了整个流水线，commit 时一次性给结果
+async function parseTravelPlanStep(payload) {
+  const step = (payload && payload.step) || '';
+  if (step === 'init') {
+    await delay(800);
+    return {
+      code: 0,
+      taskId: 'mock_task_' + Date.now(),
+      dayCount: 3,
+      title: STORE.itinerary.title,
+      startDate: STORE.itinerary.startDate,
+      endDate: STORE.itinerary.endDate,
+    };
+  }
+  if (step === 'day') { await delay(600); return { code: 0, index: payload.index, itemCount: 5 }; }
+  if (step === 'collect') { await delay(500); return { code: 0, alarmCount: STORE.alarms.length }; }
+  if (step === 'infer') { await delay(500); return { code: 0, itemCount: STORE.itinerary.items.length, alarmCount: STORE.alarms.length }; }
+  if (step === 'geocode') { return { code: 0, remaining: 0 }; }
+  if (step === 'commit') {
+    const r = await parseTravelPlan();
+    return Object.assign({ code: 0 }, r);
+  }
+  return { code: -1, msg: 'mock: 未知 step ' + step };
+}
+
 // ============================================================================
 // 行程 CRUD
 // ============================================================================
@@ -206,6 +231,7 @@ async function buildPlan() {
 
 module.exports = {
   parseTravelPlan,
+  parseTravelPlanStep,
   // mock 模式没有真实地理编码，返回 null 让前端走降级
   geocode: async function (location, city) { await delay(200); return null; },
   saveItinerary,

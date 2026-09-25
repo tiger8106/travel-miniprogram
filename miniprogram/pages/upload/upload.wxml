@@ -24,12 +24,15 @@
     <button class="btn-primary" bindtap="onUpload"
             disabled="{{!fileName || uploading || parsing}}"
             style="margin-top: 24rpx;">
-      <block wx:if="{{uploading || parsing}}">{{parsing ? '解析中…' : '上传中…'}}</block>
+      <block wx:if="{{uploading || parsing}}">{{stageText || (parsing ? '解析中…' : '上传中…')}}</block>
       <block wx:else>开始解析</block>
     </button>
 
     <view wx:if="{{uploading || parsing}}" class="progress">
       <view class="progress-bar" style="width: {{progress}}%;"></view>
+    </view>
+    <view wx:if="{{parsing && stageText}}" class="text-secondary" style="font-size: 22rpx; margin-top: 8rpx;">
+      {{stageText}}（超长攻略会自动分段解析，请耐心等待）
     </view>
 
     <view wx:if="{{errorMsg}}" class="error-tip">

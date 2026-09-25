@@ -6,13 +6,19 @@
 //   改为：确定性按天切分文本 → 每天一个小请求 + 闹钟 + 建议，全部并行发出。
 //   实测总耗时 ~11s（qwen-turbo），dayIndex 由代码强制写入，100% 正确。
 //   切分失败（识别不到“X月X日｜”标题）时，退回旧的单次调用模式。
+//
+// 分步解析（step 模式，index.js）：同一天/闹钟/建议的解析逻辑抽成
+// extractDay / extractAlarms / extractSuggestions 三个可复用函数，
+// 一次只跑一个请求（25s 超时 + 一次重试 ≈ 最坏 50s），远小于 60s 上限。
 
 const https = require('https');
 const http = require('http');
-const { splitDocument, inferYear, ymd } = require('./splitter');
+const { buildDocMeta } = require('./docmeta');
 
 // 单次 LLM 请求超时：云函数总上限 60s，留足余量；本地脚本可用 LLM_TIMEOUT_MS 放宽
 const REQUEST_TIMEOUT_MS = parseInt(process.env.LLM_TIMEOUT_MS || '', 10) || 40 * 1000;
+// 分步解析的单请求超时：25s + 重试一次 25s = 最坏 50s，加上请求开销仍在 60s 内
+const STEP_TIMEOUT_MS = parseInt(process.env.LLM_STEP_TIMEOUT_MS || '', 10) || 25 * 1000;
 
 const LLM_CONFIG = {
   baseURL: process.env.LLM_BASE_URL || '',
@@ -67,7 +73,7 @@ function disableThinking() {
   return REASONING_MODEL.test(getModel());
 }
 
-function chat(messages, maxTokens) {
+function chat(messages, maxTokens, timeoutMs) {
   return new Promise((resolve, reject) => {
     const bodyObj = {
       model: getModel(),
@@ -113,8 +119,9 @@ function chat(messages, maxTokens) {
         });
       }
     );
-    req.setTimeout(REQUEST_TIMEOUT_MS, () => {
-      req.destroy(new Error(`单次 LLM 请求超时(${REQUEST_TIMEOUT_MS / 1000}s)`));
+    const reqTimeout = timeoutMs || REQUEST_TIMEOUT_MS;
+    req.setTimeout(reqTimeout, () => {
+      req.destroy(new Error(`单次 LLM 请求超时(${reqTimeout / 1000}s)`));
     });
     req.on('error', reject);
     req.write(body);
@@ -166,56 +173,19 @@ const SYS_PROMPT =
 /**
  * 带一次重试的 chat
  */
-async function chatWithRetry(messages, maxTokens) {
+async function chatWithRetry(messages, maxTokens, timeoutMs) {
   try {
-    return await chat(messages, maxTokens);
+    return await chat(messages, maxTokens, timeoutMs);
   } catch (e) {
     console.error('[llm] 调用失败，重试一次:', e.message);
-    return chat(messages, maxTokens);
+    return chat(messages, maxTokens, timeoutMs);
   }
 }
 
-/**
- * ============ 并行逐天方案 ============
- */
-async function callLLMParallel(rawText) {
-  const { days, booking, header } = splitDocument(rawText);
+// ============ 三个可复用的解析单元（并行模式与分步模式共用） ============
 
-  // 切分不成立（一个天标题都没识别到）→ 返回 null，走旧逻辑
-  // 注意：单日文档（如“9月20日工作通勤”）也走这里，日期由代码确定性生成，不让 LLM 猜
-  if (!days || days.length < 1) return null;
-
-  const year = inferYear(days);
-  const startDate = ymd(year, days[0].month, days[0].day);
-  // 结束日期：优先用最后一天标题里的范围（“1月1日至1月3日”），否则就是最后一天
-  const last = days[days.length - 1];
-  const endDate = (last.endMonth && last.endDay)
-    ? ymd(year, last.endMonth, last.endDay)
-    : ymd(year, last.month, last.day);
-  console.log('[llm] 并行模式: 天数=%d, 年份=%d, %s ~ %s', days.length, year, startDate, endDate);
-
-  // 标题取文档第一个非空行（去“1. / 一、”式编号；不能误伤“9月20日xxx”的日期数字）
-  const firstLine = (rawText.split('\n').map((l) => l.trim()).find((l) => l) || '我的行程')
-    .replace(/^\s*(?:\d+\s*[.、]\s*|[一二三四五六七八九十]+\s*[.、]\s*)/, '')
-    .trim();
-  const title = firstLine || '我的行程';
-
-  const tasks = [];
-  const dayMeta = []; // 第二波"补漏复查"要用：每天的原文行 + 日期 + 标题
-
-  // 每天一个请求
-  // 关键：携带"今天之前"的原文作为上下文（累积截尾），让模型知道前一天结束时人在哪
-  // （通常是昨晚住宿），否则当天第一条移动会因原文没写出发点而缺失起点。
-  const contextLines = [];
-  days.forEach((d, i) => {
-    const date = ymd(year, d.month, d.day);
-    const prevText = contextLines.join('\n').replace(/\s+\n/g, '\n').slice(-1200);
-    const prevBlock = prevText
-      ? `【背景：今天之前的行程原文，仅供理解上下文——特别是前一天结束时所在的位置/住宿，禁止从中提取行程项】\n${prevText}\n\n`
-      : '';
-    const dayBody = `${prevBlock}【今天：${date}｜${d.title}，只提取这一天的行程】\n${d.lines.join('\n')}\n\n提取"今天"所有行程项为 JSON 数组，dayIndex 全部为 ${i}。每个元素格式：{"dayIndex":${i},"startTime":"HH:mm","endTime":"HH:mm","activity":"描述","category":"sight/food/hotel/transport/ticket/other","startLocation":"","endLocation":"","transportType":"car/walk/ride/train/plane","note":""}。只输出数组。
-
-# 拆分与时间规则（必须遵守）
+// 逐天提取的拆分与时间规则（必须遵守）
+const DAY_RULES = `# 拆分与时间规则（必须遵守）
 1. 一句原文常包含多段连续动作/移动（例："10:30～11:00抵达金坑大寨停车场，下车后坐观光车前往田头寨，之后步行前往龙脊别院"）。要拆成多条行程项，但每条都必须有确定的 startTime，禁止输出空 startTime 或 "--:--"：
    - 第一段用原文的起始时间（10:30 抵达金坑大寨停车场）
    - 后续段按原文时间线索与常识耗时依次顺延（10:40 乘观光车前往田头寨 → 11:00 步行前往龙脊别院），区间终点、"步行约40分钟/1.5小时"这类时长提示都要用上
@@ -238,31 +208,32 @@ async function callLLMParallel(rawText) {
 # 覆盖度：宁可多拆，不许漏
 11. 原文每一句含时间或动作的话都必须有对应条目。没写时间的句子（如"晚上可以看《印象刘三姐》""17:30左右回酒店洗澡休息"之后的安排）也要提取，startTime 按上一条 endTime 顺延。
 12. 备注类信息（"注：…""建议…""务必确认…""终极哪一段开放以公告为准"）放进最近一条行程项的 note，不要单独成条。`;
-    dayMeta.push({ i, date, title: d.title, lines: d.lines.slice() });
-    tasks.push(
-      chatWithRetry(
-        [
-          { role: 'system', content: SYS_PROMPT },
-          { role: 'user', content: dayBody },
-        ],
-        3500
-      )
-        .then((t) => ({ kind: 'day', i, items: parseJSONFromText(t) }))
-        .catch((e) => ({ kind: 'day', i, error: e.message }))
-    );
-    // 当天内容加入后续天的上下文
-    contextLines.push(...d.lines);
-  });
 
-  // 闹钟（预订安排章节）
-  if (booking.length) {
-    tasks.push(
-      chatWithRetry(
-        [
-          { role: 'system', content: SYS_PROMPT },
-          {
-            role: 'user',
-            content: `以下是一份旅行攻略的"预订安排"章节（抢票时间表/门票预订/酒店预订/交通预约等表格）。提取需要设置闹钟提醒的事项为 JSON 数组。年份为 ${year}。每个元素：{"title":"...","fireAt":"YYYY-MM-DDTHH:mm:ss","type":"train/plane/ticket/hotel/bus/other","note":""}
+/**
+ * 解析"一天"：原文行 → 行程项数组。失败抛错（上层决定重试/跳过）。
+ * @param {{index:number, date:string, title:string, lines:string[], prevText:string}} d
+ */
+async function extractDay(d) {
+  const prevBlock = d.prevText
+    ? `【背景：今天之前的行程原文，仅供理解上下文——特别是前一天结束时所在的位置/住宿，禁止从中提取行程项】\n${d.prevText}\n\n`
+    : '';
+  const body = `${prevBlock}【今天：${d.date}｜${d.title}，只提取这一天的行程】\n${d.lines.join('\n')}\n\n提取"今天"所有行程项为 JSON 数组，dayIndex 全部为 ${d.index}。每个元素格式：{"dayIndex":${d.index},"startTime":"HH:mm","endTime":"HH:mm","activity":"描述","category":"sight/food/hotel/transport/ticket/other","startLocation":"","endLocation":"","transportType":"car/walk/ride/train/plane","note":""}。只输出数组。\n\n${DAY_RULES}`;
+  const text = await chatWithRetry(
+    [
+      { role: 'system', content: SYS_PROMPT },
+      { role: 'user', content: body },
+    ],
+    3500,
+    STEP_TIMEOUT_MS
+  );
+  return asArray(parseJSONFromText(text));
+}
+
+/**
+ * 解析"预订安排"章节 → 闹钟数组。失败抛错。
+ */
+async function extractAlarms(bookingLines, year) {
+  const body = `以下是一份旅行攻略的"预订安排"章节（抢票时间表/门票预订/酒店预订/交通预约等表格）。提取需要设置闹钟提醒的事项为 JSON 数组。年份为 ${year}。每个元素：{"title":"...","fireAt":"YYYY-MM-DDTHH:mm:ss","type":"train/plane/ticket/hotel/bus/other","note":""}
 
 # 严格规则（必须遵守）
 1. title 一律用原文语言（中文攻略就输出中文标题，如"抢票：南宁东→崇左南高铁票"），禁止翻译成英文。
@@ -276,31 +247,64 @@ async function callLLMParallel(rawText) {
 6. 同一事项在多个表格重复出现时只保留一条（取信息最全的）。
 只输出数组。
 
-${booking.join('\n').slice(0, 4000)}`,
-          },
-        ],
-        2000
-      )
-        .then((t) => ({ kind: 'alarms', alarms: parseJSONFromText(t) }))
+${bookingLines.join('\n').slice(0, 4000)}`;
+  const text = await chatWithRetry(
+    [
+      { role: 'system', content: SYS_PROMPT },
+      { role: 'user', content: body },
+    ],
+    2000,
+    STEP_TIMEOUT_MS
+  );
+  return asArray(parseJSONFromText(text));
+}
+
+/**
+ * 解析全文 → 旅行建议对象（含 region 大地名）。失败抛错。
+ */
+async function extractSuggestions(rawHead) {
+  const body = `以下是一份旅游攻略，提取旅行建议为 JSON 对象：{"weather":"天气与穿着","gear":"装备清单","food":"必吃推荐","tips":"注意事项","transport":"交通贴士","budget":"预算参考","region":"本攻略的主要目的地，格式「省 市」（如 广西 桂林）；涉及多个主要城市时空格分隔、最多 3 个，只写城市级，不要写景点名"}。只输出对象。\n\n${rawHead}`;
+  const text = await chatWithRetry(
+    [
+      { role: 'system', content: SYS_PROMPT },
+      { role: 'user', content: body },
+    ],
+    800,
+    STEP_TIMEOUT_MS
+  );
+  const obj = parseJSONFromText(text);
+  return obj && typeof obj === 'object' ? obj : {};
+}
+
+/**
+ * ============ 并行逐天方案（旧的单次调用全流程） ============
+ */
+async function callLLMParallel(rawText) {
+  const meta = buildDocMeta(rawText);
+  console.log('[llm] 并行模式: 天数=%d, 年份=%d, %s ~ %s%s',
+    meta.days.length, meta.year, meta.startDate, meta.endDate, meta.pseudo ? '（伪单日）' : '');
+
+  const tasks = meta.days.map((d) =>
+    extractDay(d)
+      .then((items) => ({ kind: 'day', i: d.index, items }))
+      .catch((e) => ({ kind: 'day', i: d.index, error: e.message }))
+  );
+
+  // 闹钟（预订安排章节）
+  if (meta.booking.length) {
+    tasks.push(
+      extractAlarms(meta.booking, meta.year)
+        .then((alarms) => ({ kind: 'alarms', alarms }))
         .catch((e) => ({ kind: 'alarms', error: e.message }))
     );
   }
 
   // 建议
   tasks.push(
-    chatWithRetry(
-      [
-        { role: 'system', content: SYS_PROMPT },
-        {
-          role: 'user',
-          content: `以下是一份旅游攻略，提取旅行建议为 JSON 对象：{"weather":"天气与穿着","gear":"装备清单","food":"必吃推荐","tips":"注意事项","transport":"交通贴士","budget":"预算参考","region":"本攻略的主要目的地，格式「省 市」（如 广西 桂林）；涉及多个主要城市时空格分隔、最多 3 个，只写城市级，不要写景点名"}。只输出对象。\n\n${rawText.slice(0, 3000)}`,
-        },
-      ],
-      800
-    )
-      .then((t) => ({ kind: 'suggestions', suggestions: parseJSONFromText(t) }))
+    extractSuggestions(meta.rawHead)
+      .then((suggestions) => ({ kind: 'suggestions', suggestions }))
       .catch((e) => ({ kind: 'suggestions', error: e.message }))
-    );
+  );
 
   const results = await Promise.all(tasks);
 
@@ -316,13 +320,12 @@ ${booking.join('\n').slice(0, 4000)}`,
       continue;
     }
     if (r.kind === 'day') {
-      const arr = asArray(r.items);
-      arr.forEach((it) => {
+      r.items.forEach((it) => {
         // dayIndex 由代码强制写入，不信任 LLM
         items.push(Object.assign({}, it, { dayIndex: r.i }));
       });
     } else if (r.kind === 'alarms') {
-      alarms = asArray(r.alarms);
+      alarms = r.alarms;
     } else if (r.kind === 'suggestions') {
       suggestions = r.suggestions && typeof r.suggestions === 'object' ? r.suggestions : {};
     }
@@ -333,7 +336,7 @@ ${booking.join('\n').slice(0, 4000)}`,
   delete suggestions.region;
 
   // 全部天都失败 → 交给上层走旧逻辑
-  if (failedDays === days.length) {
+  if (failedDays === meta.days.length) {
     console.error('[llm] 并行模式所有天均失败，退回单次调用模式');
     return null;
   }
@@ -342,30 +345,30 @@ ${booking.join('\n').slice(0, 4000)}`,
   // 第一波是"一次成文"，长段落/没写时间的句子最容易被整句吞掉。
   // 再发一轮请求：把原文和已提取清单一起给模型，只让它输出"漏掉的那几条"。
   // ⚠️ 云函数有 60s 总耗时上限，复查只对"条目数明显少于原文行数"的天发起，不做全量复查。
-  const coverageOf = (meta) => {
-    const n = items.filter((it) => it.dayIndex === meta.i).length;
-    const srcLines = meta.lines.filter((l) => l && !/^注[:：]/.test(l.trim())).length;
+  const coverageOf = (metaD) => {
+    const n = items.filter((it) => it.dayIndex === metaD.index).length;
+    const srcLines = metaD.lines.filter((l) => l && !/^注[:：]/.test(l.trim())).length;
     return { n, srcLines };
   };
-  const needFix = dayMeta.filter((meta) => {
-    const { n, srcLines } = coverageOf(meta);
+  const needFix = meta.days.filter((d) => {
+    const { n, srcLines } = coverageOf(d);
     return srcLines > 0 && n < Math.max(2, Math.ceil(srcLines * 0.7));
   });
   if (needFix.length) {
-    console.log('[llm] 覆盖度复查: 触发 %d/%d 天 → %s', needFix.length, dayMeta.length,
-      needFix.map((m) => `第${m.i + 1}天(${coverageOf(m).n}/${coverageOf(m).srcLines})`).join(', '));
+    console.log('[llm] 覆盖度复查: 触发 %d/%d 天 → %s', needFix.length, meta.days.length,
+      needFix.map((d) => `第${d.index + 1}天(${coverageOf(d).n}/${coverageOf(d).srcLines})`).join(', '));
   }
 
   try {
-    const fixTasks = needFix.map((meta) => {
-      const got = items.filter((it) => it.dayIndex === meta.i);
+    const fixTasks = needFix.map((d) => {
+      const got = items.filter((it) => it.dayIndex === d.index);
       const gotList = got.length
         ? got.map((it, k) => `${k + 1}. ${it.startTime || '--:--'}-${it.endTime || '--:--'} ${it.activity}`).join('\n')
         : '(这一天的条目一条都没提取出来)';
       const body =
-        `【今天：${meta.date}｜${meta.title}，原始攻略正文】\n${meta.lines.join('\n')}\n\n` +
+        `【今天：${d.date}｜${d.title}，原始攻略正文】\n${d.lines.join('\n')}\n\n` +
         `【已经提取出来的行程项】\n${gotList}\n\n` +
-        `逐句核对正文，找出**没有被上面覆盖**的动作或安排，输出补充条目的 JSON 数组，元素格式：{"dayIndex":${meta.i},"startTime":"HH:mm","endTime":"HH:mm","activity":"描述","category":"sight/food/hotel/transport/ticket/other","startLocation":"","endLocation":"","transportType":"car/walk/ride/train/plane","note":""}。\n` +
+        `逐句核对正文，找出**没有被上面覆盖**的动作或安排，输出补充条目的 JSON 数组，元素格式：{"dayIndex":${d.index},"startTime":"HH:mm","endTime":"HH:mm","activity":"描述","category":"sight/food/hotel/transport/ticket/other","startLocation":"","endLocation":"","transportType":"car/walk/ride/train/plane","note":""}。\n` +
         `# 规则\n` +
         `1. 只输出确实遗漏的条目；已覆盖的不要重复输出，也不要改写后重新输出。\n` +
         `2. 确实没有遗漏 → 只输出 []。\n` +
@@ -378,8 +381,8 @@ ${booking.join('\n').slice(0, 4000)}`,
         ],
         2000
       )
-        .then((t) => ({ i: meta.i, items: parseJSONFromText(t) }))
-        .catch((e) => ({ i: meta.i, error: e.message }));
+        .then((t) => ({ i: d.index, items: parseJSONFromText(t) }))
+        .catch((e) => ({ i: d.index, error: e.message }));
     });
 
     const fixResults = await Promise.all(fixTasks);
@@ -400,37 +403,22 @@ ${booking.join('\n').slice(0, 4000)}`,
     console.log('[llm] 覆盖度复查: 补充条目 %d 条（复查前 %d 条）', added, items.length - added);
 
     // 每天条目数 vs 原文有效行数，做个粗粒度的覆盖度告警（只打日志，不影响流程）
-    dayMeta.forEach((meta) => {
-      const n = items.filter((it) => it.dayIndex === meta.i).length;
-      const srcLines = meta.lines.filter((l) => l && !/^注[:：]/.test(l.trim())).length;
+    meta.days.forEach((d) => {
+      const n = items.filter((it) => it.dayIndex === d.index).length;
+      const srcLines = d.lines.filter((l) => l && !/^注[:：]/.test(l.trim())).length;
       if (srcLines > 0 && n < Math.max(1, Math.ceil(srcLines / 3))) {
-        console.warn(`[llm] 覆盖度告警 第${meta.i + 1}天(${meta.date}): 原文 ${srcLines} 行 → 只提取到 ${n} 条`);
+        console.warn(`[llm] 覆盖度告警 第${d.index + 1}天(${d.date}): 原文 ${srcLines} 行 → 只提取到 ${n} 条`);
       }
     });
   } catch (e) {
     console.error('[llm] 覆盖度复查异常（忽略，不影响主流程）:', e.message);
   }
 
-  // summary：优先取“路线概览”行，其次取第一句完整句子
-  let summary = '';
-  try {
-    const hLines = header.map((l) => l.trim()).filter(Boolean);
-    const idx = hLines.findIndex((l) => /概览|路线/.test(l) && /[:：]\s*$/.test(l));
-    if (idx >= 0 && hLines[idx + 1]) {
-      summary = hLines[idx + 1].slice(0, 100);
-    }
-    if (!summary) {
-      const intro = hLines.join(' ').replace(/\s+/g, '');
-      const m = intro.match(/概览[:：]([^。]*。)/);
-      if (m) summary = m[1].slice(0, 100);
-    }
-  } catch (e) { /* ignore */ }
-
   return {
-    title,
-    summary,
-    startDate,
-    endDate,
+    title: meta.title,
+    summary: meta.summary,
+    startDate: meta.startDate,
+    endDate: meta.endDate,
     region,
     items,
     alarms,
@@ -532,4 +520,8 @@ async function callLLM(rawText) {
 
 // chatWithRetry / parseJSONFromText 也导出：供 alarm-infer.js 做「攻略没写抢票时间时
 // 由 AI 反推待办事项」这类独立的小请求复用，不用再写一份 HTTP 调用。
-module.exports = { callLLM, LLM_CONFIG, chatWithRetry, parseJSONFromText };
+// extractDay/extractAlarms/extractSuggestions 供 index.js 的分步解析模式复用。
+module.exports = {
+  callLLM, LLM_CONFIG, chatWithRetry, parseJSONFromText, asArray,
+  extractDay, extractAlarms, extractSuggestions, STEP_TIMEOUT_MS,
+};

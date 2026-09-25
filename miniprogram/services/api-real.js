@@ -9,6 +9,14 @@ async function parseTravelPlan(fileID) {
   return callFn('parseTravelPlan', { fileID });
 }
 
+// 攻略分步解析：云函数 60s 上限调不高，把解析拆成六步由前端编排——
+// init（读文档切分）→ day（逐天 AI 解析，循环 N 次）→ collect（闹钟+建议）
+// → infer（清洗+反推待办）→ geocode（地图定位，循环到完）→ commit（入库）。
+// 每步都远小于 60s，失败可从断点重试。
+async function parseTravelPlanStep(payload) {
+  return callFn('parseTravelPlan', payload);
+}
+
 // 实时地理编码：地点名 → { lon, lat }
 // city：可选的大地名（省/市/县），帮高德消歧，避免定位到同名的其他地点
 async function geocode(location, city) {
@@ -109,6 +117,7 @@ async function downloadFromCloud(fileID) {
 
 module.exports = {
   parseTravelPlan,
+  parseTravelPlanStep,
   geocode,
   saveItinerary,
   getItinerary,

@@ -5,13 +5,18 @@ const cloud = require('wx-server-sdk');
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
 const mammoth = require('mammoth');
-const { callLLM } = require('./llm');
+const { callLLM, extractDay, extractAlarms, extractSuggestions, asArray } = require('./llm');
+const { buildDocMeta } = require('./docmeta');
 const { geocodeBatch, geocodeOne } = require('./geocode');
 const { sanitizeItems } = require('./normalize');
 const { inferAlarms, INFER_THRESHOLD } = require('./alarm-infer');
 
 const COL_TRIP = 'trips';
 const COL_ALARM = 'ticket_alarms';
+const COL_TASK = 'parse_tasks';
+
+// 分步模式里地理编码步的墙钟预算：每步总上限 60s，留 20s 余量给读写库和网络
+const GEOCODE_DEADLINE_MS = 35 * 1000;
 
 // 解析引擎版本：返回给前端展示，用于确认线上跑的是不是最新代码
 const PARSE_VERSION = 'v3.6-alarm-fix';
@@ -37,6 +42,40 @@ const { parseCnTime, tsToDateStr, tsToCnDateTimeStr } = require('./cn-time');
 // 两边必须是同一套规则，否则"挑的城市"和"校验的城市"可能对不上）
 const { pickCity } = require('./geocode');
 
+// 清洗闹钟：fireAt 统一转成时间戳数字（数据库里不混字符串/数字两种类型，否则排序报错）
+// 同时保存 fireAtStr（北京时间的原始墙面时刻），前端按"用户手机所在时区"重算触发时间
+// 单次模式与分步模式共用（分步在 infer 步调用）
+function cleanAlarms(rawAlarms, openid, now) {
+  const validTypes = ['train', 'plane', 'ticket', 'hotel', 'bus', 'other'];
+  const alarms = (rawAlarms || [])
+    .map((a) => {
+      if (!a || !(a.title || '').trim()) return null;
+      const ts = typeof a.fireAt === 'number' ? a.fireAt : parseCnTime(a.fireAt);
+      if (!ts || isNaN(ts)) return null;
+      return {
+        _openid: openid,
+        title: String(a.title).trim().slice(0, 100),
+        note: a.note || '',
+        fireAt: ts,
+        fireAtStr: tsToCnDateTimeStr(ts),
+        type: validTypes.includes(a.type) ? a.type : 'other',
+        source: 'parsed',
+        createdAt: now,
+        updatedAt: now,
+      };
+    })
+    .filter(Boolean);
+
+  // 去重：同一时刻 + 相同标题（忽略空格差异）只保留一条
+  const seenAlarm = new Set();
+  return alarms.filter((a) => {
+    const key = a.fireAt + '|' + a.title.replace(/\s+/g, '');
+    if (seenAlarm.has(key)) return false;
+    seenAlarm.add(key);
+    return true;
+  });
+}
+
 exports.main = async (event, context) => {
   const wxContext = cloud.getWXContext();
   const openid = wxContext.OPENID;
@@ -59,6 +98,23 @@ exports.main = async (event, context) => {
       return { code: 0, data: coord };
     } catch (e) {
       return { code: -1, msg: e.message || '地理编码失败' };
+    }
+  }
+
+  // ---------- 分步解析模式（step）：把一次 60s 的大调用拆成六步 ----------
+  // 背景：云函数同步调用上限就是 60s，调不高。7 天攻略的
+  // 「并行 LLM + 覆盖度复查 + 几十个地址的地理编码 + AI 反推待办」任何一环
+  // 抖动一下总时长就破 60s，前端只会看到"执行时间超时"。
+  // 分步后：前端逐步调用、任务进度存 parse_tasks 集合，每步都远小于 60s，
+  // 哪一步失败就从哪一步重试（任务态在库里，天然断点续跑）。
+  if (event && event.step) {
+    if (!openid) return { code: -1, msg: '未登录' };
+    const db = cloud.database();
+    try {
+      return await handleStep(event, { db, openid, now: Date.now() });
+    } catch (e) {
+      console.error(`[parseTravelPlan] step=${event.step} 失败:`, e.message);
+      return { code: -1, msg: e.message || '解析失败', step: event.step };
     }
   }
 
@@ -142,38 +198,7 @@ exports.main = async (event, context) => {
       console.error('[parseTravelPlan] 地理编码失败（不影响主流程）:', e.message);
     }
 
-    // 清洗闹钟：fireAt 统一转成时间戳数字（数据库里不混字符串/数字两种类型，否则排序报错）
-    // 同时保存 fireAtStr（北京时间的原始墙面时刻），前端按"用户手机所在时区"重算触发时间
-    const validTypes = ['train', 'plane', 'ticket', 'hotel', 'bus', 'other'];
-    const alarms = (structured.alarms || [])
-      .map((a) => {
-        if (!a || !(a.title || '').trim()) return null;
-        const ts = typeof a.fireAt === 'number' ? a.fireAt : parseCnTime(a.fireAt);
-        if (!ts || isNaN(ts)) return null;
-        return {
-          _openid: openid,
-          title: String(a.title).trim().slice(0, 100),
-          note: a.note || '',
-          fireAt: ts,
-          fireAtStr: tsToCnDateTimeStr(ts),
-          type: validTypes.includes(a.type) ? a.type : 'other',
-          source: 'parsed',
-          createdAt: now,
-          updatedAt: now,
-        };
-      })
-      .filter(Boolean);
-
-    // 去重：同一时刻 + 相同标题（忽略空格差异）只保留一条
-    const seenAlarm = new Set();
-    const dedupAlarms = alarms.filter((a) => {
-      const key = a.fireAt + '|' + a.title.replace(/\s+/g, '');
-      if (seenAlarm.has(key)) return false;
-      seenAlarm.add(key);
-      return true;
-    });
-    alarms.length = 0;
-    dedupAlarms.forEach((a) => alarms.push(a));
+    const alarms = cleanAlarms(structured.alarms, openid, now);
     console.log('[parseTravelPlan] 清洗后 alarms 数量:', alarms.length);
 
     // 日期清洗：LLM 返回的脏值（"null"/乱格式）全部拦下，再逐级兜底
@@ -283,3 +308,320 @@ exports.main = async (event, context) => {
     return { code: -1, msg: err.message || '解析失败' };
   }
 };
+// ==================================================================
+// 分步解析（step 模式）实现
+// 流程：init → day×N → collect → infer → geocode（循环）→ commit
+// 每步独立调用、独立计时，任务进度存 parse_tasks，失败从断点重试。
+// ==================================================================
+
+async function ensureTaskCollection(db) {
+  try {
+    await db.createCollection(COL_TASK);
+  } catch (e) {
+    // 集合已存在 / 无权限创建（控制台手动建过）→ 都当成功
+  }
+}
+
+async function loadTask(db, taskId, openid) {
+  const res = await db.collection(COL_TASK).doc(taskId).get();
+  const task = res && res.data;
+  if (!task || task._openid !== openid) {
+    throw new Error('解析任务不存在或无权访问，请重新上传攻略');
+  }
+  return task;
+}
+
+async function saveTask(db, taskId, patch) {
+  await db.collection(COL_TASK).doc(taskId).update({
+    data: Object.assign({}, patch, { updatedAt: Date.now() }),
+  });
+}
+
+async function handleStep(event, ctx) {
+  const { db, openid, now } = ctx;
+
+  switch (event.step) {
+    // ---------- ① 读文档 + 切分（不调 LLM，秒级） ----------
+    case 'init': {
+      const { fileID } = event;
+      if (!fileID) return { code: -1, msg: '缺少 fileID' };
+      await ensureTaskCollection(db);
+
+      const dlRes = await cloud.downloadFile({ fileID });
+      const rawText = (await mammoth.extractRawText({ buffer: dlRes.fileContent })).value;
+      if (!rawText || rawText.length < 20) {
+        return { code: -1, msg: '文档内容为空或过短' };
+      }
+
+      const meta = buildDocMeta(rawText);
+      const doc = {
+        _openid: openid,
+        status: 'parsing',
+        fileID,
+        title: meta.title,
+        summary: meta.summary,
+        year: meta.year,
+        startDate: meta.startDate,
+        endDate: meta.endDate,
+        days: meta.days,                     // [{index,date,title,lines,prevText}]
+        dayItems: meta.days.map(() => null), // 每天解析出的行程项
+        dayStatus: meta.days.map(() => false),
+        booking: meta.booking,
+        rawHead: meta.rawHead,
+        createdAt: now,
+        updatedAt: now,
+      };
+      const addRes = await db.collection(COL_TASK).add({ data: doc });
+      console.log('[step/init] 任务 %s：%d 天，%s ~ %s',
+        addRes._id, meta.days.length, meta.startDate, meta.endDate);
+      return {
+        code: 0,
+        taskId: addRes._id,
+        dayCount: meta.days.length,
+        title: meta.title,
+        startDate: meta.startDate,
+        endDate: meta.endDate,
+      };
+    }
+
+    // ---------- ② 逐天 AI 解析（一次调用 = 一天 = 1 个 LLM 请求） ----------
+    case 'day': {
+      const { taskId, index } = event;
+      const task = await loadTask(db, taskId, openid);
+      const d = (task.days || [])[index];
+      if (!d) return { code: -1, msg: '天序号越界' };
+      // 幂等：已成功过的天直接返回（重试不重复花钱花时间）
+      if (task.dayStatus && task.dayStatus[index]) {
+        return { code: 0, itemCount: (task.dayItems[index] || []).length, cached: true };
+      }
+      const items = await extractDay(d);
+      const dayItems = task.dayItems || [];
+      dayItems[index] = items.filter((it) => it && String(it.activity || '').trim());
+      const dayStatus = task.dayStatus || [];
+      dayStatus[index] = true;
+      await saveTask(db, taskId, { dayItems, dayStatus });
+      console.log('[step/day] 第 %d 天解析出 %d 条', index + 1, dayItems[index].length);
+      return { code: 0, index, itemCount: dayItems[index].length };
+    }
+
+    // ---------- ③ 闹钟（预订章节）+ 旅行建议（两个小请求并行） ----------
+    case 'collect': {
+      const task = await loadTask(db, event.taskId, openid);
+      let alarmsRaw = [];
+      let suggestions = {};
+      const jobs = [];
+      jobs.push(
+        extractSuggestions(task.rawHead || '')
+          .then((s) => { suggestions = s || {}; })
+          .catch((e) => {
+            console.error('[step/collect] 建议提取失败（跳过）:', e.message);
+          })
+      );
+      if ((task.booking || []).length) {
+        jobs.push(
+          extractAlarms(task.booking, task.year)
+            .then((a) => { alarmsRaw = a; })
+            .catch((e) => {
+              console.error('[step/collect] 闹钟提取失败（跳过）:', e.message);
+            })
+        );
+      }
+      await Promise.all(jobs);
+      const region = String(suggestions.region || '').trim();
+      delete suggestions.region;
+      await saveTask(db, event.taskId, { alarmsRaw, suggestions, region });
+      return { code: 0, alarmCount: alarmsRaw.length, hasSuggestions: !!Object.keys(suggestions).length };
+    }
+
+    // ---------- ④ 汇总清洗 + 日期兜底 + AI 反推待办（最多 1 个 LLM 请求） ----------
+    case 'infer': {
+      const task = await loadTask(db, event.taskId, openid);
+      const rawItems = [].concat(...(task.dayItems || []).filter(Boolean));
+
+      // 清洗：字段规范化 + 缺失时间智能回填 + "同点假导航"清除（详见 normalize.js）
+      const items = sanitizeItems(rawItems);
+      console.log('[step/infer] 清洗后 items 数量:', items.length);
+
+      // 日期：init 时已由代码从"X月X日"标题确定性生成，这里只做格式校验与兜底
+      let startDate = validDateStr(task.startDate);
+      let endDate = validDateStr(task.endDate);
+      if (!startDate) startDate = tsToDateStr(now);
+      if (!endDate || endDate < startDate) {
+        const maxDi = items.reduce((m, it) => Math.max(m, it.dayIndex || 0), 0);
+        endDate = tsToDateStr(parseCnTime(startDate + 'T00:00:00') + maxDi * 86400000);
+      }
+
+      const alarms = cleanAlarms(task.alarmsRaw, openid, now);
+
+      // 文档里没写抢票时间（很常见）→ 用行程反推一份待办清单，别让闹钟页空着
+      if (alarms.length < INFER_THRESHOLD) {
+        try {
+          const inferred = await inferAlarms({
+            title: task.title,
+            startDate,
+            endDate,
+            items,
+          });
+          const have = new Set(alarms.map((a) => `${a.fireAt}|${a.title.replace(/\s+/g, '')}`));
+          inferred.forEach((a) => {
+            const key = `${a.fireAt}|${a.title.replace(/\s+/g, '')}`;
+            if (!have.has(key)) { alarms.push(a); have.add(key); }
+          });
+          alarms.sort((a, b) => a.fireAt - b.fireAt);
+          console.log('[step/infer] 补上 AI 反推待办，闹钟合计 %d 条', alarms.length);
+        } catch (e) {
+          console.error('[step/infer] 待办反推异常（不影响主流程）:', e.message);
+        }
+      }
+
+      // 汇总去重要编码的地址（geocode 步按这个清单分批跑）
+      const addrSet = new Set();
+      items.forEach((it) => {
+        if (it.startLocation) addrSet.add(it.startLocation);
+        if (it.endLocation) addrSet.add(it.endLocation);
+      });
+
+      await saveTask(db, event.taskId, {
+        items,
+        alarms,
+        addrList: [...addrSet],
+        startDate,
+        endDate,
+      });
+      return { code: 0, itemCount: items.length, alarmCount: alarms.length, addrCount: addrSet.size };
+    }
+
+    // ---------- ⑤ 地理编码（限墙钟 35s，一次跑不完下次继续） ----------
+    case 'geocode': {
+      const task = await loadTask(db, event.taskId, openid);
+      const region = String(task.region || '').trim();
+      const coords = task.coords || {};
+      const pending = (task.addrList || []).filter((a) => a && !coords[a]);
+      if (!pending.length) return { code: 0, remaining: 0, done: true };
+
+      const t0 = Date.now();
+      let processed = 0;
+      for (const addr of pending) {
+        // 逐个地址检查墙钟：单条 geocodeOne 最坏十几秒，超预算就停下、写库、下次接着跑
+        if (Date.now() - t0 > GEOCODE_DEADLINE_MS) break;
+        try {
+          // 传整串 region（「广西 桂林 阳朔 南宁 崇左」），geocodeOne 内部拆候选城市逐个试
+          const c = await geocodeOne(addr, region);
+          if (c) coords[addr] = c;
+        } catch (e) {
+          console.error('[step/geocode] %s 失败（跳过）:', addr, e.message);
+        }
+        processed++;
+      }
+      await saveTask(db, event.taskId, { coords });
+      const remaining = pending.length - processed;
+      console.log('[step/geocode] 本轮 %d 个，累计命中 %d 个，剩余 %d',
+        processed, Object.keys(coords).length, remaining);
+      return { code: 0, remaining, processed };
+    }
+
+    // ---------- ⑥ 坐标回填 + 入库（秒级） ----------
+    case 'commit': {
+      const task = await loadTask(db, event.taskId, openid);
+      // 幂等：上次 commit 已成功（比如写库后网络断了）→ 直接返回上次结果
+      if (task.tripId && task.resultInfo) {
+        return Object.assign({ code: 0, resumed: true }, task.resultInfo);
+      }
+
+      const items = task.items || [];
+      const coords = task.coords || {};
+      const region = String(task.region || '').trim();
+      const cityHint = pickCity(region);
+
+      // 坐标与城市回填（与旧链路同款判定：命中哪个城市记哪个，前端导航消歧用）
+      items.forEach((it) => {
+        const s = coords[it.startLocation];
+        const e = coords[it.endLocation];
+        if (s) { it.startLon = s.lon; it.startLat = s.lat; }
+        if (e) { it.endLon = e.lon; it.endLat = e.lat; }
+        const hitCity = (e && e.city) || (s && s.city) || '';
+        if (hitCity) it.city = hitCity;
+        else if (cityHint && !it.city) it.city = cityHint;
+      });
+
+      const alarms = task.alarms || [];
+      const tripData = {
+        _openid: openid,
+        title: task.title || '我的行程',
+        summary: task.summary || '',
+        startDate: task.startDate,
+        endDate: task.endDate,
+        region,               // 大地名（省 市）：前端导航实时定位时消歧用，不做展示
+        sourceFileID: task.fileID,
+        items,
+        createdAt: now,
+        updatedAt: now,
+        parseVersion: PARSE_VERSION,
+      };
+
+      const addRes = await db.collection(COL_TRIP).add({ data: tripData });
+      const tripId = addRes._id;
+
+      // 闹钟入库：批量插入，每次最多 20 条
+      if (alarms.length) {
+        for (let i = 0; i < alarms.length; i += 20) {
+          const batch = alarms.slice(i, i + 20).map((a) =>
+            db.collection(COL_ALARM).add({ data: Object.assign({}, a, { tripId }) })
+          );
+          await Promise.all(batch);
+        }
+      }
+
+      // 旅行建议入库
+      const suggestions = task.suggestions || {};
+      if (Object.keys(suggestions).length) {
+        await db.collection('suggestions').add({
+          data: {
+            _openid: openid,
+            tripId,
+            weather: suggestions.weather || '',
+            gear: suggestions.gear || '',
+            food: suggestions.food || '',
+            tips: suggestions.tips || '',
+            transport: suggestions.transport || '',
+            budget: suggestions.budget || '',
+            generatedAt: now,
+          },
+        });
+      }
+
+      const resultInfo = {
+        tripId,
+        title: tripData.title,
+        startDate: tripData.startDate,
+        endDate: tripData.endDate,
+        itemCount: items.length,
+        alarmCount: alarms.length,
+        version: PARSE_VERSION,
+      };
+
+      // 任务收尾：清掉大字段（原文/中间结果），保留一条小记录便于排查
+      await saveTask(db, event.taskId, {
+        status: 'done',
+        tripId,
+        resultInfo,
+        days: null,
+        dayItems: null,
+        dayStatus: null,
+        booking: null,
+        rawHead: null,
+        items: null,
+        alarms: null,
+        alarmsRaw: null,
+        addrList: null,
+        coords: null,
+      });
+      console.log('[step/commit] 行程 %s 完成：%d 条行程，%d 条闹钟',
+        tripId, resultInfo.itemCount, resultInfo.alarmCount);
+      return Object.assign({ code: 0 }, resultInfo);
+    }
+
+    default:
+      return { code: -1, msg: `未知 step：${event.step}` };
+  }
+}
