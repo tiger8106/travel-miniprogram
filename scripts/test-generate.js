@@ -700,6 +700,37 @@ llm.chatWithRetry = async (messages) => {
   const afterHome = P.enforceDayClosure(homeItems.slice(), homeOutline, homeP);
   ok(afterHome.length === 2, '最后一条已写「回家/返程」就不再补', `条目数=${afterHome.length}`);
 
+  console.log('\n—— 同天重复交通条目去重（dedupeTransports）——');
+  ok(P.transportCodeOf({ category: 'transport', activity: '乘坐C6101次城际动车前往离堆公园站' }) === 'C6101',
+    '从文案里读出班次码 C6101', P.transportCodeOf({ category: 'transport', activity: '乘坐C6101次城际动车' }));
+  ok(P.transportCodeOf({ category: 'transport', activity: '乘地铁2号线前往春熙路' }) === '',
+    '「2号线」不是班次码', String(P.transportCodeOf({ category: 'transport', activity: '乘地铁2号线' })));
+  ok(P.transportCodeOf({ category: 'transport', activity: '前往T2航站楼乘机' }) === '',
+    '「T2航站楼」不是班次码', String(P.transportCodeOf({ category: 'transport', activity: '前往T2航站楼乘机' })));
+  const dupItems = [
+    { dayIndex: 1, startTime: '08:30', endTime: '09:10', category: 'transport', activity: '乘坐C6101次城际动车前往离堆公园站', startLocation: '成都东站', endLocation: '离堆公园站' },
+    { dayIndex: 1, startTime: '09:10', endTime: '09:40', category: 'transport', activity: '乘 C6101(参考) 次列车从成都东站前往离堆公园站', startLocation: '成都东站', endLocation: '离堆公园站' },
+    { dayIndex: 3, startTime: '16:00', endTime: '17:50', category: 'transport', activity: '乘坐 G8540 次高铁前往沙坪坝站', startLocation: '成都东站', endLocation: '沙坪坝站' },
+    { dayIndex: 3, startTime: '19:20', endTime: '19:50', category: 'transport', activity: '乘 G8540(参考) 次列车从成都东站前往沙坪坝站', startLocation: '成都东站', endLocation: '沙坪坝站' },
+    { dayIndex: 3, startTime: '19:50', endTime: '20:20', category: 'transport', activity: '乘地铁环线返回家中', startLocation: '沙坪坝站地铁站', endLocation: '金童路' },
+  ];
+  const afterDup = P.dedupeTransports(dupItems);
+  ok(afterDup.length === 3, '同天同班次码（C6101/G8540 各两条）各留最早一条', `剩 ${afterDup.length} 条`);
+  ok(afterDup.some((it) => it.startTime === '08:30') && afterDup.some((it) => it.startTime === '16:00'),
+    '留下的是最早那条（08:30 / 16:00）', afterDup.map((it) => it.startTime).join(','));
+  const dirDup = [
+    { dayIndex: 0, startTime: '10:00', endTime: '10:40', category: 'transport', activity: '乘车前往古镇停车场', startLocation: '酒店', endLocation: '古镇停车场' },
+    { dayIndex: 0, startTime: '10:20', endTime: '11:00', category: 'transport', activity: '包车前往古镇停车场', startLocation: '酒店门口', endLocation: '古镇停车场入口' },
+    { dayIndex: 0, startTime: '15:00', endTime: '16:00', category: 'transport', activity: '包车前往下一个城市', startLocation: '古镇停车场', endLocation: '另一城市' },
+  ];
+  const afterDir = P.dedupeTransports(dirDup);
+  ok(afterDir.length === 2, '同方向且时刻相近（≤90 分钟）的交通只留一条', `剩 ${afterDir.length} 条`);
+  const noDup = P.dedupeTransports([
+    { dayIndex: 0, startTime: '09:00', endTime: '10:00', category: 'transport', activity: '乘 G1 次列车前往A站', startLocation: 'B站', endLocation: 'A站' },
+    { dayIndex: 0, startTime: '18:00', endTime: '19:00', category: 'transport', activity: '乘 G2 次列车返回B站', startLocation: 'A站', endLocation: 'B站' },
+  ]);
+  ok(noDup.length === 2, '正常往返/不同段的交通不误伤', `剩 ${noDup.length} 条`);
+
   if (process.argv.includes('--unit')) {
     console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
     process.exit(fail ? 1 : 0);

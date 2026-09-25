@@ -286,8 +286,9 @@ ok('行李规则有代码兜底且挂在 sanitize 之后', /function enforceLugg
 ok('已确认大交通有确定性对齐兜底（车次错时刻/漏排/重复/起终点错都能拽回）',
   /function enforceMovesAlignment/.test(planJs)
   && /时刻漂移/.test(planJs) && /全天未安排，补一条/.test(planJs));
-ok('细化清洗链按序挂全（对齐→起点→接驳→早餐→禁午睡→晚间→餐次纠偏→闭环→行李→顺延）',
+ok('细化清洗链按序挂全（对齐→去重→起点→接驳→早餐→禁午睡→晚间→餐次纠偏→闭环→行李→顺延）',
   /items = enforceMovesAlignment\(sanitizeItems/.test(planJs)
+    && /items = dedupeTransports\(items\);/.test(planJs)
     && /items = enforceDayStartLocation\(items, outline\)/.test(planJs)
     && /items = enforceOriginAccess\(items, p, outline, roundDays\)/.test(planJs)
     && /items = enforceMorningRoutine\(items, outline\)/.test(planJs)
@@ -304,6 +305,11 @@ ok('包车/大巴段宽松匹配，已有同向交通条目时不重复补（isS
   /function isScheduledMove/.test(planJs) && /已由细化安排（宽松匹配），不补/.test(planJs));
 ok('餐次词按实际时刻纠偏（早上不出现"晚餐"）',
   /function fixMealLabels/.test(planJs) && /t < 10 \* 60 \+ 30/.test(planJs));
+ok('同天重复交通条目有确定性去重（dedupeTransports：同班次码/同方向就近去重，不认地名）',
+  /function dedupeTransports/.test(planJs) && /function transportCodeOf/.test(planJs));
+ok('跨天同类体验差异化写入两段 prompt（大纲 7.4 + 细化规则 19，最多 2 次）',
+  /7\.4 \*\*全程体验要差异化（铁律）\*\*/.test(planJs)
+    && /19\. \*\*别重复排已安排过的内容\*\*/.test(planJs));
 ok('早餐兜底只在上午补，中午后补午餐而不是早餐',
   /fs <= 11 \* 60 \+ 30/.test(planJs) && /补午餐而不是早餐/.test(planJs));
 ok('细化 prompt 禁止白天回酒店睡觉（15:00 前）',

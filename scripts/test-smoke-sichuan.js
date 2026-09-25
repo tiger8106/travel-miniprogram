@@ -148,6 +148,34 @@ const input = {
   if (wasteful.length) bad(`到站后长途打车 ${wasteful.length} 条：${wasteful[0].activity}`);
   else good('没有"下车后长距离打车才到目的地"的段');
 
+  // ⑦ 重复内容（通用判定）：
+  //    a) 同一天出现同一个班次码的两条交通（同一趟车排了两遍）
+  const dupTrans = [];
+  planItems.forEach((it) => {
+    if (it.category !== 'transport') return;
+    const code = P.transportCodeOf(it);
+    if (!code) return;
+    const same = planItems.filter((x) => x.category === 'transport'
+      && Number(x.dayIndex || 0) === Number(it.dayIndex || 0)
+      && P.transportCodeOf(x) === code);
+    if (same.length >= 2 && !dupTrans.includes(it)) dupTrans.push(it);
+  });
+  if (dupTrans.length) bad(`同一趟车排了两遍：${[...new Set(dupTrans.map((x) => P.transportCodeOf(x)))].join('、')}`);
+  else good('没有同天重复的班次条目');
+  //    b) 跨天在同一家店吃两次（店名词干相同）
+  const storeDays = new Map();
+  planItems.forEach((it) => {
+    if (it.category !== 'food') return;
+    const m = /([A-Za-z0-9\u4e00-\u9fa5]{2,8})(?:老火锅|火锅|烧烤|米粉|米线|兔头|豆腐|酸菜鱼|烤鱼|汤锅|粉|面)/.exec(String(it.activity || ''));
+    const key = m ? m[0] : '';
+    if (!key) return;
+    if (!storeDays.has(key)) storeDays.set(key, new Set());
+    storeDays.get(key).add(Number(it.dayIndex || 0));
+  });
+  const repeatStores = [...storeDays.entries()].filter(([, days]) => days.size >= 2);
+  if (repeatStores.length) bad(`同一家店跨天吃了 ${repeatStores.map(([k, d]) => `「${k}」${d.size}天`).join('、')}`);
+  else good('没有跨天重复光顾同一家店');
+
   console.log(fail ? `\n共 ${fail} 项不通过` : '\n全部通过');
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

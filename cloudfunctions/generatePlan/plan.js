@@ -232,6 +232,7 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
 7. ${p.budget === '经济' ? '住性价比档，餐饮接地气；' : p.budget === '品质' ? '住高品质酒店/度假村，餐饮选口碑正餐；' : '住舒适型酒店，餐饮兼顾特色与性价比；'}推荐写类型/片区+代表菜，不要编造具体门牌地址。
    7.1 **每晚推荐一家具体酒店（h 字段，按用户预算「${p.budget}」档挑选）**：写真实存在、地图能搜到的连锁或口碑酒店名（如"桂林漓江大瀑布饭店"），并符合用户的节奏与兴趣（亲子选带泳池/家庭房，情侣选江景/设计感，美食偏好选近夜市）。同一 ov 连住多晚就写同一家；确实没有把握的就写「片区+档次」（如"两江四湖片区舒适型酒店"），**不要编造不存在的酒店名**。最后一天（返程日）h 留空。
    7.2 **ml 一日三餐都要点名**：写具体店名或"片区/景区+代表菜"（例："午餐：陈麻婆豆腐（青羊店）""晚餐：南桥附近尤兔头"），不要只写"午餐""晚餐"；没有把握的店名就写"片区+招牌菜"（如"晚餐：古尔沟片区藏式汤锅"）。
+   7.4 **全程体验要差异化（铁律）**：同一类餐饮（如火锅、烧烤、米粉、小吃）全程**最多安排 2 次**，同一类游览体验（如古镇老街、博物馆、夜市、山岳徒步、主题乐园）也**最多 2 次**。多天行程时每天换花样：逛了老街就换个公园/展馆，吃了火锅就换家常菜/地方菜，让用户每天有新鲜感，而不是换了个地方重复同一种玩法。
    7.3 **市内/短途交通按预算选型**：预算「经济」→ 3km 内步行、中长途地铁/公交优先，打车只留给轨道交通到不了的地方；「舒适」→ 地铁优先，2~6km 跨区、赶时间或夜间打车；「品质」→ 以打车为主。选定的基调写进当天 n 提示（如"市内地铁出行为主"）。
 8. ov 写住宿城市或片区（最后一天写"返程"）；h 每晚一家；nt 长度 = ${p.days - 1} 晚。
 9. 所有文本简体中文，n 字段控制在 30 字以内。只输出 JSON 对象。`;
@@ -491,6 +492,67 @@ function enforceMovesAlignment(items, outline, activeDays) {
     });
   });
   return out;
+}
+
+/** 从交通条目文案里读班次码（G8540/CA4123 这类）；"T2航站楼""2号线"不算 */
+function transportCodeOf(it) {
+  if (String(it.category || '') !== 'transport') return '';
+  const m = /\b([A-Za-z]{1,2}\d{2,4})\b(?!\s*(?:号线|航站楼|号航站楼|站台))/
+    .exec(`${it.activity || ''}${it.note || ''}`);
+  return m ? m[1].toUpperCase() : '';
+}
+
+/**
+ * 同一天重复交通条目清理（兜底，通用判定不认地名）。
+ *
+ * 实测踩过：模型写了"乘坐C6101次城际动车前往X站"（没提出发站，
+ * enforceMovesAlignment 匹配不上）→ 又留/补一条"乘 C6101(参考) 次列车从
+ * Y东站前往X站"，用户看到同一趟车排了两遍；更离谱的一条还排在
+ * 到站之后。规则：
+ *   · 同一天出现同一个班次码 → 只留最早一条（同一天不可能坐两次同一班车）；
+ *   · 同一天同方向（起点、终点词干都相同）且发车时刻相近（≤90 分钟）
+ *     的两条 → 视为同一段路，留最早一条。
+ */
+function dedupeTransports(items) {
+  if (!asArray(items).length) return items;
+  const byDay = new Map();
+  asArray(items).forEach((it) => {
+    const di = Number(it.dayIndex || 0);
+    if (!byDay.has(di)) byDay.set(di, []);
+    byDay.get(di).push(it);
+  });
+  const drop = new Set();
+  byDay.forEach((list) => {
+    const trans = list.filter((it) => String(it.category || '') === 'transport')
+      .sort((a, b) => String(a.startTime || '').localeCompare(String(b.startTime || '')));
+    // ① 同班次码只留最早
+    const seenCode = new Map();
+    trans.forEach((it) => {
+      const code = transportCodeOf(it);
+      if (!code) return;
+      if (seenCode.has(code)) drop.add(it);
+      else seenCode.set(code, it);
+    });
+    // ② 同方向且时刻相近只留最早（词干互相包含算同地："酒店"⊂"酒店门口"）
+    const sameSpot = (a, b) => a === b
+      || (a.length >= 2 && b.includes(a)) || (b.length >= 2 && a.includes(b));
+    for (let i = 0; i < trans.length; i++) {
+      if (drop.has(trans[i])) continue;
+      const fs = placeStem(trans[i].startLocation);
+      const ts = placeStem(trans[i].endLocation);
+      if (fs.length < 2 || ts.length < 2) continue;
+      for (let j = i + 1; j < trans.length; j++) {
+        if (drop.has(trans[j])) continue;
+        if (!sameSpot(placeStem(trans[j].startLocation), fs)
+          || !sameSpot(placeStem(trans[j].endLocation), ts)) continue;
+        const gap = (toMin(trans[j].startTime) || 0) - (toMin(trans[i].startTime) || 0);
+        if (gap >= 0 && gap <= 90) drop.add(trans[j]);
+      }
+    }
+  });
+  if (!drop.size) return items;
+  console.warn('[generatePlan] 清理同天重复交通条目 %d 条', drop.size);
+  return items.filter((it) => !drop.has(it));
 }
 
 /**
@@ -1462,7 +1524,8 @@ ${/高铁|动车/.test(p.transport) ? '12. 用户交通偏好是「高铁/动车
     - 「舒适」：地铁优先；跨区 2~6km、赶时间（赶车/赶预约）、携带行李或 22 点以后才打车（transportType=car）。
     - 「品质」：以打车为主（car），地铁只在明显更快时用。
     - 打车条目在 note 里写预估车费（如"打车约 15-20 元"）；地铁/公交条目在 note 里写票价。带行李换乘时优先打车，别让游客拖着箱子挤地铁。
-    - **【今天的大交通】到达后的市内接驳同样按上面的预算基调选型**；到站离目的地很近时直接写"出站步行前往"（walk），不要动不动就打车。`;
+    - **【今天的大交通】到达后的市内接驳同样按上面的预算基调选型**；到站离目的地很近时直接写"出站步行前往"（walk），不要动不动就打车。
+19. **别重复排已安排过的内容**：对照大纲其他天的 hl/ml——今天不要再安排其他天已经玩过的具体景点（同一景点整个行程只玩一次），也不要和其他天吃同一家店；同一类体验（火锅/烧烤等同类的饭、古镇老街/博物馆/夜市等同类的玩法）全程最多 2 次，今天尽量给出和别的天不一样的花样。`;
 
   return [
     { role: 'system', content: SYS_PROMPT },
@@ -2083,6 +2146,7 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
   const roundDays = [...new Set(baseItems.concat(skeleton.items)
     .map((it) => Number(it.dayIndex || 0)))];
   let items = enforceMovesAlignment(sanitizeItems(baseItems.concat(skeleton.items)), outline, roundDays);
+  items = dedupeTransports(items);
   items = enforceDayStartLocation(items, outline);
   items = enforceOriginAccess(items, p, outline, roundDays);
   items = enforceMorningRoutine(items, outline);
@@ -2187,6 +2251,7 @@ module.exports = {
   enforceOriginAccess, enforceMorningRoutine, enforceEveningPlan,
   fixMealLabels, enforceNoMiddayHotel, skeletonDayItems, skeletonForEmptyDays,
   transferMinutes, isCarTransfer, detourTransfers, warnDetourTransfers,
+  dedupeTransports, transportCodeOf,
   isRealCode, moveActivityText, isScheduledMove,
   fixDayTimeOverlaps, samePlace, toMin, fmtMin,
 };
