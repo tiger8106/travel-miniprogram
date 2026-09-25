@@ -7,6 +7,7 @@
 const api = require('../../services/api');
 const auth = require('../../utils/auth');
 const homeCache = require('../../utils/homecache');
+const eta = require('../../utils/eta');
 
 const app = getApp();
 
@@ -109,9 +110,13 @@ Page({
     startVal: pickVal(todayStr()),
     endRange: pickRange(plusDays(todayStr(), 2)),
     endVal: pickVal(plusDays(todayStr(), 2)),
-    // 去程/返程时刻（精确到分钟）：AI 必须把首末两天的大交通卡在这个时刻上
+    // 去程/返程时刻（精确到分钟）：AI 必须把首末两天的大交通卡在这个时刻上。
+    // 语义（2026-09-25）：goTime = 从出发城市启程的时刻；backTime = 回到出发城市的时刻
     goTime: '08:00',
-    backTime: '18:00',
+    backTime: '20:00',
+    // 页脚耗时预估：不再写死"约 40 秒"，按本机历史实测 + 当前天数算出来
+    outlineEta: '',
+    detailEta: '',
     people: 2,
     partyIdx: 1,
     partyOptions: PARTY,
@@ -158,6 +163,7 @@ Page({
     this._listMaxH = Math.max(280, Math.round(winH - 330));
     this.setData({ itemH: this._itemH });
     this.updateDaysText();
+    this.updateEtaTexts();
   },
 
   onUnload() {
@@ -167,19 +173,35 @@ Page({
   },
 
   // ---------- 生成计时器 ----------
-  // 等 AI 的时候最怕"不知道还要多久"。每秒刷新已用秒数 + 已细化天数，
-  // 用户能判断是正常在跑还是卡死了，也方便截图告诉我卡在第几天。
-  startTicker(baseText) {
+  // 等 AI 的时候最怕"不知道还要多久"。这里给的是**倒计时**而不是干巴巴的已用秒数：
+  // 预估来自本机历史实测（utils/eta.js），跑过头了就换成"快好了"，不让人干着急。
+  // 已用秒数仍然保留——卡住时方便截图告诉我卡在第几天。
+  startTicker(baseText, estMs) {
     this.stopTicker();
     this._tipBase = baseText;
     this._tipExtra = '';
+    this._estMs = estMs || 0;
     this._t0 = Date.now();
-    this.setData({ genTip: `${baseText} 0s` });
-    this._ticker = setInterval(() => {
-      const s = Math.round((Date.now() - this._t0) / 1000);
-      const extra = this._tipExtra ? ` · ${this._tipExtra}` : '';
-      this.setData({ genTip: `${this._tipBase} ${s}s${extra}` });
-    }, 1000);
+    this.setData({ genTip: this.renderTip() });
+    this._ticker = setInterval(() => this.setData({ genTip: this.renderTip() }), 1000);
+  },
+
+  renderTip() {
+    const s = Math.round((Date.now() - this._t0) / 1000);
+    const extra = this._tipExtra ? ` · ${this._tipExtra}` : '';
+    let tail;
+    if (!this._estMs) {
+      tail = '';
+    } else {
+      const left = Math.ceil((this._estMs - (Date.now() - this._t0)) / 1000);
+      tail = left > 0 ? ` · 还需约 ${left}s` : ' · 快好了';
+    }
+    return `${this._tipBase} ${s}s${tail}${extra}`;
+  },
+
+  // 跑到一半拿到更准的信息（比如还剩几天没细化）时刷新预估
+  setEst(estMs) {
+    this._estMs = estMs || 0;
   },
 
   setTipExtra(text) {
@@ -211,6 +233,15 @@ Page({
   updateDaysText() {
     const n = diffDays(this.data.startDate, this.data.endDate);
     this.setData({ daysText: `${n} 天 ${n - 1} 晚` });
+  },
+
+  // 页脚耗时预估：天数变了就重算（3 天和 10 天差好几倍，写死一个数必然不准）
+  updateEtaTexts(days) {
+    const n = days || diffDays(this.data.startDate, this.data.endDate);
+    this.setData({
+      outlineEta: eta.footerText('outline', n),
+      detailEta: eta.footerText('detail', n),
+    });
   },
 
   // ---------- 三列日期选择器 ----------
@@ -245,7 +276,7 @@ Page({
       endDate: end,
       endRange: pickRange(end),
       endVal: pickVal(end),
-    }, () => this.updateDaysText());
+    }, () => { this.updateDaysText(); this.updateEtaTexts(); });
   },
 
   onEndDate(e) {
@@ -264,7 +295,7 @@ Page({
       n = MAX_DAYS;
     }
     this.setData({ endDate: end, endRange: pickRange(end), endVal: pickVal(end) },
-      () => this.updateDaysText());
+      () => { this.updateDaysText(); this.updateEtaTexts(); });
   },
 
   onPeopleChange(e) {
@@ -408,10 +439,15 @@ Page({
 
   // 阶段一：出路线大纲
   async genOutline() {
+    const etaDays = diffDays(this.data.startDate, this.data.endDate);
+    // 预估用"本机历史 + 当前天数"算；跑完按同口径回写实测值，下次就更准
     this.setData({ generating: true });
-    this.startTicker('AI 正在规划路线');
+    this.startTicker('AI 正在规划路线', eta.estimate('outline', etaDays));
+    const t0 = Date.now();
     try {
       const res = await api.generateOutline(this._input);
+      eta.record('outline', etaDays, Date.now() - t0);
+      this.updateEtaTexts(etaDays);   // 刚量过一次，页脚数字立刻变准
       const days = (res.outline && res.outline.days) || [];
       const outlineDays = days.map((d, i) => ({
         idx: i,
@@ -748,7 +784,7 @@ Page({
       endRange: pickRange(endDate),
       endVal: pickVal(endDate),
       outline: newDays ? Object.assign({}, outline, { days: newDays }) : outline,
-    }, () => this.updateDaysText());
+    }, () => { this.updateDaysText(); this.updateEtaTexts(outlineDays.length); });
   },
 
   // ---------- 阶段二：展开逐天详情并入库 ----------
@@ -759,7 +795,6 @@ Page({
   async onConfirmOutline() {
     if (this.data.generating) return;
     this.setData({ generating: true });
-    this.startTicker('正在细化每天的安排');
 
     const base = Object.assign({}, this._input, {
       title: this.data.title,
@@ -767,6 +802,8 @@ Page({
       outline: this.data.outline,
     });
     const totalDays = this.data.outlineDays.length || 1;
+    const t0 = Date.now();
+    this.startTicker('正在细化每天的安排', eta.estimate('detail', totalDays));
 
     let result = null;
     let payload = base;
@@ -779,6 +816,9 @@ Page({
         attempts = res.attempts || attempts;
         const done = (res.doneDayIndexes || []).length;
         this.setTipExtra(`已细化 ${Math.min(done, totalDays)}/${totalDays} 天`);
+        // 开局是"按总天数"粗估的；续跑时已知还剩几天，用「已用 + 剩余天数预估」
+        // 刷新倒计时 —— 差 3 天和差 8 天差一倍，不修正的话倒计时会越跑越离谱
+        this.setEst((Date.now() - t0) + eta.estimate('detail', Math.max(0, totalDays - done)));
         // 还有天没生成完（或某天失败要重试）：带上 tripId 继续，loading 全程不中断
         payload = Object.assign({}, base, {
           tripId: res.tripId,
@@ -788,6 +828,9 @@ Page({
       }
       if (!result || !result.tripId) throw new Error('生成失败，请重试');
       this.stopTicker();
+      // 记下真实耗时（含续跑的每一轮），下次预估就按这个来
+      eta.record('detail', totalDays, Date.now() - t0);
+      this.updateEtaTexts(totalDays);
 
       app.globalData.currentTripId = result.tripId;
       homeCache.clear();

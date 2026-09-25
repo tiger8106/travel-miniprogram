@@ -33,6 +33,8 @@ const jsFiles = [
   'components/activity-item/activity-item.js',
   'components/ticket-alarm/ticket-alarm.js',
   'components/map-button/map-button.js',
+  'pages/planner/planner.js',
+  'utils/eta.js',
 ];
 jsFiles.forEach((rel) => {
   const err = syntaxOk(path.join(MP, rel));
@@ -166,6 +168,60 @@ ok('已有 id 参用', keys[4] === 'real2');
 const again = fake.withItemKeys(out);
 ok('二次处理 key 稳定不变', JSON.stringify(again.map((x) => x.key)) === JSON.stringify(keys));
 ok('二次处理保持引用（不重复拷贝）', again[0] === out[0]);
+
+// ---------- ⑦ 生成耗时预估（页脚不再写死秒数）----------
+const plWxml = fs.readFileSync(path.join(MP, 'pages/planner/planner.wxml'), 'utf8');
+const plJs = fs.readFileSync(path.join(MP, 'pages/planner/planner.js'), 'utf8');
+ok('页脚不再写死"约需 N 秒"',
+  !/生成约需\s*\d+\s*秒/.test(plWxml) && !/展开约需\s*\d+\s*秒/.test(plWxml));
+ok('页脚绑定动态预估字段',
+  /\{\{outlineEta\}\}/.test(plWxml) && /\{\{detailEta\}\}/.test(plWxml));
+ok('planner 引入了 utils/eta', /require\(['"][^'"]*utils\/eta['"]\)/.test(plJs));
+ok('跑完回写实测耗时（outline/detail 各一次）',
+  /eta\.record\('outline'/.test(plJs) && /eta\.record\('detail'/.test(plJs));
+ok('倒计时用预估而不是干巴巴的秒数', /还需约/.test(plJs) && /startTicker\(/.test(plJs));
+
+// ---- ETA 模型自测：喂几个样本后，预估要能朝真实值收敛 ----
+// eta.js 在 node 下没有 wx，load/save 都包在 try 里，会退化成纯内存，正好可测
+delete require.cache[require.resolve(path.join(MP, 'utils/eta.js'))];
+const eta = require(path.join(MP, 'utils/eta.js'));
+const d = eta.DEFAULTS.outline;
+const before = eta.estimate('outline', 8);
+for (let i = 0; i < 6; i++) eta.record('outline', 8, 22000); // 真实稳定在 22s
+const after = eta.estimate('outline', 8);
+ok('反复喂同一实测值后预估向它收敛',
+  Math.abs(after - 22000) < Math.abs(before - 22000), `${Math.round(before / 1000)}s → ${Math.round(after / 1000)}s`);
+ok('预估不越界（min/max 生效）',
+  eta.estimate('outline', 1) >= d.min && eta.estimate('detail', 12) <= eta.DEFAULTS.detail.max);
+ok('异常样本被丢弃（<2s 或 >10min 不入模型）', (() => {
+  const snap = eta.estimate('outline', 8);
+  eta.record('outline', 8, 500);
+  eta.record('outline', 8, 99999999);
+  return Math.abs(eta.estimate('outline', 8) - snap) < 1;
+})());
+ok('未跑过时文案带"首次"提示，跑过后带"上次实际"',
+  /首次/.test(eta.footerText('detail', 8)) === false || /上次实际/.test(eta.footerText('outline', 8)),
+  eta.footerText('outline', 8));
+ok('时长格式化可读', eta.fmtDuration(25000) === '25 秒' && eta.fmtDuration(100000) === '1 分 40 秒',
+  `${eta.fmtDuration(25000)} / ${eta.fmtDuration(100000)}`);
+
+// ---------- ⑧ 去程/返程时刻语义 ----------
+ok('去程标签改为「去程开始时间」', /去程开始时间/.test(plWxml) && !/>\s*去程时间\s*</.test(plWxml));
+ok('返程标签改为「返程到达时间」', /返程到达时间/.test(plWxml) && !/>\s*返程时间\s*</.test(plWxml));
+const planJs = fs.readFileSync(path.join(ROOT, 'cloudfunctions/generatePlan/plan.js'), 'utf8');
+ok('后端：返程按"抵达出发地"倒推（e 字段写 backTime）',
+  /返程到达时间已由用户指定/.test(planJs) && /mv 里 e 字段写 \$\{p\.backTime\}/.test(planJs));
+ok('后端：去程按"从出发地启程"（s 字段写 goTime）',
+  /去程开始时间已由用户指定/.test(planJs) && /mv 里 s 字段写 \$\{p\.goTime\}/.test(planJs));
+
+// ---------- ⑨ 不再用 max_tokens 卡模型输出 ----------
+const genLlm = fs.readFileSync(path.join(ROOT, 'cloudfunctions/generatePlan/llm.js'), 'utf8');
+ok('chat() 默认不带 max_tokens 字段',
+  /if \(opts\.maxTokens > 0\) bodyObj\.max_tokens = opts\.maxTokens;/.test(genLlm));
+ok('保留环境变量兜底（LLM_MAX_TOKENS）', /LLM_MAX_TOKENS/.test(genLlm));
+ok('plan.js 调用点不再传数字 token 上限',
+  !/chatWithRetry\([\s\S]{0,200}?,\s*\d{3,4}\s*,/.test(planJs));
+ok('截断会留日志（finish_reason=length）', /finish_reason === 'length'/.test(genLlm));
 
 console.log(failed ? `\n${failed} 项失败 ✗` : '\n全部通过 ✓');
 process.exit(failed ? 1 : 0);

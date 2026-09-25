@@ -5,11 +5,18 @@
 //   1. 推理型模型必须 enable_thinking:false（qwen3.5-plus 开思考 106s → 关 2.9s）
 //   2. 没配 provider/baseURL 时别静默打到 api.openai.com（云函数连不上会卡到超时）
 //   3. 单次请求超时 < 云函数上限 60s
+//
+// ⚠️ 2026-09-25 改：不再给输出设 max_tokens 上限（详见 chat() 里的说明）。
+//    输出长度由"任务本身需要写多少"决定，安全网只保留"时间"这一道。
 
 const https = require('https');
 const http = require('http');
 
 const REQUEST_TIMEOUT_MS = parseInt(process.env.LLM_TIMEOUT_MS || '', 10) || 45 * 1000;
+
+// 输出 token 上限：默认 0 = 不限制（让模型写到自然结束）。
+// 只有确实想封顶（比如控成本 / 模型会跑飞）时才设 LLM_MAX_TOKENS=8192 之类。
+const DEFAULT_MAX_TOKENS = parseInt(process.env.LLM_MAX_TOKENS || '', 10) || 0;
 
 function getBaseURL() {
   if (process.env.LLM_BASE_URL) return process.env.LLM_BASE_URL;
@@ -47,22 +54,47 @@ function getConfig() {
 }
 
 /**
+ * 参数归一化：兼容老的「(messages, 3000, { deadline })」和新的「(messages, { deadline })」两种写法
+ * @returns {{maxTokens:number, deadline:number|undefined, timeoutMs:number|undefined}}
+ */
+function normOpts(a, b) {
+  let o = {};
+  if (typeof a === 'number') { o.maxTokens = a; if (b && typeof b === 'object') o = Object.assign(o, b); }
+  else if (a && typeof a === 'object') o = Object.assign({}, a);
+  if (!o.maxTokens) o.maxTokens = DEFAULT_MAX_TOKENS;
+  return o;
+}
+
+/**
  * 原始 chat 调用
+ *
+ * 关于 max_tokens：这里**默认不传**。
+ *   实测（qwen3.8-flash，DashScope 兼容模式）：
+ *     · 不传 max_tokens → finish_reason=stop，输出 6571 token，JSON 完整收尾
+ *     · max_tokens=3000 → finish_reason=length，写一半被砍断，尾巴断在句子中间
+ *   生成型任务的输出本来就随内容多少浮动（8 天行程的闹钟 20+ 条、一天细化 13 条），
+ *   给一个固定上限，内容一多就把**正常输出**也截掉了，只能靠 parseJSONFromText 抢救，
+ *   丢掉的条目用户根本不知道（之前 suggestions 的 budget 字段就是这么整段消失的）。
+ *   所以：让模型按自己的节奏自然写完，安全网交给时间（REQUEST_TIMEOUT_MS / deadline）。
+ *   真要封顶就配环境变量 LLM_MAX_TOKENS。
+ *
  * @param {Array} messages
- * @param {number} maxTokens
- * @param {number} [timeoutMs] 本次请求的超时上限；不给就用环境变量/默认值
+ * @param {object|number} [a] { maxTokens, timeoutMs } 或直接传老的数字 maxTokens
+ * @param {object} [b] 老写法里的 { deadline }
  * @returns {Promise<string>} content
  */
-function chat(messages, maxTokens, timeoutMs) {
-  const limit = timeoutMs || REQUEST_TIMEOUT_MS;
+function chat(messages, a, b) {
+  const opts = normOpts(a, b);
+  const limit = opts.timeoutMs || REQUEST_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
     const { apiKey, baseURL, model } = getConfig();
     const bodyObj = {
       model,
       messages,
       temperature: 0.7, // 生成任务比抽取任务需要更多创意（抽取用 0.1）
-      max_tokens: maxTokens || 4000,
     };
+    // 只有显式给了上限才带这个字段；不传 = 交给模型自己的输出上限
+    if (opts.maxTokens > 0) bodyObj.max_tokens = opts.maxTokens;
     if (REASONING_MODEL.test(model) && process.env.LLM_ENABLE_THINKING !== '1') {
       bodyObj.enable_thinking = false;
     }
@@ -90,8 +122,15 @@ function chat(messages, maxTokens, timeoutMs) {
         if (res.statusCode >= 200 && res.statusCode < 300) {
           try {
             const resp = JSON.parse(data);
-            const text = resp?.choices?.[0]?.message?.content;
+            const choice = resp?.choices?.[0];
+            const text = choice?.message?.content;
             if (!text) return reject(new Error('LLM 未返回内容'));
+            // 被上限截断时留个证据：日志里搜 "finish=length" 就能定位是哪种截断
+            console.log('[generatePlan.llm] finish=%s usage=%s',
+              choice?.finish_reason, JSON.stringify(resp?.usage || {}));
+            if (choice?.finish_reason === 'length') {
+              console.warn('[generatePlan.llm] ⚠️ 输出被 token 上限截断（finish_reason=length），内容不完整');
+            }
             resolve(text);
           } catch (e) {
             reject(new Error('响应 JSON 解析失败: ' + data.slice(0, 200)));
@@ -123,15 +162,17 @@ function chat(messages, maxTokens, timeoutMs) {
  *        （续跑只是慢一点，总好过整轮超时被杀）
  *
  * @param {Array} messages
- * @param {number} maxTokens
- * @param {object} [opts] { deadline: 本次调用截止时间戳 }
+ * @param {object|number} [a] { deadline, maxTokens }（兼容老的数字 maxTokens 写法）
+ * @param {object} [b] 老写法里的 { deadline }
  */
-async function chatWithRetry(messages, maxTokens, opts) {
-  const deadline = opts && opts.deadline;
+async function chatWithRetry(messages, a, b) {
+  const opts = normOpts(a, b);
+  const maxTokens = opts.maxTokens;
+  const deadline = opts.deadline;
   const budget = () => (deadline ? deadline - Date.now() : Infinity);
   const single = Math.max(8000, Math.min(REQUEST_TIMEOUT_MS, deadline ? budget() - 3000 : REQUEST_TIMEOUT_MS));
   try {
-    return await chat(messages, maxTokens, single);
+    return await chat(messages, { maxTokens, timeoutMs: single });
   } catch (e) {
     const left = budget();
     // 重试至少还要留 12s，否则这一轮大概率整体超时
@@ -141,16 +182,16 @@ async function chatWithRetry(messages, maxTokens, opts) {
     }
     console.error('[generatePlan.llm] 调用失败，重试一次:', e.message, `剩余=${deadline ? left + 'ms' : '不限'}`);
     const again = Math.max(8000, Math.min(single, deadline ? budget() - 3000 : REQUEST_TIMEOUT_MS));
-    return chat(messages, maxTokens, again);
+    return chat(messages, { maxTokens, timeoutMs: again });
   }
 }
 
 /**
  * 从 LLM 文本里抠出 JSON（容忍 markdown 包裹 / 前后缀 / 尾逗号 / 被 max_tokens 截断）
  *
- * ⚠️ 为什么要有"抢救"逻辑：生成型任务输出量大，很容易把 JSON 写到一半就撞上 max_tokens，
- *    直接 JSON.parse 会整体失败，8 天的活全白干。这里退而求其次：砍掉最后一个不完整的元素，
- *    把前面完整的部分救回来（丢一天总比全丢好）。
+ * ⚠️ 为什么还要保留"抢救"逻辑：虽然已经不设 max_tokens 了，但**请求超时**一样会把
+ *    输出砍在半句（单次 LLM 有硬超时），JSON.parse 会整体失败，8 天的活全白干。
+ *    这里退而求其次：砍掉最后一个不完整的元素，把前面完整的部分救回来（丢一天总比全丢好）。
  */
 function parseJSONFromText(text) {
   let json = (text || '').trim();

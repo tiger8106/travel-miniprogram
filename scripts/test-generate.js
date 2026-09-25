@@ -128,6 +128,53 @@ const outlineHit = Object.assign({}, outlineMiss, {
 });
 ok(P.missingMustVisit(fakeP, outlineHit).length === 0, '排进去了就不再报缺');
 
+// 5d-2. 点名地点覆盖判定要容忍"庄园/田园"这类一字之差
+ok(P.placeStem('明仕庄园') === '明仕' && P.placeStem('明仕田园') === '明仕',
+  '庄园/田园这类尾巴被剥掉，词干一致', P.placeStem('明仕庄园'));
+ok(P.placeStem('龙脊梯田') === '龙脊', '梯田也算尾巴', P.placeStem('龙脊梯田'));
+ok(P.placeStem('桂林') === '桂林', '普通地名原样保留', P.placeStem('桂林'));
+ok(P.missingMustVisit({ mustVisit: ['明仕庄园'] }, {
+  days: [{ date: '2026-10-01', city: '崇左', theme: '明仕田园与德天瀑布', moves: [], highlights: ['明仕田园'], meals: [], overnight: '崇左', note: '' }],
+}).length === 0, '大纲写了「明仕田园」时不再误报缺「明仕庄园」');
+ok(P.missingMustVisit({ mustVisit: ['龙脊梯田'] }, {
+  days: [{ date: '2026-10-01', city: '桂林', theme: '市区', moves: [], highlights: ['象鼻山'], meals: [], overnight: '桂林', note: '' }],
+}).length === 1, '真漏了照样报缺');
+
+// 5e. 去程开始时间 / 返程到达时间：代码兜底对齐（不靠 LLM 自觉）
+//     语义：goTime = 从出发城市启程的时刻；backTime = 回到出发城市的时刻（不是发车时刻）
+const edgeP = normalizeInput({
+  dest: '桂林', startDate: '2026-12-20', endDate: '2026-12-22',
+  startTime: '08:30', endTime: '21:15',
+});
+const edgeOutline = {
+  title: 't', summary: '', nights: [],
+  days: [
+    { date: '2026-12-20', city: '桂林', theme: '出发', overnight: '桂林', meals: [], note: '',
+      moves: [{ from: '重庆北', to: '桂林西', mode: 'train', code: 'G2249', startTime: '14:44', endTime: '19:38' }],
+      highlights: ['日月双塔'] },
+    { date: '2026-12-21', city: '桂林', theme: '游玩', overnight: '桂林', meals: [], note: '', moves: [], highlights: [] },
+    { date: '2026-12-22', city: '桂林', theme: '返程', overnight: '返程', meals: [], note: '',
+      moves: [{ from: '桂林西', to: '重庆北', mode: 'train', code: 'G2244', startTime: '09:12', endTime: '14:06' }],
+      highlights: [] },
+  ],
+};
+const edged = P.applyTripEdgeTimes(edgeP, JSON.parse(JSON.stringify(edgeOutline)));
+ok(edged.days[0].moves[0].startTime === '08:30',
+  '去程：第一天大交通被对齐到「去程开始时间 08:30」', edged.days[0].moves[0].startTime);
+ok(edged.days[0].moves[0].endTime === '13:24',
+  '去程：运行时长保持不变（4h54m → 08:30-13:24）', edged.days[0].moves[0].endTime);
+ok(edged.days[2].moves[0].endTime === '21:15',
+  '返程：最后一天大交通被对齐到「返程到达时间 21:15」', edged.days[2].moves[0].endTime);
+ok(edged.days[2].moves[0].startTime === '16:21',
+  '返程：发车时刻按到达时刻倒推（4h54m → 16:21 发）', edged.days[2].moves[0].startTime);
+// 到达时刻太早（倒推会退到前一天）时只保证到达时刻，不硬挪起点
+const weird = P.applyTripEdgeTimes(
+  normalizeInput({ dest: '桂林', startDate: '2026-12-20', endDate: '2026-12-22', endTime: '03:00' }),
+  JSON.parse(JSON.stringify(edgeOutline)));
+ok(weird.days[2].moves[0].endTime === '03:00' && weird.days[2].moves[0].startTime === '09:12',
+  '到达时刻倒推会退到前一天时：只锁到达时刻，发车时刻不乱改',
+  weird.days[2].moves[0].startTime + '-' + weird.days[2].moves[0].endTime);
+
 // 6. 失败天重试链路（不调真实 LLM：把 llm.chatWithRetry 换成假实现）
 //
 //    背景：之前某天细化失败会被直接排除在续跑队列外，partial=false 就结束了，
@@ -191,6 +238,8 @@ const INPUT = {
   dest: '桂林、阳朔、龙脊梯田、明仕庄园和德天瀑布',
   startDate: '2026-09-30',
   endDate: '2026-10-07',
+  startTime: '08:30',   // 去程开始时间：08:30 从重庆出发
+  endTime: '21:15',     // 返程到达时间：21:15 回到重庆
   people: 2,
   party: '情侣出行',
   budget: '舒适',
@@ -220,6 +269,18 @@ return (async () => {
   mustVisit.forEach((name) => {
     ok(outlineJson.includes(name), `大纲包含点名地点「${name}」`);
   });
+
+  // 去程开始 / 返程到达时刻必须落在大纲里（代码兜底对齐，不是靠 LLM 自觉）
+  const od = phase1.outline.days || [];
+  const firstMove = (od[0] && od[0].moves || [])[0];
+  const lastMoves = (od[od.length - 1] && od[od.length - 1].moves) || [];
+  const lastMove = lastMoves[lastMoves.length - 1];
+  ok(!!firstMove && firstMove.startTime === '08:30',
+    '去程开始时间生效（第一天大交通 08:30 发车）', firstMove && firstMove.startTime);
+  ok(!!lastMove && lastMove.endTime === '21:15',
+    '返程到达时间生效（最后一天 21:15 抵达出发地）', lastMove && `${lastMove.startTime}-${lastMove.endTime}`);
+  ok(!!lastMove && lastMove.startTime !== '21:15',
+    '返程没把到达时间误当成发车时间', lastMove && lastMove.startTime);
 
   // 阶段二：模拟云端续跑——一次跑不完（partial）就接着调，直到全部生成
   const t1 = Date.now();
@@ -299,13 +360,15 @@ return (async () => {
   }
   ok(chainBreak === 0, '同城连住的天，早上从昨晚住宿地出发（闭环）', chainBreak);
   // 闭环兜底：每天"第一条"的 startLocation 都不该是空的（吃饭/游览留空是正常的）
-  let emptyFirst = 0;
+  let emptyFirst = [];
   for (let d = 1; d < outlineDays.length; d++) {
     const dayItems = plan.items.filter((it) => it.dayIndex === d)
       .sort((a, b) => String(a.startTime).localeCompare(String(b.startTime)));
-    if (dayItems.length && !String(dayItems[0].startLocation || '').trim()) emptyFirst++;
+    if (dayItems.length && !String(dayItems[0].startLocation || '').trim()) {
+      emptyFirst.push(`第${d + 1}天「${dayItems[0].activity}」`);
+    }
   }
-  ok(emptyFirst === 0, '每天第一条都有起点（兜底已补齐）', emptyFirst);
+  ok(emptyFirst.length === 0, '每天第一条都有起点（兜底已补齐）', emptyFirst.join('；'));
 
   console.log('\n闹钟清单：');
   (plan.alarms || []).forEach((a) => {

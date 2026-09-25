@@ -116,8 +116,14 @@ node scripts/check-bindings.js
 ### ⏱️ 云函数 60 秒上限：生成类任务必须拆阶段
 
 一次请求让 LLM 吐出「8 天大纲 + 8 天逐天详情」实测要 **80 秒**，必然超时。
-`generatePlan` 因此拆成两次调用：`action=outline`（~28s）→ 前端确认 → `action=build`（~34s）。
+`generatePlan` 因此拆成两次调用：`action=outline`（~32s）→ 前端确认 → `action=build`（每轮 ~35s，天多会续跑 3 轮）。
 新增任何"让 LLM 写很多"的功能，先估算输出 token×速率，超 40 秒就要拆。
+
+**不要用 `max_tokens` 给输出设上限**（2026-09-25 定）：生成型任务的输出长度随内容多少浮动，
+封顶会把**正常输出**从中间砍断（实测 qwen3.8-flash：不传 → `finish_reason=stop` 写完 6571 token；
+传 3000 → `finish_reason=length` 断在半句）。安全网只保留"时间"这一道（请求超时 / deadline）。
+真要封顶用环境变量 `LLM_MAX_TOKENS`。**硬性约束优先用代码兜底**（生成完按规则改），
+别在 prompt 里反复加"必须…"——概率性生效，还会让输出变啰嗦、更慢。
 
 ### 🔔 闹钟不能让 LLM 算时间——只能让它提名
 

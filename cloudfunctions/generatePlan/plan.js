@@ -105,7 +105,12 @@ function normalizeInput(input) {
   const pace = String(i.pace || '适中');
   const interests = Array.isArray(i.interests) ? i.interests.slice(0, 8) : [];
   const transport = String(i.transport || '高铁优先');
-  // 分钟级的去/返程时刻：用户指定后，首末两天的大交通必须落在这个时刻上
+  // 分钟级的去/返程时刻：用户指定后，首末两天的大交通必须落在这个时刻上。
+  // ⚠️ 语义（2026-09-25 改）：
+  //   goTime   = **去程开始时间**：第一天从「出发城市」启程的时刻（mv.s）
+  //   backTime = **返程到达时间**：最后一天回到「出发城市」的时刻（mv.e，不是发车时刻！）
+  //   返程按"到达时刻"倒推发车时刻才符合直觉——用户想的是"我要几点到家"，
+  //   而不是"我要几点从景区走"。
   const validTime = (s) => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(s || '').trim()) ? String(s).trim() : '';
   const dest = String(i.dest || i.destCity || '').trim();
   const { destList, mustVisit } = parseDestList(dest);
@@ -134,8 +139,9 @@ function profileText(p) {
     `${p.days}天（${p.startDate} 至 ${p.endDate}）`,
   ];
   // 去/返程时刻精确到分钟，LLM 必须照这个时刻排首末两天的大交通
+  // goTime = 从出发城市启程（发车/起飞）；backTime = 回到出发城市（抵达）
   if (p.goTime) bits.push(`去程 ${p.goTime} 从${p.origin || '出发地'}出发`);
-  if (p.backTime) bits.push(`返程 ${p.backTime} 从目的地启程返回`);
+  if (p.backTime) bits.push(`返程 ${p.backTime} 抵达${p.origin || '出发地'}`);
   bits.push(`${p.party} ${p.peopleNum}人`);
   bits.push(`预算${p.budget}`);
   bits.push(`节奏${p.pace}`);
@@ -166,7 +172,8 @@ async function genOutline(p) {
         ? '**用户已选「飞机优先」：单程超过 6 小时的跨城段优先飞机**，但同城/近郊仍走地面交通。'
         : '有高铁/动车直达的优先走高铁，没有直达高铁再看飞机；近距离（≤3 小时车程）走高铁/直通车大巴。';
 
-  // 用短键名：一份 8 天大纲能省 30%+ 的输出 token（时间就是成本，也直接决定会不会撞上 max_tokens）
+  // 用短键名：一份 8 天大纲能省 30%+ 的输出 token。虽然不再设 max_tokens，
+  // 但云函数只有 60s，输出越短写得越快，留出余量给"漏点修订"那一次请求。
   const prompt = `为以下旅行需求制定逐日路线大纲。
 
 【需求】${profileText(p)}
@@ -189,9 +196,9 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
 1. ds 恰好 ${p.days} 天，日期从 ${p.startDate} 连续到 ${p.endDate}，每天一个元素，顺序递增。
 2. 路线顺路：相邻两天不来回折返；同一城市连片玩完再换城。
 3. 第一天从（或抵达）目的地${p.origin ? `（出发地 ${p.origin}）` : ''}，最后一天返回${p.origin || '出发地'}。
-3.1 ${p.goTime ? `**去程时刻已由用户指定**：第一天的大交通必须在 ${p.goTime} 从${p.origin || '出发地'}出发（mv 里 s 字段写 ${p.goTime}，e 按实际运行时长推算）。` : '去程班次请给出一个具体、合理的发车/起飞时刻（s/e 都要精确到分钟）。'}
-3.2 ${p.backTime ? `**返程时刻已由用户指定**：最后一天的大交通必须在 ${p.backTime} 从目的地启程返回${p.origin || '出发地'}（mv 里 s 字段写 ${p.backTime}）。` : '返程班次请给出合理的发车/起飞时刻（精确到分钟）。'}
-4. mv 只写城际大交通：火车给参考车次走向（如 G2249）与运行时刻，飞机给航线；市内交通不写。
+3.1 ${p.goTime ? `**去程开始时间已由用户指定**：第一天的大交通必须在 ${p.goTime} 从${p.origin || '出发地'}启程（mv 里 s 字段写 ${p.goTime}，e 按实际运行时长推算）。` : '去程班次请给出一个具体、合理的发车/起飞时刻（s/e 都要精确到分钟）。'}
+3.2 ${p.backTime ? `**返程到达时间已由用户指定**：最后一天的大交通必须在 ${p.backTime} **抵达${p.origin || '出发地'}**（mv 里 e 字段写 ${p.backTime}，s 按实际运行时长往前倒推发车/起飞时刻）。这是"到达时间"不是"发车时间"，千万别把 ${p.backTime} 填进 s。` : '返程班次请给出合理的发车/起飞时刻与到达时刻（精确到分钟）。'}
+4. mv 只写城际大交通：**s = 发车/起飞时刻，e = 到达时刻**；火车给参考车次走向（如 G2249），飞机给航线；市内交通不写。
 5. hl 每天 3-4 个**具体景点/片区名称**，别写"逛逛市区"这种废话；兼顾${p.pace}节奏${p.interests.length ? '和偏好' : ''}。
 6. ${p.mustGo ? `用户必去：${p.mustGo}，必须排进合适的一天。` : ''}${p.extra ? `特殊要求：${p.extra}` : ''}
 6.1 ${p.mustVisit && p.mustVisit.length ? `**用户点名的目的地一个都不许漏**：${p.mustVisit.join('、')} —— 每一个都必须在大纲里占到实实在在的行程（成为某天的城市、当天主题或必玩点之一）。觉得不顺路的，安排当天往返或顺路串联，宁可调整路线也绝不许默默丢掉任何一个。` : ''}
@@ -200,13 +207,15 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
 9. 所有文本简体中文，n 字段控制在 30 字以内。只输出 JSON 对象。`;
 
   // 大纲是单独一次云函数调用（60s 上限），留 8s 给返回，单次最多等 52s
+  // 注意：不传 max_tokens —— 天数多的时候大纲本来就长，封顶会把后面几天从中间掐断
   const outlineDeadline = Date.now() + 52 * 1000;
   const text = await llm.chatWithRetry([
     { role: 'system', content: SYS_PROMPT },
     { role: 'user', content: prompt },
-  ], 3000, { deadline: outlineDeadline });
+  ], { deadline: outlineDeadline });
 
-  const outline = normalizeOutlineJson(parseJSONFromText(text), p);
+  // 去程开始 / 返程到达时刻由代码兜底对齐（LLM 自己常常不照办）
+  const outline = applyTripEdgeTimes(p, normalizeOutlineJson(parseJSONFromText(text), p));
   if (!outline.days.length) throw new Error('大纲没有生成任何一天');
 
   // 点名地点兜底：LLM 偶尔会"自作主张"丢掉它认为不顺路的点
@@ -215,7 +224,8 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
   const missing = missingMustVisit(p, outline);
   if (missing.length) {
     console.warn('[generatePlan] 大纲漏掉用户点名地点: %s → 发起修订', missing.join('、'));
-    if (outlineDeadline - Date.now() > 18 * 1000) {
+    // 修订现在只吐"改动的那几天"，几百 token 就够，12s 足够跑完
+    if (outlineDeadline - Date.now() > 12 * 1000) {
       const repaired = await repairOutline(p, outline, missing, outlineDeadline);
       if (repaired) {
         const still = missingMustVisit(p, repaired);
@@ -228,6 +238,100 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
     } else {
       console.warn('[generatePlan] 剩余时间不足，跳过修订，保留原大纲');
     }
+  }
+  return outline;
+}
+
+// ---- 时刻工具（分钟制，用于把大交通对齐到用户指定的去/返程时刻）----
+function toMin(t) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(t || '').trim());
+  return m ? (+m[1]) * 60 + (+m[2]) : null;
+}
+function fmtMin(v) {
+  const t = ((v % 1440) + 1440) % 1440;
+  return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
+}
+
+/**
+ * 把首末两天的大交通对齐到用户指定的时刻（确定性兜底，不靠提示词）
+ *
+ * 为什么不写在 prompt 里就算了：LLM 看见"去程 08:30 出发"，照样按它认为合理的
+ * 14:44 写（提示词加再多硬约束也只是提高概率，还会让输出变啰嗦、更慢）。
+ * 与其跟模型较劲，不如生成完用代码把整段班次**整体平移**——运行时长保持不变，
+ * 只挪时刻。这样"去程开始时间 / 返程到达时间"是 100% 生效的硬保证。
+ *
+ * @param {object} p 归一化输入（goTime = 去程开始，backTime = 返程到达）
+ * @param {object} outline 归一化后的大纲（会被就地修改）
+ */
+/**
+ * 清洗之后再兜一次「每天第一条的起点」
+ *
+ * 为什么不在 genDayItems 里做完就算了：sanitizeItems 的"假导航清除"（Pass 3）
+ * 会把"起点=终点"的条目成对清掉（如「在酒店吃早餐」被填成 酒店→酒店），
+ * 恰好每天第一条经常就是这种"没移动"的条目 —— 前面补的起点被清了个干净。
+ * 所以放到 sanitize 之后再做一次，才是真的闭环。
+ */
+function enforceDayStartLocation(items, outline) {
+  const days = asArray(outline && outline.days);
+  if (!days.length) return items;
+  const byDay = new Map();
+  asArray(items).forEach((it) => {
+    const di = Number(it.dayIndex || 0);
+    if (!byDay.has(di)) byDay.set(di, []);
+    byDay.get(di).push(it);
+  });
+  byDay.forEach((list, di) => {
+    if (di <= 0) return;                       // 第一天本来就是从出发地启程
+    const prevOv = String((days[di - 1] && (days[di - 1].overnight || days[di - 1].city)) || '').trim();
+    if (!prevOv) return;
+    const first = list.slice().sort((a, b) =>
+      String(a.startTime || '').localeCompare(String(b.startTime || '')))[0];
+    if (first && !String(first.startLocation || '').trim()) first.startLocation = prevOv;
+  });
+  return items;
+}
+
+function applyTripEdgeTimes(p, outline) {
+  const days = asArray(outline && outline.days);
+  if (!days.length) return outline;
+  // 只认城际大交通段（市内接驳不挪）
+  const railLike = (m) => /train|plane|高铁|动车|火车|航班|飞机|ship|游船/
+    .test(`${m.mode || ''}${m.code || ''}`.toLowerCase());
+
+  /** 整体平移一段班次：保持时长不变，把指定那一端挪到 wantMin */
+  const shiftSeg = (m, wantMin, edge) => {
+    if (wantMin == null || !m) return false;
+    const s = toMin(m.startTime);
+    const e = toMin(m.endTime);
+    const dur = (s != null && e != null && e > s) ? e - s : null;
+    if (edge === 'start') {
+      if (s == null) return false;
+      m.startTime = fmtMin(wantMin);
+      if (dur != null) m.endTime = fmtMin(wantMin + dur);
+      return true;
+    }
+    if (e == null) return false;
+    m.endTime = fmtMin(wantMin);
+    // 倒推出来的发车时刻要是退到了前一天（比如"早上 8 点到家"意味着半夜出发），
+    // 就别硬挪起点了，只保证到达时刻对得上
+    if (dur != null && wantMin - dur >= 0) m.startTime = fmtMin(wantMin - dur);
+    return true;
+  };
+
+  const goMin = toMin(p.goTime);
+  const backMin = toMin(p.backTime);
+  if (goMin != null) {
+    const first = days[0];
+    const list = asArray(first && first.moves);
+    const m = list.find(railLike) || list[0];
+    if (m) shiftSeg(m, goMin, 'start');
+  }
+  if (backMin != null && days.length > 1) {
+    const last = days[days.length - 1];
+    const list = asArray(last && last.moves);
+    // 最后一天可能先有短途接驳、再上车返程 → 取**最后一段**大交通当返程
+    const m = list.slice().reverse().find(railLike) || list[list.length - 1];
+    if (m) shiftSeg(m, backMin, 'end');
   }
   return outline;
 }
@@ -272,40 +376,96 @@ function outlineToShortJson(outline) {
   };
 }
 
-/** 用户点名的地点里，大纲还没覆盖到的 */
+// 景区常见的"名字尾巴"：用户写「明仕庄园」、模型写「明仕田园」这种一字之差
+// 不该被判成"漏了"（真跑时踩过：大纲里明明有明仕田园，却报缺明仕庄园，
+// 结果白跑一次修订请求，还把这次修订挤到超时）。
+const PLACE_SUFFIX = /(景区|风景区|名胜区|庄园|田园|梯田|古镇|古村|公园|森林公园|国家公园|博物馆|观景台|度假区|遗址|寺庙|保护区|海岛|海滨|瀑布|岩洞|溶洞|竹筏|游船)$/;
+/** 去掉尾巴后的地名词干（太短就不剥，避免误判） */
+function placeStem(name) {
+  const s = String(name || '').replace(/\s+/g, '');
+  const stripped = s.replace(PLACE_SUFFIX, '');
+  return stripped.length >= 2 ? stripped : s;
+}
+
+/** 用户点名的地点里，大纲还没覆盖到的（词干匹配，容忍"庄园/田园"这类一字之差） */
 function missingMustVisit(p, outline) {
   const text = JSON.stringify(outlineToShortJson(outline));
-  return (p.mustVisit || []).filter((name) => !text.includes(name));
+  return (p.mustVisit || []).filter((name) => {
+    if (text.includes(name)) return false;
+    const stem = placeStem(name);
+    return !text.includes(stem);
+  });
 }
 
 /**
  * 修订大纲：把漏掉的点名地点排进去，其余安排尽量保持不变。
- * 修订结果必须通过"天数一致 + 能解析"才采用，失败返回 null（保留原大纲）。
+ *
+ * ⚠️ 只让模型输出**需要改动的那几天**，不再让它重写整份大纲：
+ *    整份 8 天大纲要写 ~2700 token（实测约 30s），而这次修订是在主大纲跑完之后
+ *    的剩余时间里做的，根本挤不下 —— 实测被超时掐断，漏掉的点一个也没补回来。
+ *    改成"只吐 1~3 天的补丁"（几百 token，8s 左右）就能在剩余时间里跑完。
+ *
+ * 兼容：模型万一还是返回了完整大纲（ds 天数 = 总天数），按整份替换处理。
+ * 失败返回 null（保留原大纲）。
  */
 async function repairOutline(p, outline, missing, deadline) {
   try {
-    const prompt = `下面这份旅行路线大纲漏掉了用户点名要去的地点：${missing.join('、')}。请修订大纲，把它们安排进合适的天（顺路串联或当天往返都可以），其余天的安排尽量保持不变。
+    const prompt = `下面这份旅行路线大纲漏掉了用户点名要去的地点：${missing.join('、')}。
+请**只输出需要改动的那几天**（其余天不要输出），把它们安排进去（顺路串联或当天往返都可以）。
 
 【旅行需求】${profileText(p)}
 
-【当前大纲 JSON（短键名，与输出格式完全一致）】
+【当前大纲（短键名）】
 ${JSON.stringify(outlineToShortJson(outline))}
 
-# 输出要求
-1. 输出修订后的完整大纲 JSON，格式与上面一模一样（短键名，含 t/s/nt/ds）。
-2. ds 仍然恰好 ${p.days} 天，日期从 ${p.startDate} 连续到 ${p.endDate}，每天一个元素。
-3. ${missing.join('、')} 每一个都必须出现在某天的 city / t / hl 里。
-4. 只输出 JSON 对象，不要任何解释。`;
+# 输出格式
+{"ds":[{"d":"YYYY-MM-DD","city":"城市","t":"当天主题短语","hl":["必玩1","必玩2","必玩3"],"ov":"当晚住宿","n":"提示（20字内）"}]}
+
+# 要求
+1. ds 只包含**需要改动的天**（一般 1~2 天就够），d 必须原样抄当前大纲里的日期。
+2. ${missing.join('、')} 每一个都必须出现在某天的 city / t / hl 里。
+3. 改动尽量小：能塞进已有某天的 hl 就别重排整条路线，其他天保持原样。
+4. 只输出这个 JSON 对象，不要任何解释。`;
     const text = await llm.chatWithRetry([
       { role: 'system', content: SYS_PROMPT },
       { role: 'user', content: prompt },
-    ], 3000, { deadline });
-    const repaired = normalizeOutlineJson(parseJSONFromText(text), p);
-    if (repaired.days.length !== p.days) {
-      console.warn('[generatePlan] 修订大纲天数不符（%d ≠ %d），弃用', repaired.days.length, p.days);
+    ], { deadline });
+    const parsed = parseJSONFromText(text);
+    const patched = asArray(parsed && parsed.ds);
+
+    // 模型返回了整份大纲 → 走老的整份替换逻辑
+    if (patched.length && patched.length === p.days) {
+      const repaired = applyTripEdgeTimes(p, normalizeOutlineJson(parsed, p));
+      if (repaired.days.length !== p.days) {
+        console.warn('[generatePlan] 修订大纲天数不符（%d ≠ %d），弃用', repaired.days.length, p.days);
+        return null;
+      }
+      return repaired;
+    }
+
+    // 只改了几天的补丁 → 按日期合并回原大纲
+    const byDate = new Map();
+    outline.days.forEach((d) => byDate.set(d.date, d));
+    let changed = 0;
+    patched.forEach((raw) => {
+      const date = validDate(raw && raw.d) ? raw.d : '';
+      const nd = normalizeOutlineJson({ ds: [raw] }, p).days[0];
+      const target = byDate.get(date);
+      if (!nd || !target) return;
+      if (nd.city) target.city = nd.city;
+      if (nd.theme) target.theme = nd.theme;
+      if (asArray(nd.highlights).length) target.highlights = nd.highlights;
+      if (asArray(nd.moves).length) target.moves = nd.moves;
+      if (nd.overnight) target.overnight = nd.overnight;
+      if (nd.note) target.note = nd.note;
+      changed++;
+    });
+    if (!changed) {
+      console.warn('[generatePlan] 修订补丁没有匹配到任何一天，弃用');
       return null;
     }
-    return repaired;
+    console.log('[generatePlan] 修订补丁已合并 %d 天', changed);
+    return applyTripEdgeTimes(p, outline);
   } catch (e) {
     console.error('[generatePlan] 大纲修订失败（保留原大纲）:', e.message);
     return null;
@@ -346,14 +506,14 @@ function dayDetailPrompt(p, day, idx, outline) {
 dayIndex 全部填 ${idx}。
 
 # 细致度要求（核心）
-1. 输出 ${isFirst || isLast ? '8' : '9'}～${isFirst || isLast ? '11' : '13'} 条，**覆盖一整天**：起床/早餐 → 上午安排 → 午餐 → 下午安排 → 傍晚（日落/夜景）→ 晚餐 → 夜间活动 → 回酒店休息。不要只列几个景点就结束。
+1. **覆盖一整天**（唯一硬要求）：起床/早餐 → 上午安排 → 午餐 → 下午安排 → 傍晚（日落/夜景）→ 晚餐 → 夜间活动 → 回酒店休息。条数一般 8～14 条，内容多就多写、少就少写——**不要为了凑条数删掉有用的安排，也不要把一件事拆成好几条凑数**。不要只列几个景点就结束。
 2. 每条 startTime / endTime 必须具体且**首尾相接**：后一条的 startTime 等于前一条的 endTime（中间留间隔也算合理，如 转场/休息），全天从起床开始、到回酒店休息结束。禁止输出空时间、"--:--"、或 endTime 等于 startTime。
 3. 时间分配要符合常识和${p.pace}节奏：早餐 07:00 前后；午餐 12:00-13:00；晚餐 18:30-20:00；景区游览至少 1-2 小时；晚上安排到 21:30-22:30 之间收尾回酒店。${p.pace === '轻松' ? '每天最多 2 个主景点，留出午休和慢逛时间。' : p.pace === '紧凑' ? '行程可以更满，但必须保证吃饭和必要的交通接驳时间。' : ''}
 4. activity 要写得像真人行程："14:44 乘 G2249 前往桂林西（约 4 小时 54 分）"、"20:10 去崇善米粉吃第一顿桂林米粉，点卤菜粉/锅烧粉"、"21:00 步行前往杉湖，看日月双塔夜景"。**要有具体名称**（店名/菜品/景点具体区域/观景台），不要写"吃晚饭""逛逛"这种空话。
 5. 涉及移动的动作必须填 startLocation / endLocation（起点空着时，用上一条的位置或昨晚住宿地），并填 transportType：步行=walk，打车/包车=car，公交地铁/电动车=ride，火车=train，飞机=plane。没有移动（吃饭、休息、游览）三项都留空。
 6. 备注写进 note：预约要求、末班车时间、门票信息、行李寄存、拍照机位、当地支付/语言提示等实用信息。
-7. ${isFirst ? `第一天：从${p.origin || '出发地'}出发，先写前往车站/机场的集合与安检预留时间（国内高铁至少提前 45 分钟到站，飞机提前 2 小时）。${p.goTime ? `**大交通班次必须卡在 ${p.goTime} 发车/起飞**，请按这个时刻倒推集合、安检、候车时间，不要写成别的时刻。` : ''}` : ''}
-8. ${isLast ? `最后一天：以返回${p.origin || '出发地'}结束，写到家/到站为止，并预留返程交通时间。${p.backTime ? `**返程班次必须卡在 ${p.backTime} 启程**，按这个时刻倒推退房、前往车站/机场的时间。` : ''}` : ''}
+7. ${isFirst ? `第一天：从${p.origin || '出发地'}出发，先写前往车站/机场的集合与安检预留时间（国内高铁至少提前 45 分钟到站，飞机提前 2 小时）。${p.goTime ? `**大交通必须在 ${p.goTime} 从${p.origin || '出发地'}启程（这是去程开始时间）**，请按这个时刻倒推集合、安检、候车时间，不要写成别的时刻。` : ''}` : ''}
+8. ${isLast ? `最后一天：以回到${p.origin || '出发地'}结束，写到家/到站为止，并预留返程交通时间。${p.backTime ? `**大交通必须在 ${p.backTime} 抵达${p.origin || '出发地'}（这是返程到达时间，不是发车时间）**，请按到达时刻往前倒推：发车/起飞时刻 → 前往车站机场 → 退房。` : ''}` : ''}
 9. category 取值：景点游览=sight，餐饮=food，住宿/回酒店=hotel，交通=transport，门票预订/取票=ticket，其他=other。
 10. 输出顺序按时间先后。只输出数组，不要任何解释。
 11. **【已确认的跨城交通】是最终决定，一个字都不许改**：交通方式、出发站/到达站、车次、起止时刻全部照抄。
@@ -423,7 +583,9 @@ async function genDayItems(p, outline, opts = {}) {
     const waveStart = Date.now();
     const rs = await Promise.all(batch.map((idx) =>
       // 把本轮 deadline 传进去：单次超时会按剩余时间收敛，重试也会先问时间够不够
-      llm.chatWithRetry(dayDetailPrompt(p, days[idx], idx, outline), 3500, { deadline })
+      // 这里同样不设 max_tokens：一天 10~15 条细化的正常输出就接近 3000 token，
+      // 封顶会让当天的后半段（晚餐 + 夜间 + 回酒店）凭空消失
+      llm.chatWithRetry(dayDetailPrompt(p, days[idx], idx, outline), { deadline })
         .then((t) => ({ i: idx, items: asArray(parseJSONFromText(t)) }))
         .catch((e) => ({ i: idx, error: e.message }))
     ));
@@ -709,6 +871,16 @@ function backfillMissingAlarms(p, outline, nominated) {
   return list;
 }
 
+/**
+ * 时间不够让 LLM 提名时的底线闹钟：硬规则 + 查漏补齐（都是确定性的，不调 LLM）
+ * 顺序有讲究：先 buildFallbackAlarms 铺底线，再让 backfillMissingAlarms 对着它查漏，
+ * 这样"每段城际票 + 每晚住宿"都能补上，不会退化成只有 1 条酒店提醒。
+ */
+function fallbackAlarms(p, outline) {
+  const base = buildFallbackAlarms(p, outline);
+  return base.concat(backfillMissingAlarms(p, outline, base));
+}
+
 async function genAlarms(p, outline, deadline) {
   const lines = outline.days.map((d, i) => {
     const mv = asArray(d.moves).map((m) => `${m.mode || ''}${m.code ? ' ' + m.code : ''} ${m.from || ''}→${m.to || ''} ${m.startTime || ''}${m.endTime ? '-' + m.endTime : ''}`).join('；');
@@ -756,7 +928,7 @@ ${lines}
     const text = await llm.chatWithRetry([
       { role: 'system', content: SYS_PROMPT },
       { role: 'user', content: prompt },
-    ], 3600, deadline ? { deadline } : undefined);   // 20+ 条闹钟很常见，2000 会截断丢尾巴
+    ], deadline ? { deadline } : undefined);   // 20+ 条闹钟很常见，不设上限才能一次写完
     nominated = sanitizeAlarmCandidates(asArray(parseJSONFromText(text)), p);
   } catch (e) {
     console.error('[generatePlan] 闹钟提名失败，只走规则兜底:', e.message);
@@ -811,12 +983,12 @@ ${brief}
 要求：全部简体中文，结合目的地与出行季节给出具体建议（不要正确的废话）。budget 按 ${p.budget} 档、${p.peopleNum} 人估算。只输出对象。`;
 
   try {
-    // 1200 token 对 6 段中文建议太紧：实测 budget 字段被截成 "bud"（截断抢救把它
-    // 当成了键名），预算建议整段丢失。放宽到 1800，够写完整又不拖时间。
+    // 之前设过 1200 / 1800：实测 budget 字段被截成 "bud"（截断抢救把它当成键名），
+    // 预算建议整段丢失。现在不设上限，6 段中文建议能一次写完整。
     const text = await llm.chatWithRetry([
       { role: 'system', content: SYS_PROMPT },
       { role: 'user', content: prompt },
-    ], 1800, deadline ? { deadline } : undefined);
+    ], deadline ? { deadline } : undefined);
     const obj = parseJSONFromText(text);
     return obj && typeof obj === 'object' ? obj : {};
   } catch (e) {
@@ -888,6 +1060,17 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
   const hardDeadline = t1 + (opts.hardBudgetMs || 55 * 1000);
   const deadline = t1 + budget;
 
+  // 闹钟 / 建议只依赖大纲，**不需要等细化跑完**。
+  // 之前是细化完了才发起，结果最后一轮细化常常吃掉 30s+，留给闹钟只剩几秒，
+  // 提名请求直接被超时掐断（实测 21.5s 超时）→ 只能走规则兜底，门票/体验类的
+  // 提醒全靠代码补。现在跟细化同时发起，它们能用满整轮的时间预算。
+  // 中途返回 partial 时这些 Promise 会被放弃（云函数进程随即回收），不影响结果。
+  const sideDeadline = hardDeadline - 4 * 1000;
+  const alarmsPromise = genAlarms(p, outline, sideDeadline)
+    .catch((e) => { console.error('[generatePlan] 闹钟生成失败:', e.message); return null; });
+  const suggPromise = genSuggestions(p, outline, sideDeadline)
+    .catch((e) => { console.error('[generatePlan] 建议生成失败:', e.message); return {}; });
+
   const detail = await genDayItems(p, outline, {
     doneDayIndexes: opts.doneDayIndexes,
     attempts: opts.attempts,     // 上一轮回传的失败次数，决定哪些天还能再试
@@ -897,7 +1080,7 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
   console.log('[generatePlan] 细化完成 %dms, 原始条目=%d, partial=%s',
     Date.now() - t1, detail.items.length, detail.partial);
 
-  const items = sanitizeItems(detail.items);
+  const items = enforceDayStartLocation(sanitizeItems(detail.items), outline);
 
   // 地理编码消歧要用的每天城市 + 地址→天下标映射。
   // savePlan 的 cityOf 靠它们给高德传 city 参数——之前只消费不生产，
@@ -935,22 +1118,16 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
     };
   }
 
-  // 闹钟/建议同样要卡时间：细化跑满后它们还能再跑 30s+，会把整轮顶穿 60s 上限。
-  // 时间不够就降级——闹钟走规则兜底（抢票/酒店那些硬规则），建议留空，
-  // 用户在建议页点"重新生成"就能补回来，总比整个调用超时失败强。
+  // 等闹钟/建议收尾（它们是和细化并行跑的，一般细化结束时也差不多了）。
+  // 仍然留 5s 给写库；真没回来就降级走规则兜底 —— 总比整个调用超时失败强。
   const remain = hardDeadline - Date.now() - 5 * 1000; // 再留 5s 给写库
-  let alarms = [];
-  let suggestions = {};
-  if (remain > 3 * 1000) {
-    const [a, s] = await Promise.all([
-      withTimeout(genAlarms(p, outline, Date.now() + remain), remain, null),
-      withTimeout(genSuggestions(p, outline, Date.now() + remain), remain, null),
-    ]);
-    alarms = a || buildFallbackAlarms(p, outline);
-    suggestions = s || {};
-  } else {
-    alarms = buildFallbackAlarms(p, outline);
-  }
+  const [a, s] = await Promise.all([
+    withTimeout(alarmsPromise, Math.max(1000, remain), null),
+    withTimeout(suggPromise, Math.max(1000, remain), null),
+  ]);
+  // 规则兜底 = 硬底线（去程/返程票、行前准备）+ 查漏补齐（每段城际、每晚住宿）
+  const alarms = a || fallbackAlarms(p, outline);
+  const suggestions = s || {};
   console.log('[generatePlan] 清洗后条目=%d, 闹钟=%d, 剩余预算=%dms', items.length, alarms.length, remain);
 
   return {
@@ -992,6 +1169,8 @@ async function generate(rawInput) {
 
 module.exports = {
   generate, generateOutline, buildPlan, genDayItems,
-  normalizeInput, sanitizeAlarmCandidates, buildFallbackAlarms, shiftDate, dayDiff, isHolidayRange,
-  parseDestList, missingMustVisit,
+  normalizeInput, sanitizeAlarmCandidates, buildFallbackAlarms, fallbackAlarms,
+  shiftDate, dayDiff, isHolidayRange,
+  parseDestList, missingMustVisit, placeStem,
+  applyTripEdgeTimes, enforceDayStartLocation, toMin, fmtMin,
 };

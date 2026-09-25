@@ -30,7 +30,7 @@
       <view class="card">
         <view class="card-title">📅 什么时候去</view>
         <view class="dt-row">
-          <text class="dt-label">去程时间</text>
+          <text class="dt-label">去程开始时间</text>
           <view class="dt-pickers">
             <picker class="dt-date" mode="multiSelector" range="{{startRange}}" value="{{startVal}}"
                     bindcolumnchange="onStartDateCol" bindchange="onStartDate" disabled="{{generating}}">
@@ -42,7 +42,7 @@
           </view>
         </view>
         <view class="dt-row">
-          <text class="dt-label">返程时间</text>
+          <text class="dt-label">返程到达时间</text>
           <view class="dt-pickers">
             <picker class="dt-date" mode="multiSelector" range="{{endRange}}" value="{{endVal}}"
                     bindcolumnchange="onEndDateCol" bindchange="onEndDate" disabled="{{generating}}">
@@ -54,7 +54,10 @@
           </view>
         </view>
         <view class="days-badge">共 {{daysText}}</view>
-        <view class="tip">时刻精确到分钟，AI 会把首末两天的大交通卡在这个时间点上</view>
+        <view class="tip">
+          <view>去程开始时间 = 从「{{origin || '出发城市'}}」出发（发车/起飞）的时刻</view>
+          <view>返程到达时间 = 最后一天回到「{{origin || '出发城市'}}」的时刻，AI 会据此倒推发车时间</view>
+        </view>
       </view>
 
       <view class="card">
@@ -125,7 +128,7 @@
                 bindtap="onSubmit" disabled="{{generating}}">
           {{generating ? genTip : '✨ 生成我的攻略'}}
         </button>
-        <view class="footer-tip">生成约需 40 秒，期间请不要离开页面</view>
+        <view class="footer-tip">出路线大纲 {{outlineEta}}，期间请不要离开页面</view>
       </view>
     </block>
 
@@ -181,7 +184,7 @@
                 bindtap="onConfirmOutline" disabled="{{generating}}">
           {{generating ? genTip : '📄 生成详细文档'}}
         </button>
-        <view class="footer-tip">展开约需 30 秒，会同时生成抢票/预订提醒和旅行建议</view>
+        <view class="footer-tip">展开 {{detailEta}}，会同时生成抢票/预订提醒和旅行建议</view>
       </view>
     </block>
   </block>
