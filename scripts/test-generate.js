@@ -175,6 +175,62 @@ ok(weird.days[2].moves[0].endTime === '03:00' && weird.days[2].moves[0].startTim
   '到达时刻倒推会退到前一天时：只锁到达时刻，发车时刻不乱改',
   weird.days[2].moves[0].startTime + '-' + weird.days[2].moves[0].endTime);
 
+// 5f. 行李规则兜底：换住处不能把行李留在酒店；寄了必须提醒取回
+//    （提示词里写了规矩，但 LLM 会偷懒或写反，这层是确定性修补）
+const lugOutline = {
+  days: [
+    { date: '2026-10-01', city: '桂林', overnight: '桂林市区（两江四湖片区）' },
+    { date: '2026-10-02', city: '阳朔', overnight: '阳朔' },
+  ],
+};
+const lug = (items) => P.enforceLuggageRules(
+  items.map((x) => Object.assign({}, x)), lugOutline);
+
+ok(P.samePlace('桂林市区（两江四湖片区）', '桂林'), '地点归一化：括号补注不影响同一基地判定');
+
+let r1 = lug([
+  { dayIndex: 1, startTime: '08:00', endTime: '08:30', activity: '退房，把大件行李寄存在酒店前台', category: 'hotel' },
+  { dayIndex: 1, startTime: '09:00', endTime: '12:00', activity: '前往阳朔', category: 'transport' },
+]);
+ok(/退房请带走全部行李/.test(r1[0].note || ''),
+  '换住处却把行李留在酒店 → 备注纠正为「退房带走全部行李」', r1[0].note);
+ok(!/取回寄存的行李/.test(r1[1].note || ''),
+  '已纠正成"带走"的寄存，不会再自相矛盾地喊他回来取', r1[1].note);
+
+let r2 = lug([
+  { dayIndex: 1, startTime: '08:00', endTime: '09:00', activity: '在酒店吃早餐', category: 'food' },
+  { dayIndex: 1, startTime: '09:00', endTime: '12:00', activity: '前往阳朔', category: 'transport' },
+]);
+ok(/退房请带走全部行李/.test(r2[0].note || ''),
+  '换住处却整天没提行李 → 早上第一条补上提醒', r2[0].note);
+
+let r3 = P.enforceLuggageRules([
+  { dayIndex: 1, startTime: '08:00', endTime: '08:30', activity: '退房，去西街逛逛', category: 'hotel', note: '' },
+], { days: [{ overnight: '阳朔' }, { overnight: '阳朔' }] });
+ok(!/退房请带走全部行李/.test(r3[0].note || ''),
+  '当晚回同一家酒店：不强行加行李提醒（行李本来就留在房间里）', r3[0].note);
+
+let r4 = lug([
+  { dayIndex: 1, startTime: '10:00', endTime: '10:10', activity: '在游客中心寄存行李', category: 'other' },
+  { dayIndex: 1, startTime: '10:10', endTime: '12:00', activity: '游览景区', category: 'sight' },
+  { dayIndex: 1, startTime: '12:00', endTime: '13:00', activity: '前往阳朔西街', category: 'transport', startLocation: '景区', endLocation: '阳朔西街' },
+]);
+ok(/取回寄存的行李/.test(r4[2].note || ''),
+  '景区寄存行李后，离开的那一条提醒取回', r4[2].note);
+
+let r5 = lug([
+  { dayIndex: 1, startTime: '10:00', endTime: '10:10', activity: '在游客中心寄存行李', category: 'other' },
+  { dayIndex: 1, startTime: '10:10', endTime: '12:00', activity: '游览景区', category: 'sight' },
+  { dayIndex: 1, startTime: '12:00', endTime: '13:00', activity: '取回行李后前往阳朔西街', category: 'transport', startLocation: '景区', endLocation: '阳朔西街' },
+]);
+ok(!/取回寄存的行李/.test(r5[2].note || ''),
+  '模型自己写了"取回行李" → 不重复追加', r5[2].note);
+
+let r6 = P.enforceLuggageRules([
+  { dayIndex: 2, startTime: '08:00', endTime: '09:00', activity: '吃早餐', category: 'food' },
+], { days: [{ overnight: '阳朔' }, { overnight: '阳朔' }, { overnight: '返程' }] });
+ok(/今天返程/.test(r6[0].note || ''), '返程日的行李提醒改成"今天返程"口吻', r6[0].note);
+
 // 6. 失败天重试链路（不调真实 LLM：把 llm.chatWithRetry 换成假实现）
 //
 //    背景：之前某天细化失败会被直接排除在续跑队列外，partial=false 就结束了，
@@ -266,8 +322,15 @@ return (async () => {
   // 点名地点必须全部进大纲（Tiger 实锤：龙脊梯田曾被 LLM 默默丢掉）
   const mustVisit = P.normalizeInput(INPUT).mustVisit;
   const outlineJson = JSON.stringify(phase1.outline);
+  // 用"词干"比对：用户写的「明仕庄园」和地图通用名「明仕田园」是同一个地方，
+  // 模型按通用名写反而更利于导航，不能算漏——全等比对会误报
+  const stemOf = (s) => String(s || '')
+    .replace(/(庄园|田园|景区|风景区|名胜区|公园|古镇|古村|古寨|度假区|自然保护区|旅游区)$/, '')
+    .trim();
   mustVisit.forEach((name) => {
-    ok(outlineJson.includes(name), `大纲包含点名地点「${name}」`);
+    const stem = stemOf(name);
+    const hit = outlineJson.includes(name) || (stem.length >= 2 && outlineJson.includes(stem));
+    ok(hit, `大纲包含点名地点「${name}」${hit ? '' : `（词干「${stem}」也没匹配上）`}`);
   });
 
   // 去程开始 / 返程到达时刻必须落在大纲里（代码兜底对齐，不是靠 LLM 自觉）
@@ -369,6 +432,27 @@ return (async () => {
     }
   }
   ok(emptyFirst.length === 0, '每天第一条都有起点（兜底已补齐）', emptyFirst.join('；'));
+
+  // 行李：换住处的天必须交代行李怎么走；只要寄存了就必须有取回提醒
+  const lugMissing = [];
+  const lugNoPickup = [];
+  for (let d = 0; d < outlineDays.length; d++) {
+    const dayItems = plan.items.filter((it) => it.dayIndex === d)
+      .sort((a, b) => String(a.startTime).localeCompare(String(b.startTime)));
+    if (!dayItems.length) continue;
+    const tonight = outlineDays[d].overnight || outlineDays[d].city || '';
+    const lastNight = d > 0 ? (outlineDays[d - 1].overnight || outlineDays[d - 1].city || '') : '';
+    if (!lastNight || P.samePlace(lastNight, tonight)) continue;   // 只查换住处的天
+    const txt = dayItems.map((it) => `${it.activity || ''} ${it.note || ''}`).join(' ');
+    if (!/行李/.test(txt)) lugMissing.push(`第${d + 1}天`);
+    if (/寄存|存放|存包/.test(txt)
+      && !/取回|取件|拿回|领回/.test(txt)
+      && !/退房请带走全部行李/.test(txt)) lugNoPickup.push(`第${d + 1}天`);
+    dayItems.filter((it) => /行李/.test(`${it.activity || ''}${it.note || ''}`))
+      .forEach((it) => console.log(`  [第${d + 1}天 ${it.startTime}] ${it.activity}${it.note ? ' ｜ ' + it.note : ''}`));
+  }
+  ok(lugMissing.length === 0, '换住处的每一天都交代了行李怎么走', lugMissing.join('；'));
+  ok(lugNoPickup.length === 0, '寄存行李的天都有「取回」提醒', lugNoPickup.join('；'));
 
   console.log('\n闹钟清单：');
   (plan.alarms || []).forEach((a) => {

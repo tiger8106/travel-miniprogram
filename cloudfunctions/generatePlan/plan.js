@@ -190,7 +190,8 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
    - 相邻城市间移动尽量控制在 3 小时内；需要更久的，安排在整天里并给出具体班次与运行时长。
    - 同一城市的景点连片玩完再换下一城，避免同城反复往返。
 0.1 **按真实地理方位聚类，绝不南北来回跑**：先按实际地理位置把目的地分组（例：龙脊梯田在桂林北面约 2.5 小时车程，阳朔/兴坪在桂林南面，明仕田园/德天瀑布在桂西南崇左），**同一方位的景点连片玩完再去下一方位**。一般规律：先去离主基地最远的一端玩（如先去北面的龙脊），回到主基地后再顺着返程方向一路玩过去（南面的阳朔→更南的崇左/德天），让整条线只有"前进"没有"回头"。
-0.2 **住宿闭环（铁律）**：每一天的 ov（当晚住宿地）就是**第二天早上出发的地方**，两天之间不许断链。同一片区的多天写**同一个 ov**（同一家酒店连住，如"桂林市区（两江四湖片区）"连住两晚）；中途去远郊景区（如山中梯田）就近住一晚，大行李寄存在基地酒店（写进 n 提示），回来续住同一家。禁止出现"昨晚住 A，第二天一早却从 B 出发"的安排。
+0.2 **住宿闭环（铁律）**：每一天的 ov（当晚住宿地）就是**第二天早上出发的地方**，两天之间不许断链。同一片区的多天写**同一个 ov**（同一家酒店连住，如"桂林市区（两江四湖片区）"连住两晚），一个基地辐射周边景点，别天天换酒店搬行李。禁止出现"昨晚住 A，第二天一早却从 B 出发"的安排。
+   0.2.1 **行李随人走（铁律，为游客的方便着想）**：**只要当晚不回昨晚那家酒店（ov 与前一天不同），大件行李就必须随身走**，绝不允许"把大件行李寄存在 A 酒店、人去 B 住"——那等于逼游客折返取件。换住处那天的正确走法：退房带走行李 → 抵达新住宿地后**先到酒店放行李/寄存前台，再轻装出门玩**；若当天先去景区，行李随身带到景区，用游客中心的寄存处/存包柜，并在当天提示里写明"离开时取回行李"。
 0.3 **一个基地管一片**：同一片景点（如阳朔的西街/遇龙河/十里画廊/兴坪）住在同一个基地辐射游览，不要每天换酒店搬行李；能当天往返的远景点就当天往返。
 0.4 **交通+游览二合一的段优先这样串**：游船/观光列车这类"坐上去本身就是游览"的交通（如漓江游船桂林→阳朔），直接作为当天的转移方式（mv 的 m 填 ship，同时写进 hl），下船即开始玩，**不要"游完再原路坐车回来、再重新坐车过去"**。
 1. ds 恰好 ${p.days} 天，日期从 ${p.startDate} 连续到 ${p.endDate}，每天一个元素，顺序递增。
@@ -289,6 +290,109 @@ function enforceDayStartLocation(items, outline) {
       String(a.startTime || '').localeCompare(String(b.startTime || '')))[0];
     if (first && !String(first.startLocation || '').trim()) first.startLocation = prevOv;
   });
+  return items;
+}
+
+/** 两个住宿地名是不是同一个地方（去掉括号补注与行政后缀再比，允许互相包含） */
+function samePlace(a, b) {
+  const norm = (s) => String(s || '')
+    .replace(/[（(][^）)]*[）)]/g, '')   // 去掉"（两江四湖片区）"这类补注
+    .replace(/[\s，,、·]/g, '')
+    .replace(/(市区|市|县|区|镇)+$/, '');
+  const x = norm(a);
+  const y = norm(b);
+  if (!x || !y) return false;
+  return x === y || x.includes(y) || y.includes(x);
+}
+
+/**
+ * 行李逻辑兜底
+ *
+ * 提示词里已经写了规矩，但 LLM 常偷懒（整天不提行李）或写反（换住处仍把行李
+ * 留在上一家酒店）。这里做确定性修补，只往 note 里追加提醒，不动 activity 和时间线：
+ *   ① 换住处却写了"把行李寄存在酒店前台" → 纠正为"退房带走全部行李"；
+ *   ② 换住处但整天没提行李 → 早上第一条补一句；
+ *   ③ 任何"寄存行李"之后没人提醒取回 → 在离开那一条补"取回行李"。
+ */
+function enforceLuggageRules(items, outline) {
+  const days = asArray(outline && outline.days);
+  if (!days.length || !asArray(items).length) return items;
+
+  const byDay = new Map();
+  asArray(items).forEach((it) => {
+    const di = Number(it.dayIndex || 0);
+    if (!byDay.has(di)) byDay.set(di, []);
+    byDay.get(di).push(it);
+  });
+
+  const TIP_PICKUP = '离开前记得取回寄存的行李';
+
+  byDay.forEach((list, di) => {
+    if (!list.length) return;
+    const today = days[di] || {};
+    const prevDay = di > 0 ? days[di - 1] : null;
+    const tonight = String(today.overnight || today.city || '');
+    const lastNight = prevDay ? String(prevDay.overnight || prevDay.city || '') : '';
+    const changedBase = !!lastNight && !samePlace(lastNight, tonight);
+    const TIP_TAKE = /返程|回家|返回/.test(tonight)
+      ? '今天返程，退房请带走全部行李（行李随人走）'
+      : '今晚不回这家酒店，退房请带走全部行李（行李随人走）';
+
+    const textOf = (it) => `${it.activity || ''} ${it.note || ''}`;
+    const hasLuggage = (it) => /行李|箱子|大件/.test(textOf(it));
+    // 只把"真的把行李存下了"当成寄存：activity 里写了寄存动作，或备注里明确写了"寄存行李"。
+    // 「码头有行李寄存柜」这种顺口一提不算——否则会莫名其妙冒出一条"记得取回行李"。
+    const isStore = (it) => (/寄存|存放|存包/.test(String(it.activity || '')) && hasLuggage(it))
+      || /寄存(大件)?行李|存放(大件)?行李|行李寄存/.test(String(it.note || ''));
+    const isPickup = (it) => /取回|取件|拿回|领回/.test(textOf(it)) && hasLuggage(it);
+    const appendNote = (it, tip) => {
+      if (!it) return false;
+      const cur = String(it.note || '');
+      if (cur.includes(tip)) return false;
+      it.note = cur ? `${cur.replace(/[；;]\s*$/, '')}；${tip}` : tip;
+      return true;
+    };
+
+    // ①② 换住处：行李必须随人走
+    if (changedBase) {
+      list.forEach((it) => {
+        if (!isStore(it)) return;
+        // 景区/车站/机场的临时寄存是合理操作，别误伤
+        if (/景区|景点|游客中心|寄存柜|存包|车站|机场|码头/.test(textOf(it))) return;
+        appendNote(it, TIP_TAKE);
+      });
+      if (!list.some(hasLuggage)) {
+        const first = list.slice().sort((a, b) =>
+          String(a.startTime || '').localeCompare(String(b.startTime || '')))[0];
+        appendNote(first, TIP_TAKE);
+      }
+    }
+
+    // ③ 寄存了就得有人喊你取回
+    const storeIdx = list.findIndex(isStore);
+    if (storeIdx < 0) return;
+    // 上面刚判过这条是错的寄存（换住处还留在酒店）→ 已经改成"带走"了，别再喊他回来取
+    if (String(list[storeIdx].note || '').includes('退房请带走全部行李')) return;
+    let reminded = false;
+    for (let i = storeIdx; i < list.length; i++) {
+      if (isPickup(list[i])) { reminded = true; break; }
+    }
+    if (reminded) return;
+    // 找寄存之后第一条"要离开这儿"的条目：有移动、或终点不在寄存地
+    const storePlace = String(list[storeIdx].endLocation || list[storeIdx].startLocation || '');
+    let target = null;
+    for (let i = storeIdx + 1; i < list.length; i++) {
+      const it = list[i];
+      const moved = String(it.endLocation || '').trim()
+        && String(it.endLocation).trim() !== storePlace
+        && String(it.endLocation).trim() !== String(it.startLocation || '').trim();
+      if (it.category === 'transport' || moved) { target = it; break; }
+    }
+    if (!target) target = list[list.length - 1];
+    if (target === list[storeIdx]) return;   // 全天就这一条，别自言自语
+    appendNote(target, TIP_PICKUP);
+  });
+
   return items;
 }
 
@@ -485,6 +589,10 @@ function dayDetailPrompt(p, day, idx, outline) {
   const next = idx < outline.days.length - 1 ? outline.days[idx + 1] : null;
   const isFirst = idx === 0;
   const isLast = idx === outline.days.length - 1;
+  // 行李怎么走，取决于今晚回不回昨晚那家酒店（换住处 = 行李必须随身）
+  const tonight = day.overnight || day.city || '';
+  const lastNight = prev ? (prev.overnight || prev.city || '') : '';
+  const sameBase = samePlace(lastNight, tonight);
 
   const block =
     `【旅行需求】${profileText(p)}\n\n` +
@@ -523,8 +631,14 @@ dayIndex 全部填 ${idx}。
     - 不要自作主张把火车改飞机、把飞机改火车，也不要改车次和时刻；即便你觉得另一种方式更快也不行，这是用户的选择。
 ${/高铁|动车/.test(p.transport) ? '12. 用户交通偏好是「高铁/动车优先」：后续所有城际段一律按高铁或动车安排（优先高铁，没有合适高铁就走动车/城际），不要生成任何航班。' : ''}
 13. **activity 里只写"要做什么"，禁止写你的推理过程**：不要出现"注：根据大纲…""此处假设…""若用户…""我无法/我需要"这类自我纠错或向我的解释。这段文字会原样显示在用户的行程里，写了就很难看。
-14. **住宿闭环（铁律）**：昨晚住哪，今天第 1 条就从哪出发——${prev ? `昨晚住「${prev.overnight || prev.city}」，第 1 条应写成"从该酒店出发/退房寄存行李"，startLocation 填它` : '今天从出发地启程'}；当天最后 1 条必须是"回到${day.overnight || day.city}住宿地休息"（category=hotel，endLocation 填住宿地）。绝不允许昨晚住 A 今早却凭空从 B 出发、或晚上收在 C 但住宿地是 D。若今天去远郊当天往返，可在早上加一条"寄存大行李于前台"（note 里说明回来续住）。
-15. **地点名要用地图搜得到的通用叫法**：startLocation / endLocation 只写地点真名，别自造"XX公园""XX景区大门"这种后缀（"象鼻山"不要写成"象鼻山公园"——地图上真有另一个"象鼻山公园"在别的省，导航会导错）；也不要带括号补注、不要写"附近/周边"这类模糊词。车站写标准站名（如"桂林北站""南宁东站"）。`;
+14. **住宿闭环（铁律）**：昨晚住哪，今天第 1 条就从哪出发——${prev ? `昨晚住「${prev.overnight || prev.city}」，第 1 条应写成"从该酒店出发"，startLocation 填它` : '今天从出发地启程'}；当天最后 1 条必须是"回到${day.overnight || day.city}住宿地休息"（category=hotel，endLocation 填住宿地）。绝不允许昨晚住 A 今早却凭空从 B 出发、或晚上收在 C 但住宿地是 D。${sameBase ? '当晚回同一家酒店时，早上可加一条"大件行李留在房间/寄存前台，轻装出发"（note 写明回来续住）。' : '**今晚不回昨晚这家酒店，行李必须随身走**（见第 16 条）。'}
+15. **地点名要用地图搜得到的通用叫法**：startLocation / endLocation 只写地点真名，别自造"XX公园""XX景区大门"这种后缀（"象鼻山"不要写成"象鼻山公园"——地图上真有另一个"象鼻山公园"在别的省，导航会导错）；也不要带括号补注、不要写"附近/周边"这类模糊词。车站写标准站名（如"桂林北站""南宁东站"）。` +
+    `\n16. **行李处理（铁律，为游客方便着想，必须落实到今天的行程条目里）**：昨晚「${lastNight || '出发地'}」→ 今晚「${tonight || '返程'}」——${sameBase
+      ? '**今晚回同一家酒店**：大件行李留在房间或寄存在前台，轻装出门，晚上回来续住同一家。'
+      : `**今晚不回昨晚那家酒店，行李必须随身走**：\n    - 早上写一条"退房，携带全部行李出发"；**禁止写"把大件行李寄存在${lastNight || '酒店'}前台"**——今晚不回来取，寄存等于逼游客折返取件。\n    - ${isLast
+        ? '返程日行李全程随身；需要轻装时用车站/机场的寄存柜，上车前记得取回。'
+        : `抵达「${tonight}」后**先到当晚酒店放行李**（写一条"到酒店放行李、轻装出门"，category=hotel），再出去游玩。`}`
+    }\n    - 带着行李游玩时：写一条"在游客中心/寄存柜寄存行李"，并在**离开景区前往下一站的那一条**的 note 里写明"取回寄存的行李，别落下"。`;
 
   return [
     { role: 'system', content: SYS_PROMPT },
@@ -1082,7 +1196,9 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
   console.log('[generatePlan] 细化完成 %dms, 原始条目=%d, partial=%s',
     Date.now() - t1, detail.items.length, detail.partial);
 
-  const items = enforceDayStartLocation(sanitizeItems(detail.items), outline);
+  // 行李规则放在 sanitize 之后：清洗会删条目（可能把"寄存行李"那条删掉，
+  // 也可能把提醒取回的那条删掉），删完再看一遍才是最终要展示的结果
+  const items = enforceLuggageRules(enforceDayStartLocation(sanitizeItems(detail.items), outline), outline);
 
   // 地理编码消歧要用的每天城市 + 地址→天下标映射。
   // savePlan 的 cityOf 靠它们给高德传 city 参数——之前只消费不生产，
@@ -1174,5 +1290,5 @@ module.exports = {
   normalizeInput, sanitizeAlarmCandidates, buildFallbackAlarms, fallbackAlarms,
   shiftDate, dayDiff, isHolidayRange,
   parseDestList, missingMustVisit, placeStem,
-  applyTripEdgeTimes, enforceDayStartLocation, toMin, fmtMin,
+  applyTripEdgeTimes, enforceDayStartLocation, enforceLuggageRules, samePlace, toMin, fmtMin,
 };

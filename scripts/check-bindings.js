@@ -265,5 +265,14 @@ ok('upload：授权没生效只提示一次并给排查路径', /_privacyWarned/
 ok('弹窗把结果交回微信（没有 pending 也不卡死）', /privacy\.finish\(/.test(popupJs));
 ok('app.js 把拦截回调交给 privacy.onNeed', /wx\.onNeedPrivacyAuthorization\(\(resolve\) => privacy\.onNeed/.test(appJs));
 
+// ---------- ⑬ 行李规则：换住处必须随身带，景区寄存必须提醒取回 ----------
+const plWxml2 = fs.readFileSync(path.join(MP, 'pages/planner/planner.wxml'), 'utf8');
+ok('返程到达时间说明不再提"AI 倒推发车时间"', !/AI 会据此倒推发车时间/.test(plWxml2));
+ok('大纲 prompt 写清"行李随人走"', /行李随人走/.test(planJs));
+ok('细化 prompt 按住宿地判定行李走法（第 16 条）', /16\. \*\*行李处理/.test(planJs) && /sameBase/.test(planJs));
+ok('换住处禁止把行李留在上一家酒店', /禁止写"把大件行李寄存在/.test(planJs));
+ok('行李规则有代码兜底且挂在 sanitize 之后', /function enforceLuggageRules/.test(planJs)
+  && /enforceLuggageRules\(enforceDayStartLocation\(sanitizeItems/.test(planJs));
+
 console.log(failed ? `\n${failed} 项失败 ✗` : '\n全部通过 ✓');
 process.exit(failed ? 1 : 0);

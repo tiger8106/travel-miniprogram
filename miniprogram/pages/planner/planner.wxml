@@ -56,7 +56,7 @@
         <view class="days-badge">共 {{daysText}}</view>
         <view class="tip">
           <view>去程开始时间 = 从「{{origin || '出发城市'}}」出发（发车/起飞）的时刻</view>
-          <view>返程到达时间 = 最后一天回到「{{origin || '出发城市'}}」的时刻，AI 会据此倒推发车时间</view>
+          <view>返程到达时间 = 最后一天回到「{{origin || '出发城市'}}」的时刻</view>
         </view>
       </view>
 
