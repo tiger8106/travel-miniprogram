@@ -161,6 +161,20 @@ function profileText(p) {
 // ① 大纲
 // ============================================================
 
+/**
+ * 大纲体检：到站后还要长途打车的段（通用判定，不涉及任何具体城市/车站）。
+ * 只告警——改站交给模型的复核请求，代码不写死车站知识（写死了换个城市就失效）。
+ */
+function warnDetourTransfers(outline) {
+  const detours = detourTransfers(outline);
+  if (detours.length) {
+    console.warn('[generatePlan] 到站后仍需长途打车的段 %d 处：%s',
+      detours.length,
+      detours.map((x) => `第${x.dayIndex + 1}天 ${x.move.from}→${x.move.to}（${x.move.transfer}）`).join('；'));
+  }
+  return outline;
+}
+
 async function genOutline(p) {
   // 交通偏好的硬约束：用户选了「高铁/动车优先」就全程不许飞（长距离也一样），
   // 改走近目的地的高铁站 + 短途接驳；选了自驾/包车就别排航班。
@@ -184,7 +198,7 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
 
 # 输出格式（严格 JSON，短键名）
 {"t":"行程标题","s":"一句话路线概览","nt":[{"d":"MM-DD","c":"住宿城市"}],"ds":[
-{"d":"YYYY-MM-DD","city":"城市","t":"当天主题短语","mv":[{"f":"出发站","to":"到达站","m":"train/plane/car/bus/ship","c":"车次/航班号","s":"HH:mm","e":"HH:mm"}],"hl":["必玩1","必玩2","必玩3"],"ml":["餐1","餐2"],"ov":"当晚住宿城市或片区","h":"推荐酒店","n":"关键提示（30字内）"}]}
+{"d":"YYYY-MM-DD","city":"城市","t":"当天主题短语","mv":[{"f":"出发站","to":"到达站","m":"train/plane/car/bus/ship","c":"车次/航班号","s":"HH:mm","e":"HH:mm","st":"到站后到当天首个目的地的接驳方式与耗时"}],"hl":["必玩1","必玩2","必玩3"],"ml":["餐1","餐2"],"ov":"当晚住宿城市或片区","h":"推荐酒店","n":"关键提示（30字内）"}]}
 
 # 硬性要求
 0. **城市串联原则（最重要）**：把出发地和所有目的地按「总路程最短 + 换乘最少 + 单程耗时最短」串成一条线。
@@ -206,6 +220,11 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
 3.1 ${p.goTime ? `**去程开始时间已由用户指定**：${p.goTime} 是用户**离开${p.origin || '出发地'}（家门口）的时刻**，不是发车时刻！第一天的大交通发车时刻 = ${p.goTime} + 市内接驳约 40 分钟 + 安检候车（高铁提前 45 分 / 飞机提前 2 小时），把推算出的发车/起飞时刻写进 mv.s（e 按实际运行时长推算）。` : '去程班次请给出一个具体、合理的发车/起飞时刻（s/e 都要精确到分钟）。'}
 3.2 ${p.backTime ? `**返程到家时间已由用户指定**：${p.backTime} 是用户**回到${p.origin || '出发地'}（到家）的时刻**，不是发车也不是到站！最后一天的大交通 mv.e = ${p.backTime} 减去市内返家接驳约 40 分钟（到站时刻），s 按实际运行时长往前倒推。` : '返程班次请给出合理的发车/起飞时刻与到达时刻（精确到分钟）。'}
 4. mv 只写城际大交通：**s = 发车/起飞时刻，e = 到达时刻**；火车给参考车次走向（如 G2249），飞机给航线；市内交通不写。
+   4.1 **大交通到发站选「下车后接驳最短」的站（铁律）**：同一目的地常有多个车站/码头/机场，选站标准是"**下车（机）后到当天最终景点或今晚住宿地的接驳距离最短**"，不是"车次最多、站名最大、和城市同名就选它"。
+   判断顺序：① 先定当天最终要去的景点在哪个片区、今晚住哪；② 倒推哪个车站离它最近、有轨道交通或能步行直达；③ 同城/都市圈内的市域铁路、城际线、机场快线优先——班次密、票价低、不堵车，比"坐到远站再打车折回来"又快又省。
+   **禁止舍近求远**：如果某个站下车后还要长距离打车折返才能到当天目的地，就是选错了站，必须换成更近的站（哪怕车次少一点）。
+   4.2 **每段 mv 都要给 st（到站/下机后到当天首个目的地的接驳方式与耗时，如"地铁30分钟""步行8分钟""打车20分钟"）**：st 是你自己检验选站是否合格的尺子。
+   判据：**st 里写"打车/网约车 ≥25 分钟"就说明这个站选在了反方向**（下车还得花钱绕回目的地），必须重选更近的站，或改成"同城轨道交通/市域铁路 + 短驳"的组合，把 st 变成步行或地铁；轨交/步行 1 小时以内都算合格（大城市坐地铁 40 分钟到酒店很正常，不算绕路）。确实没有更近的站才保留，并在当天 n 里说明原因。
 5. hl 每天 3-4 个**具体景点/片区名称**，别写"逛逛市区"这种废话；城市漫游日（如"成都市区"）也要点名具体街区/景点（例：宽窄巷子、人民公园、武侯祠、太古里），兼顾${p.pace}节奏${p.interests.length ? '和偏好' : ''}。
    5.1 **地名用地图搜得到的通用叫法**：写"象鼻山"就别写成"象鼻山公园"（外省真有同名公园，导航会导过去），不要自造"XX景区大门""XX游客中心"这类后缀，也不要带括号补注。
 6. ${p.mustGo ? `用户必去：${p.mustGo}，必须排进合适的一天。` : ''}${p.extra ? `特殊要求：${p.extra}` : ''}
@@ -213,6 +232,7 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
 7. ${p.budget === '经济' ? '住性价比档，餐饮接地气；' : p.budget === '品质' ? '住高品质酒店/度假村，餐饮选口碑正餐；' : '住舒适型酒店，餐饮兼顾特色与性价比；'}推荐写类型/片区+代表菜，不要编造具体门牌地址。
    7.1 **每晚推荐一家具体酒店（h 字段，按用户预算「${p.budget}」档挑选）**：写真实存在、地图能搜到的连锁或口碑酒店名（如"桂林漓江大瀑布饭店"），并符合用户的节奏与兴趣（亲子选带泳池/家庭房，情侣选江景/设计感，美食偏好选近夜市）。同一 ov 连住多晚就写同一家；确实没有把握的就写「片区+档次」（如"两江四湖片区舒适型酒店"），**不要编造不存在的酒店名**。最后一天（返程日）h 留空。
    7.2 **ml 一日三餐都要点名**：写具体店名或"片区/景区+代表菜"（例："午餐：陈麻婆豆腐（青羊店）""晚餐：南桥附近尤兔头"），不要只写"午餐""晚餐"；没有把握的店名就写"片区+招牌菜"（如"晚餐：古尔沟片区藏式汤锅"）。
+   7.3 **市内/短途交通按预算选型**：预算「经济」→ 3km 内步行、中长途地铁/公交优先，打车只留给轨道交通到不了的地方；「舒适」→ 地铁优先，2~6km 跨区、赶时间或夜间打车；「品质」→ 以打车为主。选定的基调写进当天 n 提示（如"市内地铁出行为主"）。
 8. ov 写住宿城市或片区（最后一天写"返程"）；h 每晚一家；nt 长度 = ${p.days - 1} 晚。
 9. 所有文本简体中文，n 字段控制在 30 字以内。只输出 JSON 对象。`;
 
@@ -231,33 +251,41 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
   // 点名地点兜底：LLM 偶尔会"自作主张"丢掉它认为不顺路的点
   // （用户点名"桂林、龙脊梯田、阳朔…"，结果整份大纲没有龙脊梯田——实锤踩过）。
   // 生成后对照清单逐个查，漏了且时间还够就发一次修订请求补回来。
-  // 同一条修订链路也管"跨天重复游玩"（毕棚沟被排了两天——实锤踩过）。
+  // 同一条修订链路也管"跨天重复游玩"（毕棚沟被排了两天——实锤踩过），
+  // 以及"到站后还得长途打车"（站选在反方向、舍近求远——实测踩过）。
+  // 这三类都用同一套通用判据，代码里不写任何具体城市/车站的知识。
   const missing = missingMustVisit(p, outline);
   const dups = duplicateHighlights(outline);
-  if (missing.length || dups.length) {
+  const detours = detourTransfers(outline);
+  if (missing.length || dups.length || detours.length) {
     if (missing.length) console.warn('[generatePlan] 大纲漏掉用户点名地点: %s', missing.join('、'));
     if (dups.length) console.warn('[generatePlan] 大纲跨天重复游玩: %s',
       dups.map((d) => `${d.name}(第${d.days.map((x) => x + 1).join(',')}天)`).join('、'));
+    if (detours.length) console.warn('[generatePlan] 大纲有到站后仍需长途打车的段: %s',
+      detours.map((x) => `第${x.dayIndex + 1}天 ${x.move.from}→${x.move.to}（${x.move.transfer}）`).join('；'));
     // 修订现在只吐"改动的那几天"，几百 token 就够，12s 足够跑完
     if (outlineDeadline - Date.now() > 12 * 1000) {
-      const repaired = await repairOutline(p, outline, missing, dups, outlineDeadline);
+      const repaired = await repairOutline(p, outline, missing, dups, detours, outlineDeadline);
       if (repaired) {
         const stillMissing = missingMustVisit(p, repaired);
         const stillDups = duplicateHighlights(repaired);
-        // 采纳条件：漏点全补齐，且重复问题严格减少（Math.max(1,·) 让
-        // "原本没有重复"也要求修订后仍是 0）
-        if (!stillMissing.length && stillDups.length < Math.max(1, dups.length)) {
-          console.log('[generatePlan] 修订成功（剩余：漏点 %d，重复 %d）', stillMissing.length, stillDups.length);
-          return repaired;
+        const stillDetours = detourTransfers(repaired);
+        // 绕路段只要求"不恶化"：这条体检是概率性的（模型自报耗时不准），
+        // 不能因为它没改善就把"漏点补齐/去重"这些确定性修复一起否掉
+        const okDetour = stillDetours.length <= detours.length;
+        if (!stillMissing.length && stillDups.length < Math.max(1, dups.length) && okDetour) {
+          console.log('[generatePlan] 修订成功（剩余：漏点 %d，重复 %d，绕路段 %d）',
+            stillMissing.length, stillDups.length, stillDetours.length);
+          return warnDetourTransfers(repaired);
         }
-        console.warn('[generatePlan] 修订后仍有问题（漏 %d，重复 %d），保留原大纲',
-          stillMissing.length, stillDups.length);
+        console.warn('[generatePlan] 修订后仍有问题（漏 %d，重复 %d，绕路段 %d），保留原大纲',
+          stillMissing.length, stillDups.length, stillDetours.length);
       }
     } else {
       console.warn('[generatePlan] 剩余时间不足，跳过修订，保留原大纲');
     }
   }
-  return outline;
+  return warnDetourTransfers(outline);
 }
 
 // ---- 时刻工具（分钟制，用于把大交通对齐到用户指定的去/返程时刻）----
@@ -1142,6 +1170,7 @@ function normalizeOutlineJson(raw, p) {
     moves: asArray(d.mv).map((m) => ({
       from: m.f || '', to: m.to || '', mode: m.m || '', code: m.c || '',
       startTime: m.s || '', endTime: m.e || '',
+      transfer: String(m.st || '').trim(),   // 到站后的接驳方式与耗时（选站是否合格的尺子）
     })),
     highlights: asArray(d.hl).map((x) => String(x || '').trim()).filter(Boolean),
     meals: asArray(d.ml).map((x) => String(x || '').trim()).filter(Boolean),
@@ -1167,7 +1196,7 @@ function outlineToShortJson(outline) {
     ds: asArray(outline.days).map((d) => ({
       d: d.date, city: d.city, t: d.theme,
       mv: asArray(d.moves).map((m) => ({
-        f: m.from, to: m.to, m: m.mode, c: m.code, s: m.startTime, e: m.endTime,
+        f: m.from, to: m.to, m: m.mode, c: m.code, s: m.startTime, e: m.endTime, st: m.transfer,
       })),
       hl: d.highlights, ml: d.meals, ov: d.overnight, n: d.note,
     })),
@@ -1234,6 +1263,44 @@ function duplicateHighlights(outline) {
     .map((g) => ({ name: g.members[0].stem, days: [...g.days].sort((a, b) => a - b) }));
 }
 
+/** 从"地铁30分钟""打车约 45 分钟""步行 1 小时 10 分"这类接驳描述里读出分钟数（通用，不认地名） */
+function transferMinutes(text) {
+  const s = String(text || '');
+  const hm = /(\d+)\s*(?:小时|个?钟头)\s*(?:(\d+)\s*分(?:钟)?)?/.exec(s);
+  if (hm) return (+hm[1]) * 60 + (+(hm[2] || 0));
+  const m = /(\d+)\s*分(?:钟)?/.exec(s);
+  return m ? +m[1] : null;
+}
+
+/** 接驳描述里说的是不是"打车类"（打车/网约车/包车/自驾）；轨道交通与步行不算绕路 */
+function isCarTransfer(text) {
+  return /打车|出租车|网约|包车|租车|自驾|驾车/.test(String(text || ''));
+}
+
+/**
+ * 找出"到站后还要长途打车"的大交通段（通用体检：只看接驳方式与耗时，不认任何地名/车站）。
+ * 判据：到站后还得打车 carLimit 分钟以上才到当天目的地 → 站多半选在了反方向（舍近求远）；
+ * 轨交/步行本身就便宜不绕路，1 小时内都算正常（大城市地铁 40 分钟到酒店很常见）。
+ */
+function detourTransfers(outline, carLimit) {
+  // 阈值放宽到 15 分钟：模型自报的接驳耗时常常偏短（实测报"打车20分钟"，
+  // 细化出来是 30 分钟），放宽一点才拦得住；验收端还要求"必须真的变好"才采纳，
+  // 所以宁可多问一次，也别漏掉真正的绕路。
+  const lim = carLimit || 15;
+  const out = [];
+  asArray(outline && outline.days).forEach((d, i) => {
+    asArray(d.moves).forEach((m) => {
+      const mins = transferMinutes(m.transfer);
+      if (mins == null) return;
+      const byCar = isCarTransfer(m.transfer);
+      if ((byCar && mins >= lim) || mins > 60) {
+        out.push({ dayIndex: i, move: m, minutes: mins, byCar });
+      }
+    });
+  });
+  return out;
+}
+
 /**
  * 修订大纲：把漏掉的点名地点排进去 / 清掉跨天重复游玩的景点，
  * 其余安排尽量保持不变。
@@ -1246,7 +1313,7 @@ function duplicateHighlights(outline) {
  * 兼容：模型万一还是返回了完整大纲（ds 天数 = 总天数），按整份替换处理。
  * 失败返回 null（保留原大纲）。
  */
-async function repairOutline(p, outline, missing, dups, deadline) {
+async function repairOutline(p, outline, missing, dups, detours, deadline) {
   try {
     const issues = [];
     if (missing.length) {
@@ -1254,6 +1321,9 @@ async function repairOutline(p, outline, missing, dups, deadline) {
     }
     if (dups.length) {
       issues.push(`有景点被跨天重复安排：${dups.map((d) => `「${d.name}」出现在第 ${d.days.map((x) => x + 1).join('、')} 天`).join('；')}。重复的只保留一天，其余那天换成同区域其他不重复的景点`);
+    }
+    if (detours && detours.length) {
+      issues.push(`有以下大交通段"到站后还得长途打车才到当天目的地"（说明站选在了反方向、舍近求远）：${detours.map((x) => `第 ${x.dayIndex + 1} 天 ${x.move.from}→${x.move.to}，到站后${x.move.transfer}`).join('；')}。请为这些天改用离当天最终目的地（景点/住宿）最近的车站/码头/机场——同城市域铁路、城际线、机场快线优先，班次密、票价低、不堵车；交通方式与时刻保持不变，只改到发站（车次跟着改），并把新的到站接驳写进 mv.st（争取变成步行或轨道交通）`);
     }
     const prompt = `下面这份旅行路线大纲有问题：${issues.join('。')}。
 请**只输出需要改动的那几天**（其余天不要输出），把问题修掉。
@@ -1264,11 +1334,11 @@ async function repairOutline(p, outline, missing, dups, deadline) {
 ${JSON.stringify(outlineToShortJson(outline))}
 
 # 输出格式
-{"ds":[{"d":"YYYY-MM-DD","city":"城市","t":"当天主题短语","hl":["必玩1","必玩2","必玩3"],"ov":"当晚住宿","n":"提示（20字内）"}]}
+{"ds":[{"d":"YYYY-MM-DD","city":"城市","t":"当天主题短语","mv":[{"f":"出发站","to":"到达站","m":"train/plane/car/bus/ship","c":"车次/航班号","s":"HH:mm","e":"HH:mm","st":"到站后接驳"}],"hl":["必玩1","必玩2","必玩3"],"ov":"当晚住宿","n":"提示（20字内）"}]}
 
 # 要求
-1. ds 只包含**需要改动的天**（一般 1~2 天就够），d 必须原样抄当前大纲里的日期。
-2. ${missing.length ? `${missing.join('、')} 每一个都必须出现在某天的 city / t / hl 里。` : ''}${dups.length ? `重复景点每个只保留一天，被清掉的那天补上新的、不重复的景点；不要因为去重就把某天改空。` : ''}
+1. ds 只包含**需要改动的天**（一般 1~2 天就够），d 必须原样抄当前大纲里的日期。mv 只在**这段交通需要改到发站**时才填（要改就把该天所有 mv 一起原样带回，别只给一段）。
+2. ${missing.length ? `${missing.join('、')} 每一个都必须出现在某天的 city / t / hl 里。` : ''}${dups.length ? `重复景点每个只保留一天，被清掉的那天补上新的、不重复的景点；不要因为去重就把某天改空。` : ''}${(detours && detours.length) ? '改站的那天：交通方式与时刻保持不变，只改到发站与车次，mv.st 写新的到站接驳（争取步行/轨道交通）；没有更近的站就别改，把理由写进 n。' : ''}
 3. 改动尽量小：能塞进已有某天的 hl 就别重排整条路线，其他天保持原样。住宿闭环别破坏：每晚 ov 保持原样。
 4. 只输出这个 JSON 对象，不要任何解释。`;
     const text = await llm.chatWithRetry([
@@ -1343,6 +1413,7 @@ function dayDetailPrompt(p, day, idx, outline) {
     (asArray(day.moves).length
       ? `【今天的大交通（路线既定）】${asArray(day.moves).map(
           (m) => `${m.from || '?'}→${m.to || '?'} ${m.mode || ''} ${m.code || ''} ${m.startTime || ''}-${m.endTime || ''}`
+            + (m.transfer ? `；到站后接驳：${m.transfer}` : '')
         ).join('；')}\n`
       : '') +
     (day.meals && asArray(day.meals).length ? `餐饮建议：${asArray(day.meals).join('、')}\n` : '') +
@@ -1385,7 +1456,13 @@ ${/高铁|动车/.test(p.transport) ? '12. 用户交通偏好是「高铁/动车
         ? '返程日行李全程随身；需要轻装时用车站/机场的寄存柜，上车前记得取回。'
         : `抵达「${tonight}」后**先到当晚酒店放行李**（写一条"到酒店放行李、轻装出门"，category=hotel），再出去游玩。`}`
     }\n    - 带着行李游玩时：写一条"在游客中心/寄存柜寄存行李"，并在**离开景区前往下一站的那一条**的 note 里写明"取回寄存的行李，别落下"。
-17. **白天不许回酒店睡觉**：15:00 前禁止安排"回酒店休息/午休/回房间"（仅换住处当天的"到酒店放行李/办理入住"除外）。游客白天在外面玩，想歇脚就写景区内的茶座/长椅/观光车，回酒店只属于晚上。`;
+17. **白天不许回酒店睡觉**：15:00 前禁止安排"回酒店休息/午休/回房间"（仅换住处当天的"到酒店放行李/办理入住"除外）。游客白天在外面玩，想歇脚就写景区内的茶座/长椅/观光车，回酒店只属于晚上。
+18. **市内/短途交通按用户预算「${p.budget}」选型（用户预算和偏好优先于个人习惯）**：
+    - 「经济」：3km 内直接步行（transportType=walk）；3km 以上优先地铁/公交（transportType=ride，activity 写清"乘地铁X号线/公交X路 从A到B站"，note 写票价与末班车）；只有轨道交通覆盖不到的路段才打车。
+    - 「舒适」：地铁优先；跨区 2~6km、赶时间（赶车/赶预约）、携带行李或 22 点以后才打车（transportType=car）。
+    - 「品质」：以打车为主（car），地铁只在明显更快时用。
+    - 打车条目在 note 里写预估车费（如"打车约 15-20 元"）；地铁/公交条目在 note 里写票价。带行李换乘时优先打车，别让游客拖着箱子挤地铁。
+    - **【今天的大交通】到达后的市内接驳同样按上面的预算基调选型**；到站离目的地很近时直接写"出站步行前往"（walk），不要动不动就打车。`;
 
   return [
     { role: 'system', content: SYS_PROMPT },
@@ -2109,6 +2186,7 @@ module.exports = {
   applyTripEdgeTimes, enforceDayStartLocation, enforceDayClosure, enforceLuggageRules, enforceMovesAlignment,
   enforceOriginAccess, enforceMorningRoutine, enforceEveningPlan,
   fixMealLabels, enforceNoMiddayHotel, skeletonDayItems, skeletonForEmptyDays,
+  transferMinutes, isCarTransfer, detourTransfers, warnDetourTransfers,
   isRealCode, moveActivityText, isScheduledMove,
   fixDayTimeOverlaps, samePlace, toMin, fmtMin,
 };

@@ -46,7 +46,8 @@ const input = {
     console.log(`    必玩: ${(d.highlights || []).join('、') || '(空)'}`);
     console.log(`    餐饮: ${(d.meals || []).join('、') || '(空)'}`);
     console.log(`    住: ${d.overnight}  酒店: ${d.hotel || '-'}`);
-    (d.moves || []).forEach((m) => console.log(`    交通: ${m.from}→${m.to} ${m.mode} ${m.code} ${m.startTime}-${m.endTime}`));
+    (d.moves || []).forEach((m) => console.log(`    交通: ${m.from}→${m.to} ${m.mode} ${m.code} ${m.startTime}-${m.endTime}`
+      + (m.transfer ? ` ｜到站接驳: ${m.transfer}` : ' ｜到站接驳: (未报)')));
   });
 
   if (process.argv.includes('--nodetail')) return;
@@ -130,6 +131,22 @@ const input = {
     if (hits.length + subHits.length >= 2) good(`「${name}」有 ${hits.length + subHits.length} 条相关游览条目`);
     else bad(`「${name}」游览条目只有 ${hits.length + subHits.length} 条，没真正进去玩`);
   });
+
+  // ⑥ 舍近求远（通用判定，不认具体站名）：
+  //    a) 大纲里"到站后还要长途打车"的段
+  const detours = P.detourTransfers(outline);
+  if (detours.length) bad(`到站后仍需长途打车的段 ${detours.length} 处：${detours.map((x) => `第${x.dayIndex + 1}天 ${x.move.from}→${x.move.to}（${x.move.transfer}）`).join('；')}`);
+  else good('没有"到站后还得长途打车"的段（选站没绕路）');
+  //    b) 细化里实际排出来的"从某站打车 ≥25 分钟才到当天目的地"
+  //       （终点是住宿地/家不算——到站回酒店本来就得坐车，不是站选错了）
+  const isLodging = (s) => /酒店|宾馆|民宿|客栈|公寓|住所|家中|家里/.test(String(s || ''));
+  const wasteful = planItems.filter((it) => it.category === 'transport'
+    && String(it.transportType || '') === 'car'
+    && /站$/.test(String(it.startLocation || ''))
+    && !isLodging(it.endLocation) && !isLodging(it.activity)
+    && (P.toMin(it.endTime) - P.toMin(it.startTime)) >= 25);
+  if (wasteful.length) bad(`到站后长途打车 ${wasteful.length} 条：${wasteful[0].activity}`);
+  else good('没有"下车后长距离打车才到目的地"的段');
 
   console.log(fail ? `\n共 ${fail} 项不通过` : '\n全部通过');
   process.exit(fail ? 1 : 0);

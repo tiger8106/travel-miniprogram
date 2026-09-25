@@ -312,6 +312,26 @@ ok('大纲 prompt：相邻两天核心片区相距超 1 小时必须换基地',
   /必须换基地/.test(planJs) && /来回通勤 4 小时/.test(planJs));
 ok('大纲 prompt：ml 三餐都要点名（店名或片区+招牌菜）',
   /ml 一日三餐都要点名/.test(planJs));
+ok('大纲 prompt：大交通到发站按"下车后接驳最短"选（禁止为车次多舍近求远）',
+  /下车（机）后到当天最终景点或今晚住宿地的接驳距离最短/.test(planJs) && /禁止舍近求远/.test(planJs));
+ok('大纲 prompt：市内/短途交通按预算选型基调写进 n 提示',
+  /7\.3 \*\*市内\/短途交通按预算选型\*\*/.test(planJs) && /基调写进当天 n 提示/.test(planJs));
+ok('细化 prompt：市内/短途交通按预算选型（经济=步行+轨交优先，打车写预估车费）',
+  /18\. \*\*市内\/短途交通按用户预算/.test(planJs) && /打车约 15-20 元/.test(planJs));
+ok('大交通选站：模型自报到站接驳方式+耗时（mv.st），"到站后还得长途打车"判为绕路（通用，不认地名）',
+  /"st":"到站后到当天首个目的地的接驳方式与耗时"/.test(planJs)
+    && /4\.2 \*\*每段 mv 都要给 st/.test(planJs)
+    && /function detourTransfers/.test(planJs)
+    && /function isCarTransfer/.test(planJs)
+    && /warnDetourTransfers\(outline\)/.test(planJs));
+ok('绕路段会触发一次通用复核请求（改站交给模型，方式与时刻不变）',
+  /missing\.length \|\| dups\.length \|\| detours\.length/.test(planJs)
+    && /repairOutline\(p, outline, missing, dups, detours, outlineDeadline\)/.test(planJs)
+    && /到站后还得长途打车才到当天目的地/.test(planJs)
+    && /okDetour/.test(planJs));
+ok('❗代码里不许写死具体地名/车站做特例优化（通用性红线）',
+  !/NEAR_STATION_FIXES|fixNearStations/.test(planJs)
+    && !/离堆公园|犀浦|峨眉山站/.test(planJs));
 ok('goTime 语义 = 离开出发地时刻（大交通发车按接驳+安检预留后移，goTime+85/160）',
   /goMin \+ buffer/.test(planJs) && /\? 160/.test(planJs) && /\? 85/.test(planJs));
 ok('backTime 语义 = 到家时刻（大交通到站 = backTime-40）',

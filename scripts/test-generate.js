@@ -214,6 +214,43 @@ ok(weird.days[2].moves[0].endTime === '02:20' && weird.days[2].moves[0].startTim
   '到达时刻倒推会退到前一天时：只锁到达时刻（到家 03:00 → 到站 02:20），发车时刻不乱改',
   weird.days[2].moves[0].startTime + '-' + weird.days[2].moves[0].endTime);
 
+// 5e+. 选站通用体检：到站后接驳耗时的解析与"接驳过长"判定（不认任何具体地名/车站）
+ok(P.transferMinutes('地铁30分钟') === 30, '接驳耗时：地铁30分钟 → 30', String(P.transferMinutes('地铁30分钟')));
+ok(P.transferMinutes('步行 8 分钟') === 8, '接驳耗时：步行 8 分钟 → 8', String(P.transferMinutes('步行 8 分钟')));
+ok(P.transferMinutes('打车约 45 分钟') === 45, '接驳耗时：打车约 45 分钟 → 45', String(P.transferMinutes('打车约 45 分钟')));
+ok(P.transferMinutes('打车 1 小时 10 分') === 70, '接驳耗时：1 小时 10 分 → 70', String(P.transferMinutes('打车 1 小时 10 分')));
+ok(P.transferMinutes('出站即到') === null, '接驳耗时：没有数字 → null', String(P.transferMinutes('出站即到')));
+const dOutline = {
+  title: 't', summary: 's', nights: [],
+  days: [
+    { date: '2026-10-10', city: 'A市', theme: '游玩', overnight: 'A市', meals: [], note: '',
+      // 轨交 40 分钟：大城市很常见，不算绕路
+      moves: [{ from: '甲站', to: '乙站', mode: 'train', code: 'G1', startTime: '09:00', endTime: '11:00', transfer: '地铁40分钟' }],
+      highlights: ['某景区'] },
+    { date: '2026-10-11', city: 'B市', theme: '游玩', overnight: 'B市', meals: [], note: '',
+      // 到站后还要打车 45 分钟 → 站多半选在了反方向
+      moves: [{ from: '丙站', to: '丁站', mode: 'train', code: 'G2', startTime: '09:00', endTime: '10:00', transfer: '打车45分钟' }],
+      highlights: ['某景区'] },
+    { date: '2026-10-12', city: 'C市', theme: '游玩', overnight: 'C市', meals: [], note: '',
+      moves: [{ from: '戊站', to: '己站', mode: 'train', code: 'G3', startTime: '09:00', endTime: '10:00', transfer: '出站步行5分钟' }],
+      highlights: ['某景区'] },
+  ],
+};
+const detours = P.detourTransfers(dOutline);
+ok(detours.length === 1 && detours[0].dayIndex === 1 && detours[0].minutes === 45 && detours[0].byCar,
+  '只判"到站后还要长途打车"的段（第2天 打车45分钟）', JSON.stringify(detours.map((x) => `${x.dayIndex + 1}天${x.minutes}分`)));
+ok(P.detourTransfers(dOutline).every((x) => x.dayIndex !== 0),
+  '轨交 40 分钟不算绕路（大城市地铁到酒店很正常）');
+ok(P.detourTransfers(dOutline).every((x) => x.dayIndex !== 2), '步行 5 分钟当然不算');
+ok(P.detourTransfers(dOutline, 60).length === 0, '阈值放宽到 60 分钟就不再报（阈值可调）');
+ok(P.detourTransfers({
+  days: [{ date: '2026-10-11', city: 'D市', theme: '游玩', overnight: 'D市', meals: [], note: '',
+    moves: [{ from: '庚站', to: '辛站', mode: 'train', code: 'G4', startTime: '09:00', endTime: '10:00', transfer: '打车约20分钟' }],
+    highlights: ['某景区'] }],
+}).length === 1, '默认阈值 15 分钟：自报"打车约20分钟"也要能触发复核（模型常少报耗时）');
+ok(P.isCarTransfer('打车20分钟') && !P.isCarTransfer('地铁20分钟'), '打车/轨交能区分开');
+ok(P.warnDetourTransfers(dOutline) === dOutline, '体检函数原样返回大纲（只告警不改数据）');
+
 // 5f. 行李规则兜底：换住处不能把行李留在酒店；寄了必须提醒取回
 //    （提示词里写了规矩，但 LLM 会偷懒或写反，这层是确定性修补）
 const lugOutline = {
