@@ -425,68 +425,55 @@ Page({
       wx.showToast({ title: '请输入行程内容', icon: 'none' });
       return;
     }
-    try {
-      wx.showLoading({ loading: true, title: '保存中' });
-      const old = (trip.items || []).find((it) => this.itemKeyOf(it) === editForm.id) || {};
+    const old = (trip.items || []).find((it) => this.itemKeyOf(it) === editForm.id) || {};
+    const needStart = !!editForm.startLocation && editForm.startLocation !== (old.startLocation || '');
+    const needEnd = !!editForm.endLocation && editForm.endLocation !== (old.endLocation || '');
 
-      // 地点改了 → 重新地理编码：地图导航用的是经纬度，不改会导航到旧地点
-      const needStart = !!editForm.startLocation && editForm.startLocation !== (old.startLocation || '');
-      const needEnd = !!editForm.endLocation && editForm.endLocation !== (old.endLocation || '');
-      let startCoord = null;
-      let endCoord = null;
-      if (needStart || needEnd) {
-        const [a, b] = await Promise.all([
-          // 消歧优先用这条自己的城市（生成时逐条记的），没有再退回整条行程的大地名
-          needStart ? this.tryGeocode(editForm.startLocation, old.city || this.tripRegion()) : null,
-          needEnd ? this.tryGeocode(editForm.endLocation, old.city || this.tripRegion()) : null,
-        ]);
-        startCoord = a;
-        endCoord = b;
+    // 中间点：没改过的沿用旧坐标；改过/新增的先存名字，坐标由后台补查
+    const oldWps = Array.isArray(old.waypoints) ? old.waypoints : [];
+    const oldNames = oldWps.map((w) => (typeof w === 'string' ? w : (w && w.name) || ''));
+    const newNames = (editForm.waypoints || [])
+      .map((n) => String(n || '').trim())
+      .filter(Boolean);
+    const waypoints = newNames.map((n, i) => {
+      const prev = oldWps[i];
+      if (oldNames[i] === n && prev && Number(prev.lon) && Number(prev.lat)) {
+        return { name: n, lon: Number(prev.lon), lat: Number(prev.lat) };
       }
+      return { name: n, lon: '', lat: '' };
+    });
 
-      // 中间点：没改过的沿用旧坐标，改过/新增的现场查一次（查不到先存名字，导航时实时再查）
-      const oldWps = Array.isArray(old.waypoints) ? old.waypoints : [];
-      const oldNames = oldWps.map((w) => (typeof w === 'string' ? w : (w && w.name) || ''));
-      const newNames = (editForm.waypoints || [])
-        .map((n) => String(n || '').trim())
-        .filter(Boolean);
-      const wpCoords = await Promise.all(newNames.map((n, i) => {
-        const prev = oldWps[i];
-        if (oldNames[i] === n && prev && Number(prev.lon) && Number(prev.lat)) {
-          return { lon: Number(prev.lon), lat: Number(prev.lat) };
-        }
-        return this.tryGeocode(n, old.city || this.tripRegion());
-      }));
-      const waypoints = newNames.map((n, i) => {
-        const c = wpCoords[i];
-        return c ? { name: n, lon: c.lon, lat: c.lat } : { name: n, lon: '', lat: '' };
-      });
+    // ⚡ 保存不再等地理编码：以前改个名/加个中间点要在保存时串行查 3~5 个地点，
+    // 每个又是多策略多次请求，能把保存卡到十几秒（实测抱怨）。现在先把文字
+    // 落库秒存，坐标查完由 patchCoordsInBackground 静默回写。
+    const items = (trip.items || []).map((it) => {
+      if (this.itemKeyOf(it) !== editForm.id) return it;
+      const next = {
+        ...it,
+        startTime: editForm.startTime,
+        endTime: editForm.endTime,
+        activity: editForm.activity,
+        startLocation: editForm.startLocation,
+        endLocation: editForm.endLocation,
+        waypoints,
+        transportType: editForm.transportType,
+        category: editForm.category,
+        note: editForm.note,
+      };
+      if (needStart) {
+        // 清空旧坐标，后台查到新的再回写；查不到导航时会按新地名实时再查
+        next.startLon = '';
+        next.startLat = '';
+      }
+      if (needEnd) {
+        next.endLon = '';
+        next.endLat = '';
+      }
+      return next;
+    });
 
-      const items = (trip.items || []).map((it) => {
-        if (this.itemKeyOf(it) !== editForm.id) return it;
-        const next = {
-          ...it,
-          startTime: editForm.startTime,
-          endTime: editForm.endTime,
-          activity: editForm.activity,
-          startLocation: editForm.startLocation,
-          endLocation: editForm.endLocation,
-          waypoints,
-          transportType: editForm.transportType,
-          category: editForm.category,
-          note: editForm.note,
-        };
-        if (needStart) {
-          // 查不到就清空旧坐标，导航时会按新地名实时再查一次，不会导到旧地点
-          next.startLon = startCoord ? startCoord.lon : '';
-          next.startLat = startCoord ? startCoord.lat : '';
-        }
-        if (needEnd) {
-          next.endLon = endCoord ? endCoord.lon : '';
-          next.endLat = endCoord ? endCoord.lat : '';
-        }
-        return next;
-      });
+    try {
+      wx.showLoading({ title: '保存中' });
       await api.updateItinerary(tripId, { items });
       homeCache.clear();
       this.syncGlobalTrip(tripId, items);
@@ -495,8 +482,75 @@ Page({
       wx.showToast({ title: '已保存', icon: 'success' });
     } catch (err) {
       wx.showToast({ title: err.message || '保存失败', icon: 'none' });
+      return;
     } finally {
       wx.hideLoading();
+    }
+
+    // 后台补坐标：不打扰用户，查完静默回写
+    this.patchCoordsInBackground(tripId, editForm.id, old, {
+      needStart,
+      needEnd,
+      startName: editForm.startLocation || '',
+      endName: editForm.endLocation || '',
+      wps: newNames,
+      oldWps,
+      oldNames,
+    });
+  },
+
+  // 保存后的坐标补查：改了名的起终点/中间点逐个地理编码，完成后回写数据库。
+  // 只在地名没被再次改动时才写（防连改两把把旧坐标扣到新名字头上）。
+  async patchCoordsInBackground(tripId, itemId, old, plan) {
+    const region = old.city || this.tripRegion();
+    const jobs = [];
+    if (plan.needStart && plan.startName) jobs.push({ kind: 'start', name: plan.startName });
+    if (plan.needEnd && plan.endName) jobs.push({ kind: 'end', name: plan.endName });
+    plan.wps.forEach((n, i) => {
+      const prev = plan.oldWps[i];
+      const unchanged = plan.oldNames[i] === n && prev && Number(prev.lon) && Number(prev.lat);
+      if (n && !unchanged) jobs.push({ kind: 'wp', index: i, name: n });
+    });
+    if (!jobs.length) return;
+
+    const cur = this.data.trip;
+    if (!cur || cur._id !== tripId) return;   // 用户已切走，别乱写
+    const results = await Promise.all(
+      jobs.map(async (j) => ({ j, c: await this.tryGeocode(j.name, region) }))
+    );
+
+    let changed = false;
+    const items = (this.data.trip.items || []).map((it) => {
+      if (this.itemKeyOf(it) !== itemId) return it;
+      const next = { ...it };
+      results.forEach(({ j, c }) => {
+        if (j.kind === 'start') {
+          if (next.startLocation !== j.name) return;   // 名字又被改过了 → 不写
+          next.startLon = c ? c.lon : '';
+          next.startLat = c ? c.lat : '';
+        } else if (j.kind === 'end') {
+          if (next.endLocation !== j.name) return;
+          next.endLon = c ? c.lon : '';
+          next.endLat = c ? c.lat : '';
+        } else {
+          const wps = (Array.isArray(next.waypoints) ? next.waypoints : []).slice();
+          if (wps[j.index] && typeof wps[j.index] === 'object' && wps[j.index].name === j.name) {
+            wps[j.index] = { ...wps[j.index], lon: c ? c.lon : '', lat: c ? c.lat : '' };
+            next.waypoints = wps;
+          }
+        }
+        changed = true;
+      });
+      return next;
+    });
+    if (!changed) return;
+    try {
+      await api.updateItinerary(tripId, { items });
+      homeCache.clear();
+      this.syncGlobalTrip(tripId, items);
+      this.setData({ 'trip.items': items });
+    } catch (e) {
+      // 静默失败：下次保存或点击导航时会再兜底
     }
   },
 

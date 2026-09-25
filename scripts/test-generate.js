@@ -410,6 +410,19 @@ const fixedMono = sanitizeItems([
 ok(fixedMono.length === 0, '"错误修正/此处应为/既定路线"独白条目整条丢弃',
   JSON.stringify(fixedMono));
 
+// 终点回填：餐饮标题式写法（广西攻略实测：「晚餐：刘姐啤酒鱼」没导航）
+const backfill = sanitizeItems([
+  { dayIndex: 0, startTime: '18:00', endTime: '20:00', activity: '晚餐：刘姐啤酒鱼' },
+  { dayIndex: 0, startTime: '12:00', endTime: '13:00', activity: '在金童路一奥天地吃午饭' },
+  { dayIndex: 0, startTime: '18:30', endTime: '20:30', activity: '吃特色小吃，喝糖水' },
+]);
+ok(backfill[0].endLocation === '刘姐啤酒鱼', '"晚餐：店名"回填终点为店名',
+  backfill[0].endLocation);
+ok(backfill[1].endLocation === '金童路一奥天地', '"在XX吃午饭"回填终点为XX',
+  backfill[1].endLocation);
+ok(!backfill[2].endLocation || backfill[2].endLocation === '', '泛词（特色小吃）不回填，宁缺毋滥',
+  backfill[2].endLocation);
+
 // 5k. 无起终点条目的终点回填（餐饮/游览条目经常全空，卡片连导航都没有）
 const { inferDestination } = require('../cloudfunctions/generatePlan/normalize.js');
 ok(inferDestination('在崇善米粉（依仁路总店）吃桂林米粉') === '崇善米粉（依仁路总店）',

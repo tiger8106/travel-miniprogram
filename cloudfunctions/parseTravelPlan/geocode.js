@@ -12,6 +12,24 @@
 //    高德就全国兜底返回了江西省南昌县的象鼻山公园，导航直接把人导去了南昌。
 //    现在改成：POI 搜索优先 + 逐条校验返回结果的行政区，
 //    城市对不上宁可不给坐标（前端降级复制），也绝不返回一个错误城市的坐标。
+//
+// ⚠️ 2026-09-25 晚 v3（广西七日攻略实测翻车后的第三轮加固）：
+//    ① geo 模糊结果也会张冠李戴：「德天跨国瀑布」被 geo 编到桂林象山区一个
+//       叫"德天"的路牌、「大新明仕酒店」被编到全州县"大新村"——城市校验拦
+//       不住（结果确实在候选城市里），geo 结果现在必须过**名称相关性**校验。
+//    ② POI 名称锁升级出**类别尾缀**：「重庆北站」全国搜，第一名是阳朔的
+//       「重庆鲜面店」（城市校验还真能过——阳朔在行程里），砍掉尾缀只拿
+//       "重庆"匹配太松。现在查询尾巴是"站/码头/停车场/酒店/服务中心…"时，
+//       POI 名里必须出现同类词，且主体词和类别词之间最多夹 1 个字
+//       （「逸喆槿悦酒店」夹了"槿悦"两个字 → 拒，它崇左店就是这么混进来的）。
+//    ③ 全国兜底（poi/last）：出发地/返程地（重庆金童路、重庆北站）不在行程
+//       城市列表里，城市校验永远过不了 → 全部策略失败后，拿全国 POI 第一名
+//       做**强名称匹配**（全词包含/反向包含/主体+类别），过了就给坐标。
+//    ④ 「阳朔西街附近」「酒店一带」这类模糊尾巴搜前剥掉。
+//    ⑤ 地点名自带的行政区（「重庆市金童路」→ 重庆）自动加进候选城市。
+//    ⑥ QPS 限速保护：请求间隔 AMAP_MIN_GAP_MS（默认 120ms），失败且带
+//       infocode（真 API 才有，桩测试没有）时重试一次——QPS 被限时返回空，
+//       POI 步骤全空就会掉进 geo 模糊兜底，正是大批偏移的帮凶。
 
 const https = require('https');
 
@@ -19,6 +37,7 @@ const AMAP_KEY = process.env.AMAP_KEY || '';
 const GEOCODE_URL = 'https://restapi.amap.com/v3/geocode/geo';
 const POI_URL = 'https://restapi.amap.com/v3/place/text';
 const REQUEST_TIMEOUT = 10 * 1000;
+const MIN_GAP = Math.max(0, parseInt(process.env.AMAP_MIN_GAP_MS || '120', 10) || 0);
 
 // 省级行政区（用来从「广西 桂林」里挑出真正的城市词）
 const PROVINCE_NAMES = new Set([
@@ -33,22 +52,48 @@ const PROVINCE_NAMES = new Set([
 // 搜不到时把后缀砍掉再试一次，命中率明显变高。
 const SUFFIX_RE = /((国家|地质|森林|湿地|海洋|城市|矿山|水利)?(风景|名胜)?(景区|公园|游览区|保护区)|大门|正门|南门|北门|东门|西门|游客服务中心|游客中心|服务中心|售票处|观景台|停车场)$/;
 
+// ---------------------------------------------------------------- 请求层
+
+const sleep = (ms) => new Promise((s) => setTimeout(s, ms));
+let lastAt = 0;
+
 function httpGet(url) {
-  return new Promise((resolve, reject) => {
-    const req = https.get(url, (res) => {
-      let data = '';
-      res.on('data', (c) => (data += c));
-      res.on('end', () => {
-        try {
-          resolve(JSON.parse(data));
-        } catch (e) {
-          reject(new Error('amap 响应解析失败: ' + String(data).slice(0, 120)));
-        }
+  return new Promise(async (resolve, reject) => {
+    try {
+      // 简易限速：请求之间至少隔 MIN_GAP 毫秒。高德被 QPS 限时返回 status=0，
+      // POI 步骤全空就会掉进 geo 模糊兜底——这是大批定位偏移的隐形帮凶。
+      if (MIN_GAP > 0) {
+        const wait = lastAt + MIN_GAP - Date.now();
+        if (wait > 0) await sleep(wait);
+      }
+      lastAt = Date.now();
+      const req = https.get(url, (res) => {
+        let data = '';
+        res.on('data', (c) => (data += c));
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(data));
+          } catch (e) {
+            reject(new Error('amap 响应解析失败: ' + String(data).slice(0, 120)));
+          }
+        });
       });
-    });
-    req.setTimeout(REQUEST_TIMEOUT, () => req.destroy(new Error('amap 请求超时')));
-    req.on('error', reject);
+      req.setTimeout(REQUEST_TIMEOUT, () => req.destroy(new Error('amap 请求超时')));
+      req.on('error', reject);
+    } catch (e) {
+      reject(e);
+    }
   });
+}
+
+/** 带重试的请求：status!=='1' 且带 infocode（说明是真高德而非桩）→ 450ms 后重试一次 */
+async function amapGet(url) {
+  let resp = await httpGet(url);
+  if (resp && resp.status !== '1' && resp.infocode) {
+    await sleep(450);
+    resp = await httpGet(url);
+  }
+  return resp;
 }
 
 /** "lon,lat" → { lon, lat } | null */
@@ -102,12 +147,13 @@ function stripSuffix(name) {
 }
 
 /**
- * 从地点名自身提取行政区词根：「大新县硕龙镇」→ [{t:'大新',suf:'县'},{t:'硕龙',suf:'镇'}]。
+ * 从地点名自身提取行政区词根（证据用）：「大新县硕龙镇」→ [{t:'大新',suf:'县'},{t:'硕龙',suf:'镇'}]。
  * 用途：结果校验的另一半证据。行程城市词是"当天住哪"，跨景区的条目
  * （如住在桂林那天写去大新县硕龙镇）经常对不上——但正确结果里一定
  * 含有「大新县」「硕龙镇」这些地点自带的行政区名。
  * ⚠️ 匹配时要求词根 + 原后缀（"大新县"而不是裸"大新"）：
  *    否则"桂林市大新水库"里的"大新"也会蒙混过关（桩测试实测踩过）。
+ * ⚠️ 省级词（重庆/广西…）在这里被过滤：证据必须是市县级才有区分度。
  */
 function selfTokens(address) {
   const s = String(address || '').trim();
@@ -120,6 +166,24 @@ function selfTokens(address) {
     if (t.length >= 2 && !PROVINCE_NAMES.has(t) && !out.some((x) => x.t === t)) {
       out.push({ t, suf: full.slice(t.length) });
     }
+  }
+  return out;
+}
+
+/**
+ * 地点名自带的行政区（候选城市用）：「重庆市金童路」→ ['重庆']。
+ * 与 selfTokens 的区别：省级词也收（出发地"重庆市金童路"就靠它定位），
+ * 且不要求带后缀匹配——只用来扩大搜索候选，不当放行证据。
+ */
+function addrTokens(address) {
+  const s = String(address || '').trim();
+  const out = [];
+  const re = /([\u4e00-\u9fa5]{1,8}?(?:省|自治州|地区|市|自治县|县|旗|区|镇|乡))/g;
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    const full = m[1];
+    const t = full.replace(/(省|自治州|地区|自治县|市|县|旗|区|镇|乡)$/, '');
+    if (t.length >= 2 && !out.includes(t)) out.push(t);
   }
   return out;
 }
@@ -144,27 +208,121 @@ function cityHit(region, hay) {
   return tokens.some((t) => h.indexOf(t) >= 0);
 }
 
+// ---------------------------------------------------------------- 名称相关性
+
+/** 抹掉装饰符再比较（「印象刘三姐」vs「印象·刘三姐」） */
+function normName(s) {
+  return String(s || '').replace(/[·\s\-（）()【】\[\]]/g, '');
+}
+
+/** 最长公共子串长度（地名都很短，O(n·m) 足够） */
+function lcsLen(a, b) {
+  if (!a || !b) return 0;
+  let prev = new Array(b.length + 1).fill(0);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [0];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = a[i - 1] === b[j - 1] ? prev[j - 1] + 1 : Math.max(prev[j], cur[j - 1]);
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
 /**
- * POI 名与搜索词是不是"同一件事"：
- * 高德 citylimit 内的模糊搜索会返回**同名结构的别家**——实测翻车：
- *   搜「崇左南站」（city=桂林）→ 返回「桂林南站」
- *   搜「崇左游客集散中心」→ 返回桂林荔浦的「游客集散中心」
- * 城市校验拦不住（结果确实在候选城市里），必须加名称相关性锁：
- *   · POI 名包含搜索词（「象鼻山」⊂「象鼻山景区」）→ 放行
- *   · 或搜索词砍掉通用尾缀后的核心词出现在 POI 名里
- *     （「崇左南站」核心「崇左」∉「桂林南站」→ 拒；「南宁东站」核心「南宁东」∈ 同名 → 放）
- * 比较前把「·」等装饰符抹掉（「印象刘三姐」vs「印象·刘三姐」）。
- * 拦错比放对更重要：错坐标会把人导航到错误城市。
+ * 类别尾缀分组：查询尾巴是"站/码头/停车场…"时，POI 名里也必须出现同类词。
+ * 实测翻车：搜「重庆北站」全国第一名是阳朔「重庆鲜面店」（城市校验能过）；
+ * 搜「德天瀑布服务中心」命中的是崇左「德天瀑布饮用纯净水」——都是只拿
+ * 砍掉尾缀后的主体词匹配惹的祸。
  */
-const GENERIC_TAIL = /(风景名胜区|游客集散中心|旅游集散中心|集散中心|游客中心|游客服务中心|服务中心|客运站|枢纽站|火车站|高铁站|候机楼|东站|南站|西站|北站|风景区|景区|度假区|大酒店|饭店|酒店|宾馆|公园|广场|中心|码头|渡口|机场|大桥|学校|大学|学院|医院|商场|市场|超市|大楼|大厦|站)+$/;
+const TAIL_GROUPS = [
+  /站|候机楼|航站楼/,                        // 车站/机场类（东站/南站/北站/客运站…）
+  /码头|客运港|港口|渡口|游船/,               // 码头类
+  /停车场|停车点|停车楼|泊车/,                // 停车场类
+  /服务中心|集散中心|游客中心|接待中心/,        // 中心类
+  /酒店|宾馆|饭店|客栈|民宿|度假村|招待所/,     // 住宿类
+  /景区|风景区|景点|名胜|公园|游览区/,          // 景区类
+  /广场|步行街|商业街|街区/,                  // 街区类
+  /机场/,                                    // 机场类
+  /市场|商场|超市|购物中心|商城/,              // 商圈类
+  /大桥|桥/,                                 // 桥类
+];
+
+/**
+ * POI 名与搜索词的匹配强度（3 > 2 > 1）：
+ *   3 POI 名包含完整搜索词
+ *   2 主体词 + 同类尾缀（「德天瀑布服务中心」vs「…德天瀑布游客中心店」）
+ *   1 只有核心词沾边
+ * 一个搜索词常常回来四五条城市也对的候选——以前取第一条，
+ * 结果「德天瀑布服务中心」被酒店 POI 顶掉。现在按强度择优。
+ */
+function nameScore(poiName, keyword) {
+  const n = normName(poiName);
+  const k = normName(keyword);
+  if (!n || !k) return 1;
+  if (n.indexOf(k) >= 0) return 3;
+  const tailM = k.match(GENERIC_TAIL);
+  if (tailM && tailM.index > 0) {
+    const grp = TAIL_GROUPS.find((g) => g.test(tailM[0]));
+    const stem = k.slice(0, tailM.index);
+    if (grp && stem.length >= 2) {
+      const si = n.indexOf(stem);
+      if (si >= 0 && grp.test(n)) {
+        const tm = n.slice(si + stem.length).match(grp);
+        if (tm && tm.index <= 1) return 2;
+      }
+    }
+  }
+  return 1;
+}
+
+/**
+ * POI 名与搜索词是不是"同一件事"（v3）：
+ *   · POI 名包含完整搜索词 → 放行（最稳）
+ *   · 查询带类别尾缀 → 主体词必须出现 + POI 名含同类词 + 主体与类别之间
+ *     最多夹 1 个字（「逸喆槿悦酒店」夹"槿悦"两字 → 拒）
+ *   · 没有类别尾缀 → 砍掉通用尾缀后的核心词命中即放行（老规则）
+ */
+const GENERIC_TAIL = /(风景名胜区|游客集散中心|旅游集散中心|集散中心|游客中心|游客服务中心|服务中心|客运站|枢纽站|火车站|高铁站|候机楼|东站|南站|西站|北站|风景区|景区|度假区|大酒店|饭店|酒店|宾馆|公园|广场|中心|码头|渡口|机场|大桥|学校|大学|学院|医院|商场|市场|超市|大楼|大厦|停车场|站)+$/;
 function nameOk(poiName, keyword) {
-  const n = String(poiName || '').replace(/[·\s\-（）()【】\[\]]/g, '');
-  const k = String(keyword || '').replace(/[·\s\-（）()【】\[\]]/g, '');
+  const n = normName(poiName);
+  const k = normName(keyword);
   if (!n || !k) return true;                       // 没名可比就不加这道锁
   if (n.indexOf(k) >= 0) return true;              // POI 名包含搜索词（更具体的全称）
+  const tailM = k.match(GENERIC_TAIL);
+  if (tailM && tailM.index > 0) {
+    const grp = TAIL_GROUPS.find((g) => g.test(tailM[0]));
+    const stem = k.slice(0, tailM.index);
+    if (grp && stem.length >= 2) {
+      const si = n.indexOf(stem);
+      if (si < 0) return false;                    // 主体词都不在 → 拒
+      if (!grp.test(n)) return false;              // 类别对不上（重庆鲜面店）→ 拒
+      const rest = n.slice(si + stem.length);
+      const tm = rest.match(grp);
+      if (!tm || tm.index > 1) return false;       // 主体与类别夹字太多（逸喆槿悦酒店）→ 拒
+      return true;
+    }
+  }
   const core = k.replace(GENERIC_TAIL, '');
   return core.length >= 2 && n.indexOf(core) >= 0; // 核心词命中才算同一件事
 }
+
+/**
+ * geo 结果的名称相关性校验：geo 是模糊匹配，不校验名称就会把
+ * 「德天跨国瀑布」编到桂林象山区叫"德天"的路、「大新明仕酒店」编到
+ * 全州县"大新村"。要求：hay 含完整查询词，或公共子串 ≥3 字
+ * （「金童路一奥天地」vs「重庆市两江新区金童路1号」→ "金童路" 3 字 → 放）。
+ */
+function geoNameOk(keyword, hay) {
+  const k = normName(keyword);
+  const h = normName(hay);
+  if (!k || !h) return false;
+  if (h.indexOf(k) >= 0) return true;
+  if (k.length < 3) return false;
+  return lcsLen(k, h) >= Math.min(3, k.length);
+}
+
+// ---------------------------------------------------------------- 高德 API
 
 /** POI 关键词搜索（v3/place/text）。citylimit=true 时城市是硬限制，不会串到外省。 */
 async function searchPoi(keywords, city, citylimit, size) {
@@ -174,7 +332,7 @@ async function searchPoi(keywords, city, citylimit, size) {
   if (city) url += `&city=${encodeURIComponent(city)}`;
   if (city && citylimit) url += '&citylimit=true';
   try {
-    const resp = await httpGet(url);
+    const resp = await amapGet(url);
     if (resp.status !== '1' || !Array.isArray(resp.pois)) return [];
     return resp.pois.map((p) => {
       const loc = parseLoc(p.location);
@@ -185,8 +343,7 @@ async function searchPoi(keywords, city, citylimit, size) {
         name: String(p.name || ''),
         hay: [p.pname, p.cityname, p.adname, p.address, p.name].join('|'),
       };
-    }).filter(Boolean)
-      .filter((p) => nameOk(p.name, keywords));
+    }).filter(Boolean);
   } catch (e) {
     console.error('[geocode] POI 搜索失败:', keywords, e.message);
     return [];
@@ -199,7 +356,7 @@ async function geoRaw(address, city) {
   let url = `${GEOCODE_URL}?address=${encodeURIComponent(address)}&key=${AMAP_KEY}&output=json`;
   if (city) url += `&city=${encodeURIComponent(city)}`;
   try {
-    const resp = await httpGet(url);
+    const resp = await amapGet(url);
     if (resp.status !== '1' || !Array.isArray(resp.geocodes)) return [];
     return resp.geocodes.map((g) => {
       const loc = parseLoc(g.location);
@@ -211,6 +368,7 @@ async function geoRaw(address, city) {
         // level：区县/乡镇/兴趣点… 级别太粗（省/市）说明高德只是把整片区的中心点
         // 扔了回来，对"XX县XX镇"这种精细地址就是错的
         level: String(g.level || ''),
+        isGeo: true,   // 提醒校验方：geo 结果必须过名称相关性（geoNameOk）
         hay: [g.province, g.city, g.district, g.formatted_address, g.building, g.neighborhood].join('|'),
       };
     }).filter(Boolean);
@@ -226,30 +384,20 @@ async function geoRaw(address, city) {
  * 多策略依次尝试，每条结果都要过校验，命中就返回：
  *   ① POI 搜索（逐个候选城市）      —— 最准，返回的是真实存在的 POI
  *   ② 砍掉自造后缀/括号补注再搜     —— 解决「象鼻山公园」「XX酒店（XX景区店）」搜不到的问题
- *   ③ 全国搜，逐条挑城市            —— 城市名不标准（如片区名）时的兜底
+ *   ③ 全国搜（完整名/砍后缀名）      —— 城市名不标准（如片区名）时的兜底
  *   ④ 地理编码（逐个候选城市提示）
  *   ⑤ 地理编码（不带 city）
  *   ⑥ 关键词放宽（砍掉开头 2 字）    —— 「大新明仕酒店」→「明仕酒店」
  *   ⑦ 地理编码（城市名拼进地址）    —— ⚠️ 只在地址自带行政区词根时启用，
  *      且结果必须命中词根才采纳
+ *   ⑧ 全国强名兜底                  —— 出发地/返程地（重庆金童路、重庆北站）
+ *      不在行程城市列表里，城市校验永远过不了；前面全部失败后，全国 POI
+ *      第一名与搜索词强名称匹配（全词/反向包含/主体+类别）才给坐标
  *
- * 城市候选（2026-09-25 v2.2）：以前只拿 region 串里**第一个**城市词做 city，
- * 跨城行程（桂林那天的条目写「南宁东站」「崇左南站」「大新明仕酒店」）全部
- * 定位失败或乱定位。现在 region 串里每个城市词都当候选试一遍（最多 4 个），
- * 校验仍是"任一城市命中即放行"。
- *
- * 校验（两层证据）：
+ * 校验（两层证据 + 名称相关性）：
  *   a. 行程城市词（「广西 桂林 阳朔」整串，任一城市命中）
- *   b. 地点自身词根（「大新县硕龙镇」→ 大新/硕龙）——跨景区条目的
- *      当天城市常常对不上（住在桂林、去大新县玩）。地址带词根时
- *      **只认 b 不认 a**：错坐标的行政区里恰恰含着行程城市词，
- *      拿它放行等于自己验证自己。
- *
- * ⚠️ 为什么 ⑦ 这么严：曾经「大新县硕龙镇」在城市限定下搜不到，
- *    兜底把城市词拼成「桂林大新县硕龙镇」发给高德，返回桂林方向的
- *    错坐标，而校验用的又是同一个城市词——自己验证自己，直接放行，
- *    定位从桂西南的德天瀑布跑到了广西东北角。结果必须含有地点
- *    自身的词根（大新/硕龙）才可能是对的。
+ *   b. 地点自身词根（「大新县硕龙镇」→ 大新/硕龙）——地址带词根时只认 b
+ *   c. geo 结果额外过 geoNameOk；POI 结果过 nameOk（含类别尾缀锁）
  *
  * 全部对不上 → 返回 null。宁可让前端降级成"复制地名"，
  * 也不能给用户一个错误城市的坐标（导航导到外省比打不开更糟）。
@@ -260,14 +408,22 @@ async function geoRaw(address, city) {
  */
 async function geocodeOne(address, city) {
   if (!AMAP_KEY || !address) return null;
-  const tokens = cityTokens(city);
-  // 候选城市：region 串里每个非省份词都可能是本条所在城市，逐个试
-  const candidates = tokens.filter((t) => !PROVINCE_NAMES.has(t)).slice(0, 4);
+  const raw = String(address).trim();
   // 括号补注（「锦江都城酒店（桂林两江四湖象山景区店）」）常拖垮 POI 搜索，
-  // 且括号里的「…景区店」会给 selfTokens 造出垃圾词根——先剥掉
-  const bare = String(address).replace(/[（(][^）)]*[）)]/g, '').trim() || String(address).trim();
+  // 且括号里的「…景区店」会给词根提取造出垃圾——先剥掉
+  let bare = String(address).replace(/[（(][^）)]*[）)]/g, '').trim() || raw;
+  // 「阳朔西街附近」「酒店一带」这类模糊尾巴也会让 POI 搜索直接失败 → 剥掉
+  bare = bare.replace(/(附近|周边|一带)+$/, '').trim() || bare;
   const short = stripSuffix(bare);
   const self = selfTokens(bare);
+
+  // 候选城市：region 串里的城市词 + 地点名自带的行政区（「重庆市金童路」→ 重庆）
+  const tokens = cityTokens(city);
+  const regionCities = tokens.filter((t) => !PROVINCE_NAMES.has(t)).slice(0, 4);
+  const addrCities = addrTokens(bare).slice(0, 2);
+  const candidates = [...new Set([...regionCities, ...addrCities])].slice(0, 6);
+  // 校验用城市串（含地点自带行政区，「南宁市」这类省级词也在内）
+  const fullCity = city + ' ' + addrCities.join(' ');
 
   // geo 结果的级别防线：地址自带行政区词根（县/镇级）时，
   // 级别还停在"省/市"说明高德只给了个片区中心点，多半是错的
@@ -276,13 +432,47 @@ async function geocodeOne(address, city) {
   // ⚠️ self 为空时绝不能走 selfHit —— 要把"没有词根"和"词根不命中"区分开：
   // 前者退回城市校验（老行为），后者必须拒绝
   const selfHit = (hay) => self.length > 0 && selfMatch(self, hay);
-  // 地址自带行政区词根时（大新县硕龙镇），城市证据不能单独放行：
-  // 桂林方向的错坐标 hay 里就含"桂林"，正是它把定位骗到广西东北角的。
-  // 此时必须以地点自身词根为准；没有词根才退回老的城市校验。
-  const soft = (r) => (self.length ? selfHit(r.hay) : cityHit(city, r.hay)) && levelOk(r);
-  const strict = (r) => cityHit(city, r.hay) && selfHit(r.hay) && levelOk(r);
+  // 基础证据：地址自带行政区词根时只认词根；没有词根才退回城市校验
+  const baseOk = (r) => (self.length ? selfHit(r.hay) : cityHit(fullCity, r.hay)) && levelOk(r);
+  // POI 步骤：基础证据 + 名称相关性（含类别尾缀锁）
+  const poiOk = (kw) => (r) => baseOk(r) && nameOk(r.name, kw);
+  // geo 步骤：基础证据 + 名称相关性（geo 模糊结果最容易张冠李戴）
+  const soft = (r) => baseOk(r) && geoNameOk(bare, r.hay);
+  const strict = (r) => cityHit(fullCity, r.hay) && selfHit(r.hay) && levelOk(r) && geoNameOk(bare, r.hay);
   // 命中的是哪个候选城市（回传给调用方记进 item.city，下次实时定位直接用对城市）
-  const cityTagOf = (hay) => tokens.find((t) => String(hay || '').indexOf(t) >= 0) || '';
+  const tagTokens = [...tokens, ...addrCities];
+  const cityTagOf = (hay) => tagTokens.find((t) => String(hay || '').indexOf(t) >= 0) || '';
+
+  // 最后兜底的强名称匹配（不校验城市，见函数头注释 ⑧）。
+  // ⚠️ 门槛：只对「无类别尾缀的独特地名」（金童路一奥天地）或
+  // 「省级城市名+车站」（重庆北站）开放——「象鼻山公园」这类
+  // "地标+通用尾缀"全国一堆同名，绝不全国捞，宁缺毋错（桩测试钉死）。
+  const kNorm = normName(bare);
+  const tailM0 = kNorm.match(GENERIC_TAIL);
+  const noTail = !tailM0;
+  const stemIsProvince = !!tailM0 && tailM0.index > 0
+    && PROVINCE_NAMES.has(kNorm.slice(0, tailM0.index));
+  const lastResortEligible = noTail || stemIsProvince;
+  const strongName = (r) => {
+    if (!lastResortEligible) return false;
+    if (self.length && !selfHit(r.hay)) return false;  // 词根冲突照样拒
+    const n = normName(r.name);
+    if (!n || !kNorm) return false;
+    if (n.indexOf(kNorm) >= 0) return true;            // POI 名包含完整搜索词
+    if (kNorm.indexOf(n) >= 0 && n.length >= 4) return true; // 搜索词是 POI 名的更全称（金童路一奥天地 ⊇ 一奥天地）
+    if (stemIsProvince) {
+      const grp = TAIL_GROUPS.find((g) => g.test(tailM0[0]));
+      const stem = kNorm.slice(0, tailM0.index);
+      if (grp && stem.length >= 2) {
+        const si = n.indexOf(stem);
+        if (si >= 0 && grp.test(n)) {
+          const tm = n.slice(si + stem.length).match(grp);
+          if (tm && tm.index <= 1) return true;        // 重庆北站 ≈ 重庆北站(江北)
+        }
+      }
+    }
+    return false;
+  };
 
   const steps = [];
   const seen = new Set();
@@ -291,31 +481,49 @@ async function geocodeOne(address, city) {
     seen.add(tag);
     steps.push([tag, fn, check]);
   };
+  const poiStep = (tag, kw, c) => push(tag, () => searchPoi(kw, c, !!c, 5), poiOk(kw));
   candidates.forEach((c) => {
-    push(`poi/city:${c}`, () => searchPoi(address, c, true, 5), soft);
-    if (bare !== address) push(`poi/bare:${c}`, () => searchPoi(bare, c, true, 5), soft);
-    if (short !== bare && short !== address) push(`poi/short:${c}`, () => searchPoi(short, c, true, 5), soft);
+    poiStep(`poi/city:${c}`, raw, c);
+    if (bare !== raw) poiStep(`poi/bare:${c}`, bare, c);
+    if (short !== bare && short !== raw) poiStep(`poi/short:${c}`, short, c);
   });
-  push('poi/nation', () => searchPoi(short || bare, '', false, 10), soft);
-  candidates.forEach((c) => push(`geo/city:${c}`, () => geoRaw(address, c), soft));
-  push('geo/nocity', () => geoRaw(address, ''), soft);
+  push('poi/nation-full', () => searchPoi(raw, '', false, 10), poiOk(raw));
+  push('poi/nation', () => searchPoi(short || bare, '', false, 10), poiOk(short || bare));
+  candidates.forEach((c) => push(`geo/city:${c}`, () => geoRaw(raw, c), soft));
+  push('geo/nocity', () => geoRaw(raw, ''), soft);
   // 关键词放宽：砍掉开头 2 字再搜（「大新明仕酒店」→「明仕酒店」）。
-  // 只在前面全部失败后才会轮到，且结果照样过城市校验，不会因此放错行。
+  // 只在前面全部失败后才会轮到，且结果照样过全套校验，不会因此放错行。
   if (bare.length >= 5 && bare.slice(2).length >= 3) {
     const relax = bare.slice(2);
-    candidates.forEach((c) => push(`poi/relax:${c}`, () => searchPoi(relax, c, true, 5), soft));
+    candidates.forEach((c) => poiStep(`poi/relax:${c}`, relax, c));
   }
   if (self.length && candidates.length) {
     push('geo/prefixed', () => geoRaw(candidates[0] + bare, ''), strict);
+  }
+  push('poi/last', () => searchPoi(raw, '', false, 5), strongName);
+  // geo 终极兜底：出发地「金童路一奥天地」全国 POI 都不叫这个名（高德只给
+  // "重庆市两江新区金童路1号"这种地址编码），POI 强名匹配也救不了它。
+  // 全国 geo + 名称相关性（公共子串 ≥3 字）做最后一搏，仍不给就放弃。
+  // ⚠️ 同样受 lastResortEligible 门槛约束：「象鼻山公园」这类通用 landmark
+  // 全国一堆同名，绝不全国捞（桩测试钉死「宁可不给坐标」）。
+  if (lastResortEligible && kNorm.length >= 4) {
+    push('geo/last', () => geoRaw(raw, ''), (r) => {
+      if (self.length && !selfHit(r.hay)) return false;
+      return geoNameOk(bare, r.hay);
+    });
   }
 
   let fallback = null;
   for (let i = 0; i < steps.length; i++) {
     const tag = steps[i][0];
     const list = await steps[i][1]();
-    const hit = list.find(steps[i][2]);
+    // 同一步可能回来多条城市也对的候选：按名称匹配强度择优，不取第一条
+    const scored = list
+      .map((r) => ({ r, s: nameScore(r.name, raw) }))
+      .sort((a, b) => b.s - a.s);
+    const hit = (scored.find((x) => steps[i][2](x.r)) || {}).r;
     if (hit) {
-      console.log('[geocode] 命中 %s → %s（%s）', address, hit.name, tag);
+      console.log('[geocode] 命中 %s → %s（%s）', raw, hit.name, tag);
       return { lon: hit.lon, lat: hit.lat, matchedName: hit.name, city: cityTagOf(hit.hay) };
     }
     // 记下第一个"有结果但校验不过"的候选，便于排查是谁顶掉了正确结果
@@ -323,9 +531,8 @@ async function geocodeOne(address, city) {
   }
 
   // 全部对不上 → 坚决不给坐标：错坐标比没坐标更坑（会把人导航到外省）。
-  // 没给任何可校验的词时 cityHit 恒为 true，能走到这儿说明压根没查到候选。
   console.warn('[geocode] 放弃「%s」：在「%s」内没找到可靠结果%s',
-    address, candidates.join('/') || '未指定城市', fallback ? `（最接近的是「${fallback.name}」，来自 ${fallback.tag}，但校验不过）` : '');
+    raw, candidates.join('/') || '未指定城市', fallback ? `（最接近的是「${fallback.name}」，来自 ${fallback.tag}，但校验不过）` : '');
   return null;
 }
 
@@ -344,8 +551,7 @@ async function geocodeBatch(addresses, cityOf) {
   if (!unique.length) return result;
 
   console.log('[geocode] 开始编码 %d 个地点', unique.length);
-  // 分批并发：每批 5 个。策略变多后单个地点可能发多次请求，
-  // 批太大容易触发高德 QPS 限制。
+  // 分批并发：每批 5 个。请求层有 MIN_GAP 限速，批太大也只会在队列里排队。
   const BATCH = 5;
   for (let i = 0; i < unique.length; i += BATCH) {
     const batch = unique.slice(i, i + BATCH);
@@ -358,4 +564,4 @@ async function geocodeBatch(addresses, cityOf) {
   return result;
 }
 
-module.exports = { geocodeOne, geocodeBatch, pickCity, cityTokens, stripSuffix, cityHit, selfTokens, selfMatch };
+module.exports = { geocodeOne, geocodeBatch, pickCity, cityTokens, stripSuffix, cityHit, selfTokens, selfMatch, addrTokens, nameOk, geoNameOk };

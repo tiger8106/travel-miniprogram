@@ -76,9 +76,9 @@
   margin-top: 16rpx;
 }
 
+/* 多段导航：每个链接独占一行（block 模式，间距由组件内联 style 控制） */
 .nav-multi {
-  flex-wrap: wrap;
-  gap: 12rpx;
+  display: block;
 }
 
 .nav-multi map-button {

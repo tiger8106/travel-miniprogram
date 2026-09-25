@@ -54,6 +54,7 @@ const geo = (loc, prov, city, dist, fmt) => ({
 
 // ---------------------------------------------------------------- 纯函数
 process.env.AMAP_KEY = process.env.AMAP_KEY || 'TEST_KEY';
+process.env.AMAP_MIN_GAP_MS = '0';   // 桩测试不需要限速
 const G = require('../cloudfunctions/parseTravelPlan/geocode');
 
 console.log('\n【1】纯函数：城市词挑选 / 后缀清理 / 城市校验');

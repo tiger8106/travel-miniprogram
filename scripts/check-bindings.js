@@ -304,11 +304,22 @@ ok('收尾判定认"酒店/民宿"字样，不被"眉山站⊃眉山"骗过',
   /酒店\|民宿\|客栈\|宾馆\|青旅\|住宿/.test(planJs));
 
 // ---------- ⑮ 地理编码与导航（多城市候选 / 中间点 / 目的地直连） ----------
-ok('geocode 支持多候选城市（跨城行程不再只用第一个城市词搜）',
-  /const candidates = tokens\.filter/.test(geoJs) && /candidates\.forEach/.test(geoJs)
+ok('geocode 支持多候选城市（region 城市词 + 地点自带行政区，如「重庆市金童路」）',
+  /const regionCities = tokens\.filter/.test(geoJs) && /const addrCities = addrTokens/.test(geoJs)
+    && /candidates\.forEach/.test(geoJs)
     && bodyOf(geoJs) === bodyOf(genGeoJs));
 ok('geocode 搜前剥掉括号补注（「XX酒店（XX景区店）」不再拖垮 POI 搜索）',
-  /const bare = String\(address\)\.replace/.test(geoJs));
+  /bare = String\(address\)\.replace/.test(geoJs));
+ok('geocode 搜前剥掉模糊尾巴（「阳朔西街附近」→「阳朔西街」）',
+  /\(附近\|周边\|一带\)/.test(geoJs));
+ok('POI 名称锁有类别尾缀（「重庆北站」不再被「重庆鲜面店」顶替）',
+  /const TAIL_GROUPS/.test(geoJs) && /tm\.index > 1/.test(geoJs));
+ok('geo 模糊结果过名称相关性校验（「德天跨国瀑布」不再编到桂林"德天"路）',
+  /function geoNameOk/.test(geoJs) && /isGeo: true/.test(geoJs) && /geoNameOk\(bare, r\.hay\)/.test(geoJs));
+ok('全国强名兜底存在（出发地「金童路一奥天地」不在行程城市也能定位）',
+  /poi\/last/.test(geoJs) && /strongName/.test(geoJs));
+ok('QPS 限速保护（请求间隔 + infocode 重试，QPS 被限时不再掉进 geo 兜底）',
+  /AMAP_MIN_GAP_MS/.test(geoJs) && /resp\.infocode/.test(geoJs));
 ok('geocode 有关键词放宽兜底（砍开头两字，「大新明仕酒店」→「明仕酒店」）',
   /poi\/relax/.test(geoJs));
 ok('geocode 回传命中的城市（item.city 按条目落准，前端实时定位直接用对城市）',

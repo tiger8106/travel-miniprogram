@@ -18,6 +18,8 @@ Component({
     region: { type: String, value: '' },
     // 条目城市查不到时的兜底（整条行程的大地名）
     fallbackRegion: { type: String, value: '' },
+    // 独占一行模式（多段导航时每个链接各占一行，用户实测要求）
+    block: { type: Boolean, value: false },
   },
 
   data: {

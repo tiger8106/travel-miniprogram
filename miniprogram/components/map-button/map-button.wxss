@@ -7,6 +7,13 @@
   max-width: 480rpx;
 }
 
+/* 独占一行：多段导航（中间点）时每个链接各占一行、通栏 */
+.map-btn-block {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
 .map-icon {
   font-size: 28rpx;
   margin-right: 8rpx;
