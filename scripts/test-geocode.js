@@ -60,12 +60,19 @@ console.log('\n【1】纯函数：城市词挑选 / 后缀清理 / 城市校验'
 ok(G.pickCity('广西 桂林 阳朔') === '桂林', '从「广西 桂林 阳朔」挑出城市词', G.pickCity('广西 桂林 阳朔'));
 ok(G.pickCity('桂林市') === '桂林', '去掉行政后缀（桂林市 → 桂林）', G.pickCity('桂林市'));
 ok(G.pickCity('') === '', '空输入不炸');
+ok(G.pickCity('阳朔县城（西街附近）') === '阳朔', '住宿地脏值：括号补注 + 「县城」都能洗掉', G.pickCity('阳朔县城（西街附近）'));
+ok(G.pickCity('桂林 阳朔县城（西街附近） 大新县明仕田园') === '桂林', '整行程 region 串挑第一个城市词', G.pickCity('桂林 阳朔县城（西街附近） 大新县明仕田园'));
+ok(G.pickCity('广西壮族自治区 桂林') === '桂林', '省级全称归一后跳过（广西壮族自治区 → 广西）', G.pickCity('广西壮族自治区 桂林'));
 ok(G.stripSuffix('象鼻山公园') === '象鼻山', '砍掉自造后缀：象鼻山公园 → 象鼻山', G.stripSuffix('象鼻山公园'));
 ok(G.stripSuffix('龙脊梯田景区') === '龙脊梯田', '砍掉自造后缀：龙脊梯田景区 → 龙脊梯田');
 ok(G.stripSuffix('中山公园') === '中山公园', '砍完不足 3 字就不砍（中山公园别变中山）', G.stripSuffix('中山公园'));
 ok(G.stripSuffix('桂林北站') === '桂林北站', '车站名不动');
 ok(G.cityHit('桂林', '广西壮族自治区|桂林市|秀峰区|民主路|象鼻山') === true, '桂林的结果算命中');
 ok(G.cityHit('桂林', '江西省|南昌市|南昌县|象鼻山公园') === false, '南昌的结果不算命中');
+ok(G.cityHit('桂林 阳朔 大新县 南宁', '广西壮族自治区|南宁市|青秀区|凤岭北路|南宁东站') === true,
+  '多城市词表：行程里任一城市命中即可（跨城段不再被第一个城市卡死）');
+ok(G.cityHit('阳朔县城（西街附近）', '广西壮族自治区|桂林市|阳朔县|十里画廊|遇龙河') === true,
+  '脏城市值清洗后仍能校验（阳朔县城（西街附近） → 阳朔）');
 ok(G.cityHit('龙脊梯田', '广西壮族自治区|桂林市|龙脊梯田景区') === true, '片区名靠详细地址也能命中');
 ok(G.cityHit('', 'anything') === true, '没给城市时不校验（老行为）');
 
@@ -130,6 +137,35 @@ async function caseD() {
   return G.geocodeOne('南宁东站', '南宁');
 }
 
+async function caseE() {
+  // 首页实际翻车的形态：整行程 region 串只有一个"桂林"在前面，
+  // 但条目是跨城段「南宁东站」——挑出的 city=桂林 搜不到，
+  // 全国搜回南宁的结果必须靠多城市词表放行（旧逻辑会白白拒掉）
+  stubHttp([
+    { match: (u) => u.includes('place/text') && u.includes('citylimit=true'), resp: { status: '1', pois: [] } },
+    {
+      match: (u) => u.includes('place/text'),
+      resp: { status: '1', pois: [poi('南宁东站', '108.42,22.82', '南宁市', '青秀区', '凤岭北路')] },
+    },
+    { match: (u) => u.includes('geocode/geo'), resp: { status: '1', geocodes: [] } },
+  ]);
+  return G.geocodeOne('南宁东站', '桂林 阳朔 大新县 南宁');
+}
+
+async function caseF() {
+  // 脏城市值「阳朔县城（西街附近）」被洗成「阳朔」：桂林北站确实不在阳朔，
+  // 应该坚持拒绝（宁缺毋错）；真正的补救在前端 fallbackRegion 二次重试
+  stubHttp([
+    { match: (u) => u.includes('place/text') && u.includes('citylimit=true'), resp: { status: '1', pois: [] } },
+    { match: (u) => u.includes('place/text'), resp: { status: '1', pois: [] } },
+    {
+      match: (u) => u.includes('geocode/geo'),
+      resp: { status: '1', geocodes: [geo('115.92,28.55', '江西省', '南昌市', '南昌县', '南昌县桂林北站')] },
+    },
+  ]);
+  return G.geocodeOne('桂林北站', '阳朔县城（西街附近）');
+}
+
 (async () => {
   console.log('\n【2】策略链路（桩模拟高德响应）');
   const a = await caseA();
@@ -143,6 +179,12 @@ async function caseD() {
 
   const d = await caseD();
   ok(d && d.lon === 108.42, '跨城终点「南宁东站」能定位（城市已按地址修正）', d);
+
+  const e = await caseE();
+  ok(e && e.lon === 108.42, '整行程 region 串：跨城段靠多城市词表命中（首页翻车场景）', e);
+
+  const f = await caseF();
+  ok(f === null, '脏城市值洗成「阳朔」后仍坚持拒绝错城坐标（宁缺毋错）', f);
 
   https.get = realGet;
 

@@ -244,6 +244,15 @@ ok('返回结果要过城市校验，对不上就放弃', /function cityHit/.tes
 // 只比正文部分——文件头的路径注释本来就不一样
 const bodyOf = (s) => s.slice(s.indexOf("require('https')"));
 ok('两个云函数的 geocode 实现一致', bodyOf(geoJs) === bodyOf(genGeoJs));
+ok('城市词清洗：括号补注/行政后缀都能洗掉（脏住宿地值曾让定位全挂）',
+  /function cityTokens/.test(geoJs) && /县城/.test(geoJs));
+ok('城市校验用多城市词表（跨城段不再被第一个城市卡死）',
+  /tokens\.some/.test(geoJs) && /function cityHit/.test(geoJs));
+const mapJs2 = fs.readFileSync(path.join(MP, 'utils/map.js'), 'utf8');
+ok('导航定位失败时用整行程大地名二次重试（fallbackRegion）',
+  /fallbackRegion/.test(mapJs2) && /currentTripRegion/.test(mapJs2));
+const idxJs = fs.readFileSync(path.join(MP, 'pages/index/index.js'), 'utf8');
+ok('首页导航传 fallbackRegion（首页定位失败的主修复）', /fallbackRegion: \(this\._trip && this\._trip\.region\)/.test(idxJs));
 const itinWxml = fs.readFileSync(path.join(MP, 'pages/itinerary/itinerary.wxml'), 'utf8');
 ok('导航优先用条目的城市（item.city）', /region="{{item\.city \|\| trip\.region}}"/.test(itinWxml));
 const navJs = fs.readFileSync(path.join(MP, 'utils/map.js'), 'utf8');

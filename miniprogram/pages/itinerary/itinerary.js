@@ -349,6 +349,8 @@ Page({
       endLon: item.endLon,
       // 条目自己的城市最准；没有再退回整条行程的大地名
       region: item.city || this.tripRegion(),
+      // 条目城市查不到时（跨城段常这样），用整条行程的大地名再试一次
+      fallbackRegion: this.tripRegion(),
     });
   },
 

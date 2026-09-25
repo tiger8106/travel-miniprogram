@@ -17,6 +17,16 @@
 
 const api = require('../services/api');
 
+/** 当前行程的大地名（组件调用没传 fallbackRegion 时兜底用） */
+function currentTripRegion() {
+  try {
+    const t = (getApp() && getApp().globalData && getApp().globalData.currentTrip) || null;
+    return (t && t.region) || '';
+  } catch (e) {
+    return '';
+  }
+}
+
 /** 从"广西 桂林 阳朔"里取第一个城市词（复制给地图 App 搜索时用） */
 function firstCity(region) {
   const tokens = String(region || '').split(/[\s,，、]+/).map((s) => s.trim()).filter(Boolean);
@@ -25,20 +35,34 @@ function firstCity(region) {
 
 /**
  * 打开导航（一键直达，无中间弹窗）
- * @param {object} opts { from, to, mode, endLat, endLon, region }
- *   region：城市/大地名（如「桂林」或「广西 桂林」），只用于帮地理编码消歧，
+ * @param {object} opts { from, to, mode, endLat, endLon, region, fallbackRegion }
+ *   region：条目自己的城市（如「桂林」），只用于帮地理编码消歧，
  *   绝不会拼进显示名称——界面上看到的还是「象鼻山」而不是「桂林象鼻山」。
+ *   fallbackRegion：整条行程的大地名（如「广西 桂林 阳朔 南宁」）。
+ *   条目城市查不到时用它再试一次——跨城段（南宁东站）挂在桂林那天的
+ *   条目上，光靠"桂林"一个词是查不到的。
  */
 async function openAmapNav(opts) {
   let lat = Number(opts.endLat);
   let lon = Number(opts.endLon);
   let reason = '';
 
-  // 没有坐标 → 实时查一次（约 200ms），带上城市消歧
+  // 没有坐标 → 实时查（约 200ms）。先条目城市、再整行程大地名，两级都带上城市消歧
   if (!(lat && lon && !isNaN(lat) && !isNaN(lon))) {
     wx.showLoading({ title: '定位中…' });
     try {
-      const coord = await api.geocode(opts.to, opts.region || '');
+      const attempts = [opts.region, opts.fallbackRegion, currentTripRegion()]
+        .filter((r, i, arr) => r && arr.indexOf(r) === i);   // 去重去空
+      let coord = null;
+      for (const r of attempts) {
+        try {
+          coord = await api.geocode(opts.to, r);
+        } catch (err) {
+          // 云函数会给一句能照做的提示（没配 Key / 该城市里没找到…）
+          reason = (err && err.message) || '';
+        }
+        if (coord && coord.lon && coord.lat) break;
+      }
       wx.hideLoading();
       if (coord && coord.lon && coord.lat) {
         lon = coord.lon;
@@ -46,8 +70,6 @@ async function openAmapNav(opts) {
       }
     } catch (e) {
       wx.hideLoading();
-      // 云函数会给一句能照做的提示（没配 Key / 该城市里没找到…）
-      reason = (e && e.message) || '';
     }
   }
 

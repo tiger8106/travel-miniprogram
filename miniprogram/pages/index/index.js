@@ -495,6 +495,8 @@ Page({
       endLat: item.endLat,
       endLon: item.endLon,
       region: item.region || '',
+      // 条目城市查不到时（跨城段常这样），用整条行程的大地名再试一次
+      fallbackRegion: (this._trip && this._trip.region) || '',
     });
   },
 

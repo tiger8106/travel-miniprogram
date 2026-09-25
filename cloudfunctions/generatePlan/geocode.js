@@ -1,5 +1,5 @@
-// cloudfunctions/generatePlan/geocode.js
-// 高德 Web 服务（与 parseTravelPlan/geocode.js 同一份实现）：地点名 → 经纬度（服务端调用，不需要小程序端配域名白名单）
+// cloudfunctions/parseTravelPlan/geocode.js
+// 高德 Web 服务：地点名 → 经纬度（服务端调用，不需要小程序端配域名白名单）
 // 文档: https://lbs.amap.com/api/webservice/guide/api/georegeo
 //       https://lbs.amap.com/api/webservice/guide/api/search
 //
@@ -61,14 +61,35 @@ function parseLoc(str) {
 }
 
 /**
- * 从「广西 桂林 阳朔」这类大地名里挑出最适合给高德的城市词：
- * 第一个不是省份的词，并去掉「市/县/区」等行政后缀（桂林市 → 桂林）。
+ * 从「广西 桂林 阳朔县城（西街附近）」这类脏串里清洗出一组城市词：
+ *   - 去掉括号补注（大纲里的住宿地常带「（两江四湖片区）」）
+ *   - 「广西壮族自治区」归一成「广西」
+ *   - 砍行政后缀：「桂林市」→「桂林」、「阳朔县城」→「阳朔」
+ * 返回去重后的词表，供高德 city 参数与结果校验共用。
+ */
+function cityTokens(region) {
+  const out = [];
+  String(region || '').split(/[\s,，、]+/).forEach((raw) => {
+    let t = String(raw || '').replace(/[（(][^）)]*[）)]/g, '').replace(/\s/g, '');
+    if (!t) return;
+    for (const p of PROVINCE_NAMES) {
+      if (t.indexOf(p) === 0) { t = p; break; }
+    }
+    t = t.replace(/((特别)?行政区|自治州|自治县|各族自治县|地区|盟|县城|市区|市|县|区|旗|镇)+$/, '');
+    if (t.length < 2 || out.includes(t)) return;
+    out.push(t);
+  });
+  return out;
+}
+
+/**
+ * 从城市词表里挑出最适合给高德 city 参数的那个：第一个不是省份的词。
  * 挑不到就返回空（让高德自己猜，总比塞个错参数强）。
  */
 function pickCity(region) {
-  const tokens = String(region || '').split(/[\s,，、]+/).map((s) => s.trim()).filter(Boolean);
-  const raw = tokens.find((t) => !PROVINCE_NAMES.has(t.replace(/(省|市|自治区|特别行政区)$/, ''))) || tokens[0] || '';
-  return raw.replace(/(省|市|自治区|特别行政区|地区|自治州|县|区|旗|盟)$/, '') || raw;
+  const tokens = cityTokens(region);
+  const nonProv = tokens.filter((t) => !PROVINCE_NAMES.has(t));
+  return nonProv[0] || tokens[0] || '';
 }
 
 /** 砍掉 LLM 自造的景点后缀 */
@@ -81,15 +102,17 @@ function stripSuffix(name) {
 }
 
 /**
- * 城市校验：返回结果是不是真的在期望的城市里。
- * 比对范围放宽到 省+市+区县+详细地址+POI 名，这样「龙脊梯田」这类
- * 片区名（不是行政区名）也能靠详细地址命中。
+ * 城市校验：返回结果是不是真的落在行程范围内。
+ * region 可以是「广西 桂林 阳朔」整串——**词表里任意一个城市命中就算过**。
+ * 为什么放宽成"任一命中"：跨城行程里「南宁东站」挂在桂林那天的条目上，
+ * 只拿"桂林"校验会白白拒掉一个完全正确的坐标。
  * 没给城市时不校验（true），保持老行为。
  */
-function cityHit(city, hay) {
-  const c = pickCity(city);
-  if (!c) return true;
-  return String(hay || '').indexOf(c) >= 0;
+function cityHit(region, hay) {
+  const tokens = cityTokens(region);
+  if (!tokens.length) return true;
+  const h = String(hay || '');
+  return tokens.some((t) => h.indexOf(t) >= 0);
 }
 
 /** POI 关键词搜索（v3/place/text）。citylimit=true 时城市是硬限制，不会串到外省。 */
@@ -175,7 +198,8 @@ async function geocodeOne(address, city) {
   for (let i = 0; i < steps.length; i++) {
     const tag = steps[i][0];
     const list = await steps[i][1]();
-    const hit = list.find((x) => cityHit(c, x.hay));
+    // 校验用完整城市词表（任一命中即可），别只拿挑出来的第一个词卡死跨城段
+    const hit = list.find((x) => cityHit(city, x.hay));
     if (hit) {
       console.log('[geocode] 命中 %s → %s（%s）', address, hit.name, tag);
       return { lon: hit.lon, lat: hit.lat, matchedName: hit.name };
@@ -220,4 +244,4 @@ async function geocodeBatch(addresses, cityOf) {
   return result;
 }
 
-module.exports = { geocodeOne, geocodeBatch, pickCity, stripSuffix, cityHit };
+module.exports = { geocodeOne, geocodeBatch, pickCity, cityTokens, stripSuffix, cityHit };
