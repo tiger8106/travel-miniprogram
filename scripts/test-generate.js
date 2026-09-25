@@ -30,7 +30,7 @@ fs.readFileSync(envPath, 'utf-8').split('\n').forEach((line) => {
 
 const P = require('../cloudfunctions/generatePlan/plan.js');
 const { normalizeInput, shiftDate, dayDiff, isHolidayRange, buildFallbackAlarms, sanitizeAlarmCandidates } = P;
-const { stripMeta } = require('../cloudfunctions/generatePlan/normalize.js');
+const { stripMeta, sanitizeItems } = require('../cloudfunctions/generatePlan/normalize.js');
 
 let pass = 0, fail = 0;
 const ok = (cond, msg, extra) => {
@@ -274,6 +274,13 @@ ok(!/取回寄存的行李/.test(r7[0].note || '') && !/取回寄存的行李/.t
   '否定句里的"寄存"（不寄存/严禁寄存）不算寄存，不冒出取回提醒',
   JSON.stringify([r7[0].note, r7[1].note]));
 
+let r8 = lug([
+  { dayIndex: 0, startTime: '07:30', endTime: '08:00', activity: '大件行李留在酒店房间或寄存前台，轻装出发', category: 'hotel' },
+  { dayIndex: 0, startTime: '09:00', endTime: '12:00', activity: '前往都江堰景区', category: 'transport' },
+]);
+ok(!/取回寄存的行李/.test(r8[1].note || ''),
+  '行李寄在本家酒店且今晚回同一家 → 不多嘴喊"取回"（川西冒烟实锤）', r8[1].note);
+
 // 5g. 同天时间重叠兜底：LLM 偶尔排出"上一条没结束下一条就开始了"
 const overlapped = P.fixDayTimeOverlaps([
   { dayIndex: 0, startTime: '09:00', endTime: '10:00', activity: 'A' },
@@ -290,6 +297,65 @@ const contained = P.fixDayTimeOverlaps([
 ]);
 ok(contained[1].startTime === '12:00' && contained[1].endTime === '12:30',
   '完全被盖住的条目：顺延后至少给 30 分钟，不造零时长', `${contained[1].startTime}-${contained[1].endTime}`);
+
+// 5h. 模型"内心独白"整条泄漏（川西实锤）：
+//     activity 是对"必须原样执行"的论证独白，不是行程 —— stripMeta 逐句删
+//     对整段独白无能为力（删光了会原样保留），必须在条目级抢救或丢弃
+const metaGarbage = {
+  dayIndex: 2, startTime: '17:15', endTime: '17:35',
+  activity: '鉴于上游要求"必须原样执行"但给出了具体时刻 13:00-13:20，前序行程需大幅提前或此为错误约束。**修正正确**：如果严格执行13:00的交通，那么上午游览后必须立即离开。',
+  category: 'transport', startLocation: '都江堰站', endLocation: '眉山站', transportType: 'train',
+  note: '原样执行车使用的交通时刻：13:00-13:20',
+};
+const salvaged = sanitizeItems([metaGarbage]);
+ok(salvaged.length === 1, '整段独白但带起终点 → 抢救成干净的交通条目',
+  JSON.stringify(salvaged.map((x) => x.activity)));
+ok(salvaged.length && salvaged[0].activity === '从都江堰站前往眉山站' && !salvaged[0].note,
+  '独白剥干净，只留"从哪到哪"', salvaged.length ? `${salvaged[0].activity} / note=${salvaged[0].note}` : '（被丢了）');
+ok(salvaged.length && salvaged[0].startTime === '17:15' && salvaged[0].endTime === '17:35',
+  '抢救条目保留原时刻', salvaged.length ? `${salvaged[0].startTime}-${salvaged[0].endTime}` : '');
+const droppedMeta = sanitizeItems([{
+  dayIndex: 0, startTime: '10:00', endTime: '11:00',
+  activity: '鉴于上游要求原样执行，此为错误约束，修正正确如下。',
+  category: 'other',
+}]);
+ok(droppedMeta.length === 0, '没有起终点可抢救的独白条目 → 整条丢弃', JSON.stringify(droppedMeta));
+const normalItem = sanitizeItems([{
+  dayIndex: 0, startTime: '09:00', endTime: '10:00',
+  activity: '乘 C6122 次列车从都江堰站前往眉山站',
+  category: 'transport', startLocation: '都江堰站', endLocation: '眉山站',
+}]);
+ok(normalItem.length === 1 && normalItem[0].activity.includes('C6122'),
+  '正常交通条目不受 META_HARD 误伤', normalItem.length ? normalItem[0].activity : '（被丢了）');
+
+// 5i. 收尾闭环兜底：当天最后一条必须收在住宿地（返程日除外）
+const closureOutline = { days: [{ overnight: '都江堰' }, { overnight: '眉山' }, { overnight: '返程' }] };
+const closed = P.enforceDayClosure([
+  { dayIndex: 1, startTime: '16:30', endTime: '17:15', activity: '候车休息，准备乘车', category: 'other', startLocation: '都江堰站', endLocation: '都江堰站' },
+  { dayIndex: 1, startTime: '17:15', endTime: '17:35', activity: '从都江堰站前往眉山站', category: 'transport', startLocation: '都江堰站', endLocation: '眉山站', transportType: 'train' },
+  { dayIndex: 2, startTime: '09:00', endTime: '11:00', activity: '逛宽窄巷子', category: 'sight' },
+], closureOutline);
+const appended = closed.filter((x) => x.dayIndex === 1 && x.category === 'hotel');
+ok(appended.length === 1
+  && /前往眉山/.test(appended[0].activity)
+  && appended[0].startLocation === '眉山站' && appended[0].endLocation === '眉山',
+  '没收在住宿地的天 → 补一条"前往住宿地办理入住"（带导航起终点）',
+  JSON.stringify(appended));
+ok(appended.length && appended[0].startTime === '17:45' && appended[0].endTime === '18:15',
+  '补的酒店条目接在最后一条结束 +10 分钟，不与前面重叠',
+  appended.length ? `${appended[0].startTime}-${appended[0].endTime}` : '');
+ok(!closed.some((x) => x.dayIndex === 2 && x.category === 'hotel'),
+  '返程日（ov=返程）不补"回酒店"');
+const alreadyHome = P.enforceDayClosure([
+  { dayIndex: 0, startTime: '21:00', endTime: '21:30', activity: '回酒店休息', category: 'hotel', endLocation: '' },
+], closureOutline);
+ok(alreadyHome.length === 1 && alreadyHome[0].endLocation === '都江堰',
+  '已收在酒店：只补漏填的终点，不加条目', JSON.stringify(alreadyHome));
+const homeByWord = P.enforceDayClosure([
+  { dayIndex: 0, startTime: '21:00', endTime: '21:40', activity: '回民宿休息', category: 'other' },
+], closureOutline);
+ok(homeByWord.length === 1, '描述里写了回酒店/民宿 → 视为已收尾，不重复补',
+  JSON.stringify(homeByWord.map((x) => x.activity)));
 
 // 6. 失败天重试链路（不调真实 LLM：把 llm.chatWithRetry 换成假实现）
 //

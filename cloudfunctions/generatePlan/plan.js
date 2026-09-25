@@ -303,6 +303,69 @@ function enforceDayStartLocation(items, outline) {
   return items;
 }
 
+/**
+ * 收尾闭环兜底：当天最后一条必须"回到今晚住宿地"（返程日除外）
+ *
+ * 实测踩过：某天模型把大交通时刻冲突写成一段自我论证的独白，收拾残局时
+ * 只写到"17:35 到站"就结束了——晚上和回酒店凭空消失，第二天也从别处开始，
+ * 两天之间断链。提示词第 14 条写了"最后 1 条必须是回住宿地休息"，但模型
+ * 一旦前面跑偏就顾不上；这里用代码补最后一条 hotel，不指望 LLM 自觉。
+ */
+function enforceDayClosure(items, outline) {
+  const days = asArray(outline && outline.days);
+  if (!days.length || !asArray(items).length) return items;
+  const byDay = new Map();
+  asArray(items).forEach((it) => {
+    const di = Number(it.dayIndex || 0);
+    if (!byDay.has(di)) byDay.set(di, []);
+    byDay.get(di).push(it);
+  });
+  const out = items.slice();
+  byDay.forEach((list, di) => {
+    if (!list.length || di < 0 || di >= days.length) return;
+    const tonight = String((days[di].overnight || days[di].city) || '').trim();
+    // 最后一天 ov 写"返程"：以回到出发地结束，不补"回酒店"
+    if (!tonight || /返程|回家/.test(tonight)) return;
+    const sorted = list.slice().sort((a, b) =>
+      String(a.startTime || '').localeCompare(String(b.startTime || '')));
+    const last = sorted[sorted.length - 1];
+    // 已经收在住宿地：hotel 条目，或终点/描述明确是酒店民宿类。
+    // 注意别用 samePlace(终点, ov) 判——"眉山站"包含"眉山"会被误判成已到家，
+    // 人明明还拎着行李站在火车站。描述类只认"回/到/入住 + 住宿词"的动宾搭配，
+    // "去酒店附近的夜市"这种不算。
+    const lodgingWord = /酒店|民宿|客栈|宾馆|青旅|住宿/;
+    const atLodging = lodgingWord.test(String(last.endLocation || ''))
+      || /(回|回到|抵达|入住|办理入住)[^。，；]{0,8}(酒店|民宿|客栈|宾馆|青旅|住宿)/
+        .test(String(last.activity || ''));
+    if (last.category === 'hotel' || atLodging) {
+      if (last.category === 'hotel' && !String(last.endLocation || '').trim()) last.endLocation = tonight;
+      return;
+    }
+    const from = String(last.endLocation || last.startLocation || '').trim();
+    const endMin = toMin(last.endTime);
+    const st = (endMin != null ? endMin : 21 * 60) + 10;
+    // 不用 samePlace 判断要不要导航：'眉山站'包含'眉山'会被判成同地，
+    // 人明明还拎着行李在火车站，却连"从哪去酒店"的导航都不给了
+    const moved = !!from && from !== tonight;
+    out.push({
+      dayIndex: di,
+      startTime: fmtMin(Math.min(st, 23 * 60 + 30)),
+      endTime: fmtMin(Math.min(st + 30, 23 * 60 + 59)),
+      activity: moved
+        ? `前往${tonight}的住宿地办理入住，放下行李休息`
+        : `回${tonight}的住宿地休息`,
+      category: 'hotel',
+      startLocation: moved ? from : '',
+      endLocation: moved ? tonight : '',
+      transportType: moved ? 'car' : '',
+      note: '',
+    });
+    console.warn('[generatePlan] 第%d天没有收在住宿地（最后一条：%s…），补一条回酒店',
+      di + 1, String(last.activity || '').slice(0, 20));
+  });
+  return out;
+}
+
 /** 两个住宿地名是不是同一个地方（去掉括号补注与行政后缀再比，允许互相包含） */
 function samePlace(a, b) {
   const norm = (s) => String(s || '')
@@ -387,6 +450,9 @@ function enforceLuggageRules(items, outline) {
     if (storeIdx < 0) return;
     // 上面刚判过这条是错的寄存（换住处还留在酒店）→ 已经改成"带走"了，别再喊他回来取
     if (String(list[storeIdx].note || '').includes('退房请带走全部行李')) return;
+    // 行李就寄在本家酒店（今晚还回这家）：回来自然拿到，别多嘴喊"取回"
+    // （实测：'大件行李留在酒店房间或寄存前台'被追加了'记得取回'——今晚回同一家，取什么？）
+    if (!changedBase && /酒店|民宿|客栈|宾馆|青旅|房间|前台/.test(textOf(list[storeIdx]))) return;
     let reminded = false;
     for (let i = storeIdx; i < list.length; i++) {
       if (isPickup(list[i])) { reminded = true; break; }
@@ -661,7 +727,7 @@ function dayDetailPrompt(p, day, idx, outline) {
     `所在城市：${day.city}\n` +
     `大纲要点：${asArray(day.highlights).join('、')}\n` +
     (asArray(day.moves).length
-      ? `【已确认的跨城交通（用户可能手工改过，必须原样执行）】${asArray(day.moves).map(
+      ? `【今天的大交通（路线既定）】${asArray(day.moves).map(
           (m) => `${m.from || '?'}→${m.to || '?'} ${m.mode || ''} ${m.code || ''} ${m.startTime || ''}-${m.endTime || ''}`
         ).join('；')}\n`
       : '') +
@@ -686,10 +752,13 @@ dayIndex 全部填 ${idx}。
 8. ${isLast ? `最后一天：以回到${p.origin || '出发地'}结束，写到家/到站为止，并预留返程交通时间。${p.backTime ? `**大交通必须在 ${p.backTime} 抵达${p.origin || '出发地'}（这是返程到达时间，不是发车时间）**，请按到达时刻往前倒推：发车/起飞时刻 → 前往车站机场 → 退房。` : ''}` : ''}
 9. category 取值：景点游览=sight，餐饮=food，住宿/回酒店=hotel，交通=transport，门票预订/取票=ticket，其他=other。
 10. 输出顺序按时间先后。只输出数组，不要任何解释。
-11. **【已确认的跨城交通】是最终决定，一个字都不许改**：交通方式、出发站/到达站、车次、起止时刻全部照抄。
+11. **【今天的大交通】是既定路线**：交通方式、车次、出发站/到达站照抄，不许改成别的交通方式、不许编造新车次。
+    - ${((isFirst && p.goTime) || (isLast && p.backTime))
+      ? '起止时刻是**用户指定的硬约束**，必须原样照抄，不许微调（首日按出发时刻、末日按到达时刻安排前后流程）。'
+      : '大纲里的起止时刻只是**粗排参考**：若你确知该车次实际时刻与之不符、或与今天其他安排衔接不上，就按实际/合理的时刻微调，前后条目跟着顺移，保证全天时间线首尾相接；'}
+    - 时刻要调就**静默地调**，绝不允许在 activity / note 里解释、质疑、论证冲突（"鉴于…必须原样执行…""此为错误约束""修正…"这类字样一概不许出现）——用户看不见你的思考过程，只看得见行程。
     - 写的是 train/高铁/动车 → 按火车站流程安排（提前 45 分钟到站、安检、候车、上车），全程不得出现"机场""航站楼""航班""值机"等字样，transportType 填 train。
-    - 写的是 plane/航班 → 按机场流程安排（提前 2 小时到机场），transportType 填 plane。
-    - 不要自作主张把火车改飞机、把飞机改火车，也不要改车次和时刻；即便你觉得另一种方式更快也不行，这是用户的选择。
+    - 写的是 plane/航班 → 按机场流程安排（提前 2 小时到机场），transportType 填 plane。不要自作主张把火车改飞机、把飞机改火车；即便你觉得另一种方式更快也不行，这是用户的选择。
 ${/高铁|动车/.test(p.transport) ? '12. 用户交通偏好是「高铁/动车优先」：后续所有城际段一律按高铁或动车安排（优先高铁，没有合适高铁就走动车/城际），不要生成任何航班。' : ''}
 13. **activity 里只写"要做什么"，禁止写你的推理过程**：不要出现"注：根据大纲…""此处假设…""若用户…""我无法/我需要"这类自我纠错或向我的解释。这段文字会原样显示在用户的行程里，写了就很难看。
 14. **住宿闭环（铁律）**：昨晚住哪，今天第 1 条就从哪出发——${prev ? `昨晚住「${prev.overnight || prev.city}」，第 1 条应写成"从该酒店出发"，startLocation 填它` : '今天从出发地启程'}；当天最后 1 条必须是"回到${day.overnight || day.city}住宿地休息"（category=hotel，endLocation 填住宿地）。绝不允许昨晚住 A 今早却凭空从 B 出发、或晚上收在 C 但住宿地是 D。${sameBase ? '当晚回同一家酒店时，早上可加一条"大件行李留在房间/寄存前台，轻装出发"（note 写明回来续住）。' : '**今晚不回昨晚这家酒店，行李必须随身走**（见第 16 条）。'}
@@ -1285,9 +1354,13 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
     Date.now() - t1, detail.items.length, detail.partial);
 
   // 行李规则放在 sanitize 之后：清洗会删条目（可能把"寄存行李"那条删掉，
-  // 也可能把提醒取回的那条删掉），删完再看一遍才是最终要展示的结果
+  // 也可能把提醒取回的那条删掉），删完再看一遍才是最终要展示的结果。
+  // 收尾闭环也在 sanitize 之后补（清洗删完条目才知道哪天没回酒店），
+  // 补完再做时间重叠顺延（补的酒店条目开始时间取上一条结束 +10min，不会重叠）。
   const items = fixDayTimeOverlaps(
-    enforceLuggageRules(enforceDayStartLocation(sanitizeItems(detail.items), outline), outline));
+    enforceLuggageRules(
+      enforceDayClosure(
+        enforceDayStartLocation(sanitizeItems(detail.items), outline), outline), outline));
 
   // 地理编码消歧要用的每天城市 + 地址→天下标映射。
   // savePlan 的 cityOf 靠它们给高德传 city 参数——之前只消费不生产，
@@ -1379,5 +1452,5 @@ module.exports = {
   normalizeInput, sanitizeAlarmCandidates, buildFallbackAlarms, fallbackAlarms,
   shiftDate, dayDiff, isHolidayRange,
   parseDestList, missingMustVisit, placeStem, duplicateHighlights,
-  applyTripEdgeTimes, enforceDayStartLocation, enforceLuggageRules, fixDayTimeOverlaps, samePlace, toMin, fmtMin,
+  applyTripEdgeTimes, enforceDayStartLocation, enforceDayClosure, enforceLuggageRules, fixDayTimeOverlaps, samePlace, toMin, fmtMin,
 };

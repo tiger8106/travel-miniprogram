@@ -76,6 +76,21 @@ const META_PAT = [
   /此处假设|此处严格|若用户|如果用户强制/,
   /【已确认|【已确认的跨城交通】|【今天】|【昨天】|【明天】/,
   /作为\s*(一个\s*)?(AI|人工智能|助手)|我无法|我需要|我将为你|让我/,
+  // 实测新一轮漏网（川西行程）：模型对"必须原样执行"的班次时刻有异议，
+  // 把论证过程整段写进了 activity —— 逐句剔除对整段独白无能为力，见 META_HARD
+  /鉴于上游|上游要求|必须原样|错误约束|修正正确|严格执行/,
+];
+
+// 整条条目都是"内心独白"的硬特征：命中即认为 activity 根本不是行程描述，
+// 而是模型对约束冲突的自我论证（实测："鉴于上游要求'必须原样执行'但给出了
+// 具体时刻 13:00-13:20，前序行程需大幅提前或此为错误约束。**修正正确**…"）。
+// 这种条目要整条处理（有起终点的抢救成干净的交通条目，否则丢弃），
+// 不能只靠 stripMeta 逐句删——整段都是独白时 stripMeta 会原样保留。
+const META_HARD = [
+  /鉴于上游|上游要求/,
+  /原[样似]执行|必须原样|照抄大纲/,
+  /错误约束|约束冲突|此为错误/,
+  /修正正确|更正如下/,
 ];
 
 /**
@@ -110,20 +125,45 @@ function sanitizeItems(rawItems) {
     .map((it) => {
       let di = parseInt(it.dayIndex, 10);
       if (!(di >= 0 && di < MAX_DAY)) di = 0;
+      const rawAct = String(it.activity || '');
+      const start = String(it.startLocation || '').trim();
+      const end = String(it.endLocation || '').trim();
+
+      // ---------- Pass 0：整条"内心独白"抢救 ----------
+      // 命中 META_HARD 说明这条 activity 是模型的自我论证，不是行程。
+      // 有明确起终点的（多半是交通条目）→ 独白扔掉、动作保留；否则整条丢弃。
+      if (META_HARD.some((re) => re.test(rawAct))) {
+        if (start && end && !samePlace(start, end)) {
+          return {
+            dayIndex: di,
+            startTime: normTime(it.startTime),
+            endTime: normTime(it.endTime),
+            activity: `从${start}前往${end}`.slice(0, 200),
+            category: 'transport',
+            startLocation: start,
+            endLocation: end,
+            transportType: it.transportType || '',
+            note: '',
+          };
+        }
+        return null;
+      }
+
       return {
         dayIndex: di,
         startTime: normTime(it.startTime),
         endTime: normTime(it.endTime),
-        activity: stripMeta(it.activity).slice(0, 200),
+        activity: stripMeta(rawAct).slice(0, 200),
         category: ['sight', 'food', 'hotel', 'transport', 'ticket', 'other'].includes(it.category)
           ? it.category
           : 'other',
-        startLocation: String(it.startLocation || '').trim().slice(0, 60),
-        endLocation: String(it.endLocation || '').trim().slice(0, 60),
+        startLocation: start.slice(0, 60),
+        endLocation: end.slice(0, 60),
         transportType: it.transportType || '',
         note: stripMeta(it.note).slice(0, 300),
       };
-    });
+    })
+    .filter(Boolean);
 
   // ---------- Pass 2：跨天位置继承 ----------
   // 逐天解析时每天是独立请求，"当天第一条移动"常因原文没写出发点而缺失起点。
@@ -248,4 +288,4 @@ function sanitizeItems(rawItems) {
   return items;
 }
 
-module.exports = { normTime, samePlace, sanitizeItems, toMin, fmtMin, parseDurationMin, stripMeta };
+module.exports = { normTime, samePlace, sanitizeItems, toMin, fmtMin, parseDurationMin, stripMeta, META_PAT, META_HARD };
