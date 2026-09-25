@@ -209,10 +209,11 @@ ok('时长格式化可读', eta.fmtDuration(25000) === '25 秒' && eta.fmtDurati
 ok('去程标签改为「去程开始时间」', /去程开始时间/.test(plWxml) && !/>\s*去程时间\s*</.test(plWxml));
 ok('返程标签改为「返程到达时间」', /返程到达时间/.test(plWxml) && !/>\s*返程时间\s*</.test(plWxml));
 const planJs = fs.readFileSync(path.join(ROOT, 'cloudfunctions/generatePlan/plan.js'), 'utf8');
-ok('后端：返程按"抵达出发地"倒推（e 字段写 backTime）',
-  /返程到达时间已由用户指定/.test(planJs) && /mv 里 e 字段写 \$\{p\.backTime\}/.test(planJs));
-ok('后端：去程按"从出发地启程"（s 字段写 goTime）',
-  /去程开始时间已由用户指定/.test(planJs) && /mv 里 s 字段写 \$\{p\.goTime\}/.test(planJs));
+ok('后端：返程按"到家时刻"倒推（大交通到站 = backTime-40 分钟）',
+  /返程到家时间已由用户指定/.test(planJs) && /backMin - 40/.test(planJs));
+ok('后端：goTime = 离开出发地时刻（发车 = goTime+接驳/安检预留，且有接驳兜底）',
+  /去程开始时间已由用户指定/.test(planJs) && /goMin \+ buffer/.test(planJs)
+    && /function enforceOriginAccess/.test(planJs));
 
 // ---------- ⑨ 不再用 max_tokens 卡模型输出 ----------
 const genLlm = fs.readFileSync(path.join(ROOT, 'cloudfunctions/generatePlan/llm.js'), 'utf8');
@@ -281,10 +282,23 @@ ok('大纲 prompt 写清"行李随人走"', /行李随人走/.test(planJs));
 ok('细化 prompt 按住宿地判定行李走法（第 16 条）', /16\. \*\*行李处理/.test(planJs) && /sameBase/.test(planJs));
 ok('换住处禁止把行李留在上一家酒店', /禁止写"把大件行李寄存在/.test(planJs));
 ok('行李规则有代码兜底且挂在 sanitize 之后', /function enforceLuggageRules/.test(planJs)
-  && /enforceLuggageRules\(\s*enforceDayClosure\(\s*enforceDayStartLocation\(\s*enforceMovesAlignment\(sanitizeItems/.test(planJs));
+  && /items = enforceLuggageRules\(items, outline\)/.test(planJs));
 ok('已确认大交通有确定性对齐兜底（车次错时刻/漏排/重复/起终点错都能拽回）',
   /function enforceMovesAlignment/.test(planJs)
   && /时刻漂移/.test(planJs) && /全天未安排，补一条/.test(planJs));
+ok('细化清洗链按序挂全（对齐→起点→接驳→早餐→晚间→闭环→行李→顺延）',
+  /items = enforceMovesAlignment\(sanitizeItems/.test(planJs)
+    && /items = enforceDayStartLocation\(items, outline\)/.test(planJs)
+    && /items = enforceOriginAccess\(items, p, outline\)/.test(planJs)
+    && /items = enforceMorningRoutine\(items, outline\)/.test(planJs)
+    && /items = enforceEveningPlan\(items, outline\)/.test(planJs)
+    && /items = enforceDayClosure\(items, outline, p\)/.test(planJs)
+    && /items = enforceLuggageRules\(items, outline\)/.test(planJs)
+    && /items = fixDayTimeOverlaps\(items\);/.test(planJs));
+ok('goTime 语义 = 离开出发地时刻（大交通发车按接驳+安检预留后移，goTime+85/160）',
+  /goMin \+ buffer/.test(planJs) && /\? 160/.test(planJs) && /\? 85/.test(planJs));
+ok('backTime 语义 = 到家时刻（大交通到站 = backTime-40）',
+  /backMin - 40/.test(planJs));
 
 // ---------- ⑭ 模型内心独白泄漏防护 + 收尾闭环 ----------
 const genNormJs = fs.readFileSync(path.join(ROOT, 'cloudfunctions/generatePlan/normalize.js'), 'utf8');
@@ -296,12 +310,24 @@ ok('整段"内心独白"条目有硬识别（META_HARD）',
   /const META_HARD/.test(genNormJs) && /鉴于上游/.test(genNormJs) && /倒叙/.test(genNormJs));
 ok('有起终点的独白条目抢救成干净交通条目，没起终点的丢弃',
   /从\$\{start\}前往\$\{end\}/.test(genNormJs) && /\.filter\(Boolean\)/.test(genNormJs));
-ok('收尾闭环有代码兜底（enforceDayClosure 挂在 sanitize 之后）',
-  /function enforceDayClosure/.test(planJs)
-  && /enforceDayClosure\(\s*enforceDayStartLocation/.test(planJs));
-ok('返程日不补"回酒店"（ov=返程）', /返程\|回家\/\.test\(tonight\)/.test(planJs));
+ok('收尾闭环有代码兜底（enforceDayClosure 挂在清洗链中，签名带 p）',
+  /function enforceDayClosure\(items, outline, p\)/.test(planJs)
+    && /items = enforceDayClosure\(items, outline, p\)/.test(planJs));
+ok('返程日不补"回酒店"（ov=返程 或 最后一天）',
+  /返程\|回家\/\.test\(tonight\) \|\| di === days\.length - 1/.test(planJs));
 ok('收尾判定认"酒店/民宿"字样，不被"眉山站⊃眉山"骗过',
   /酒店\|民宿\|客栈\|宾馆\|青旅\|住宿/.test(planJs));
+ok('大纲有每晚推荐酒店（h 字段 → day.hotel，按预算档挑选）',
+  /"h":"推荐酒店"/.test(planJs) && /hotel: String\(d\.h \|\| ''\)/.test(planJs)
+    && /String\(today\.hotel \|\| ''\)/.test(planJs));
+ok('第一天有出发接驳兜底（OriginAccess：没写"从出发地出发"就补一条去车站）',
+  /function enforceOriginAccess/.test(planJs) && /出发接驳（按用户填写的出发时间生成）/.test(planJs));
+ok('每天有早餐兜底（第 2 天起 10 点前没吃饭补早餐）',
+  /function enforceMorningRoutine/.test(planJs) && /收拾行李退房/.test(planJs));
+ok('非末日有过早收尾兜底（20:30 前结束补晚餐/夜逛）',
+  /function enforceEveningPlan/.test(planJs) && /20 \* 60 \+ 30/.test(planJs));
+ok('返程日没回到家有兜底（最后一条不是出发地就补回家接驳）',
+  /从\$\{from\}返回\$\{origin\}，到家休息/.test(planJs));
 
 // ---------- ⑮ 地理编码与导航（多城市候选 / 中间点 / 目的地直连） ----------
 ok('geocode 支持多候选城市（region 城市词 + 地点自带行政区，如「重庆市金童路」）',

@@ -32,26 +32,24 @@ const META_HINT = new RegExp(
 (async () => {
   console.log('生成 3 天川西小行程（真实 LLM）…');
   const t0 = Date.now();
-  const outlineRes = await P.generateOutline({
+  const input = {
     dest: '成都、都江堰',
     startDate: '2026-10-10',
     endDate: '2026-10-12',
     transport: '高铁/动车优先',
-    goTime: '08:30',
+    origin: '重庆市金童路',
+    goTime: '15:30',
     backTime: '20:00',
-  });
+    budget: '舒适',
+    pace: '适中',
+    interests: ['美食', '夜景'],
+  };
+  const outlineRes = await P.generateOutline(input);
   const outline = outlineRes.outline;
   console.log(`大纲完成 ${Date.now() - t0}ms：${outlineRes.title}`);
-  outline.days.forEach((d) => console.log(`  ${d.date} ${d.city}｜${d.theme}｜ov=${d.overnight}｜mv=${(d.moves || []).map((m) => `${m.code} ${m.startTime}-${m.endTime}`).join(';')}`));
+  outline.days.forEach((d) => console.log(`  ${d.date} ${d.city}｜${d.theme}｜ov=${d.overnight}｜hotel=${d.hotel || '-'}｜mv=${(d.moves || []).map((m) => `${m.code} ${m.startTime}-${m.endTime}`).join(';')}`));
 
-  const plan = await P.buildPlan({
-    dest: '成都、都江堰',
-    startDate: '2026-10-10',
-    endDate: '2026-10-12',
-    transport: '高铁/动车优先',
-    goTime: '08:30',
-    backTime: '20:00',
-  }, outline);
+  const plan = await P.buildPlan(input, outline);
   console.log(`细化完成，共 ${plan.items.length} 条，耗时 ${Date.now() - t0}ms\n`);
 
   let fail = 0;
@@ -59,6 +57,19 @@ const META_HINT = new RegExp(
     console.log((cond ? '  ✅ ' : '  ❌ ') + msg + (cond ? '' : `  → ${extra}`));
     if (!cond) fail++;
   };
+
+  // ⓪ 新增：goTime 语义 = 离开出发地时刻（15:30 出门，大交通应在其后发车）
+  const firstDay = plan.items.filter((it) => it.dayIndex === 0)
+    .sort((a, b) => String(a.startTime).localeCompare(String(b.startTime)));
+  const access = firstDay.find((it) => /金童路/.test(`${it.startLocation || ''}${it.activity || ''}`));
+  ok(!!access, '第一天有「从金童路出发」的接驳条目（15:30 出门）',
+    JSON.stringify(firstDay.slice(0, 2)));
+  ok(access && access.startTime === '15:30', '接驳从 15:30（用户填的出发时间）开始',
+    access && access.startTime);
+
+  // ⓪.5 大纲给了推荐酒店，最后入住条目应落在具体酒店
+  const hotels = outline.days.map((d) => d.hotel).filter(Boolean);
+  ok(hotels.length > 0, '大纲有推荐酒店（h 字段生效）', String(hotels));
 
   // ① 无内心独白泄漏（清洗前后都不允许）
   const metaItems = plan.items.filter((it) => META_HINT.test(`${it.activity}${it.note}`));
@@ -79,7 +90,9 @@ const META_HINT = new RegExp(
     ok(closed, `第${di + 1}天收尾闭环（最后一条：${String(last.activity).slice(0, 24)}…）`);
   });
 
-  // 打印中间天完整内容供人工核对（就是用户截图里出问题的那种天）
+  // 打印首日与中间天完整内容供人工核对
+  console.log(`\n—— 第1天明细 ——`);
+  firstDay.forEach((it) => console.log(`  ${it.startTime}-${it.endTime} ${it.activity}${it.note ? ' ｜ ' + it.note : ''}`));
   const mid = days.find((d) => d > 0 && d < days.length - 1);
   if (mid != null) {
     console.log(`\n—— 第${mid + 1}天明细 ——`);
@@ -87,6 +100,14 @@ const META_HINT = new RegExp(
       .sort((a, b) => String(a.startTime).localeCompare(String(b.startTime)))
       .forEach((it) => console.log(`  ${it.startTime}-${it.endTime} ${it.activity}${it.note ? ' ｜ ' + it.note : ''}`));
   }
+
+  // ③ 末日必须收在出发地（到家，不是只到车站）
+  const lastDi = days[days.length - 1];
+  const lastDayItems = plan.items.filter((it) => it.dayIndex === lastDi)
+    .sort((a, b) => String(a.startTime).localeCompare(String(b.startTime)));
+  const lastItem = lastDayItems[lastDayItems.length - 1];
+  ok(/金童路/.test(`${lastItem.endLocation || ''}${lastItem.activity || ''}`),
+    '末日收在出发地（金童路到家）', `${lastItem.startTime}-${lastItem.endTime} ${lastItem.activity}`);
 
   console.log(fail ? `\n${fail} 项失败 ✗` : '\n冒烟通过 ✓');
   process.exit(fail ? 1 : 0);

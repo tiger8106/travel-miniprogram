@@ -106,11 +106,12 @@ function normalizeInput(input) {
   const interests = Array.isArray(i.interests) ? i.interests.slice(0, 8) : [];
   const transport = String(i.transport || '高铁/动车优先');
   // 分钟级的去/返程时刻：用户指定后，首末两天的大交通必须落在这个时刻上。
-  // ⚠️ 语义（2026-09-25 改）：
-  //   goTime   = **去程开始时间**：第一天从「出发城市」启程的时刻（mv.s）
-  //   backTime = **返程到达时间**：最后一天回到「出发城市」的时刻（mv.e，不是发车时刻！）
-  //   返程按"到达时刻"倒推发车时刻才符合直觉——用户想的是"我要几点到家"，
-  //   而不是"我要几点从景区走"。
+  // ⚠️ 语义（2026-09-25 二次修正）：
+  //   goTime   = **离开出发地（家门口/酒店）的时刻**——第一天第 1 条就是
+  //              「goTime 从出发地出发前往车站」的接驳，大交通在其后发车
+  //              （applyTripEdgeTimes 按 goTime+接驳/安检预留推算发车时刻）
+  //   backTime = **回到出发地（到家）的时刻**——大交通到站 = backTime-40 分钟
+  //              （市内返家接驳），到家那条由细化/DayClosure 兜底生成
   const validTime = (s) => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(s || '').trim()) ? String(s).trim() : '';
   const dest = String(i.dest || i.destCity || '').trim();
   const { destList, mustVisit } = parseDestList(dest);
@@ -138,10 +139,12 @@ function profileText(p) {
     `${p.origin || '?'}出发 → ${p.dest || '?'}`,
     `${p.days}天（${p.startDate} 至 ${p.endDate}）`,
   ];
-  // 去/返程时刻精确到分钟，LLM 必须照这个时刻排首末两天的大交通
-  // goTime = 从出发城市启程（发车/起飞）；backTime = 回到出发城市（抵达）
-  if (p.goTime) bits.push(`去程 ${p.goTime} 从${p.origin || '出发地'}出发`);
-  if (p.backTime) bits.push(`返程 ${p.backTime} 抵达${p.origin || '出发地'}`);
+  // 去/返程时刻精确到分钟。语义（2026-09-25 二次修正）：
+  //   goTime = **离开出发地（家门口/酒店）的时刻**——第一天行程第 1 条就是
+  //            「goTime 从出发地出发，前往车站/机场」的接驳，大交通在其之后发车；
+  //   backTime = **回到出发地的时刻**（到家），不是发车也不是到站。
+  if (p.goTime) bits.push(`去程 ${p.goTime} 从${p.origin || '出发地'}启程（离开家/酒店的时刻）`);
+  if (p.backTime) bits.push(`返程 ${p.backTime} 回到${p.origin || '出发地'}（到家时刻）`);
   bits.push(`${p.party} ${p.peopleNum}人`);
   bits.push(`预算${p.budget}`);
   bits.push(`节奏${p.pace}`);
@@ -181,7 +184,7 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
 
 # 输出格式（严格 JSON，短键名）
 {"t":"行程标题","s":"一句话路线概览","nt":[{"d":"MM-DD","c":"住宿城市"}],"ds":[
-{"d":"YYYY-MM-DD","city":"城市","t":"当天主题短语","mv":[{"f":"出发站","to":"到达站","m":"train/plane/car/bus/ship","c":"车次/航班号","s":"HH:mm","e":"HH:mm"}],"hl":["必玩1","必玩2","必玩3"],"ml":["餐1","餐2"],"ov":"当晚住宿城市或片区","n":"关键提示（30字内）"}]}
+{"d":"YYYY-MM-DD","city":"城市","t":"当天主题短语","mv":[{"f":"出发站","to":"到达站","m":"train/plane/car/bus/ship","c":"车次/航班号","s":"HH:mm","e":"HH:mm"}],"hl":["必玩1","必玩2","必玩3"],"ml":["餐1","餐2"],"ov":"当晚住宿城市或片区","h":"推荐酒店","n":"关键提示（30字内）"}]}
 
 # 硬性要求
 0. **城市串联原则（最重要）**：把出发地和所有目的地按「总路程最短 + 换乘最少 + 单程耗时最短」串成一条线。
@@ -199,15 +202,16 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
 1. ds 恰好 ${p.days} 天，日期从 ${p.startDate} 连续到 ${p.endDate}，每天一个元素，顺序递增。
 2. 路线顺路：相邻两天不来回折返；同一城市连片玩完再换城。
 3. 第一天从（或抵达）目的地${p.origin ? `（出发地 ${p.origin}）` : ''}，最后一天返回${p.origin || '出发地'}。
-3.1 ${p.goTime ? `**去程开始时间已由用户指定**：第一天的大交通必须在 ${p.goTime} 从${p.origin || '出发地'}启程（mv 里 s 字段写 ${p.goTime}，e 按实际运行时长推算）。` : '去程班次请给出一个具体、合理的发车/起飞时刻（s/e 都要精确到分钟）。'}
-3.2 ${p.backTime ? `**返程到达时间已由用户指定**：最后一天的大交通必须在 ${p.backTime} **抵达${p.origin || '出发地'}**（mv 里 e 字段写 ${p.backTime}，s 按实际运行时长往前倒推发车/起飞时刻）。这是"到达时间"不是"发车时间"，千万别把 ${p.backTime} 填进 s。` : '返程班次请给出合理的发车/起飞时刻与到达时刻（精确到分钟）。'}
+3.1 ${p.goTime ? `**去程开始时间已由用户指定**：${p.goTime} 是用户**离开${p.origin || '出发地'}（家门口）的时刻**，不是发车时刻！第一天的大交通发车时刻 = ${p.goTime} + 市内接驳约 40 分钟 + 安检候车（高铁提前 45 分 / 飞机提前 2 小时），把推算出的发车/起飞时刻写进 mv.s（e 按实际运行时长推算）。` : '去程班次请给出一个具体、合理的发车/起飞时刻（s/e 都要精确到分钟）。'}
+3.2 ${p.backTime ? `**返程到家时间已由用户指定**：${p.backTime} 是用户**回到${p.origin || '出发地'}（到家）的时刻**，不是发车也不是到站！最后一天的大交通 mv.e = ${p.backTime} 减去市内返家接驳约 40 分钟（到站时刻），s 按实际运行时长往前倒推。` : '返程班次请给出合理的发车/起飞时刻与到达时刻（精确到分钟）。'}
 4. mv 只写城际大交通：**s = 发车/起飞时刻，e = 到达时刻**；火车给参考车次走向（如 G2249），飞机给航线；市内交通不写。
 5. hl 每天 3-4 个**具体景点/片区名称**，别写"逛逛市区"这种废话；兼顾${p.pace}节奏${p.interests.length ? '和偏好' : ''}。
    5.1 **地名用地图搜得到的通用叫法**：写"象鼻山"就别写成"象鼻山公园"（外省真有同名公园，导航会导过去），不要自造"XX景区大门""XX游客中心"这类后缀，也不要带括号补注。
 6. ${p.mustGo ? `用户必去：${p.mustGo}，必须排进合适的一天。` : ''}${p.extra ? `特殊要求：${p.extra}` : ''}
 6.1 ${p.mustVisit && p.mustVisit.length ? `**用户点名的目的地一个都不许漏**：${p.mustVisit.join('、')} —— 每一个都必须在大纲里占到实实在在的行程（成为某天的城市、当天主题或必玩点之一）。觉得不顺路的，安排当天往返或顺路串联，宁可调整路线也绝不许默默丢掉任何一个。` : ''}
 7. ${p.budget === '经济' ? '住性价比档，餐饮接地气；' : p.budget === '品质' ? '住高品质酒店/度假村，餐饮选口碑正餐；' : '住舒适型酒店，餐饮兼顾特色与性价比；'}推荐写类型/片区+代表菜，不要编造具体门牌地址。
-8. ov 写住宿城市或片区（最后一天写"返程"）；nt 长度 = ${p.days - 1} 晚。
+   7.1 **每晚推荐一家具体酒店（h 字段，按用户预算「${p.budget}」档挑选）**：写真实存在、地图能搜到的连锁或口碑酒店名（如"桂林漓江大瀑布饭店"），并符合用户的节奏与兴趣（亲子选带泳池/家庭房，情侣选江景/设计感，美食偏好选近夜市）。同一 ov 连住多晚就写同一家；确实没有把握的就写「片区+档次」（如"两江四湖片区舒适型酒店"），**不要编造不存在的酒店名**。最后一天（返程日）h 留空。
+8. ov 写住宿城市或片区（最后一天写"返程"）；h 每晚一家；nt 长度 = ${p.days - 1} 晚。
 9. 所有文本简体中文，n 字段控制在 30 字以内。只输出 JSON 对象。`;
 
   // 大纲是单独一次云函数调用（60s 上限），留 8s 给返回，单次最多等 52s
@@ -421,7 +425,7 @@ function enforceMovesAlignment(items, outline) {
  * 两天之间断链。提示词第 14 条写了"最后 1 条必须是回住宿地休息"，但模型
  * 一旦前面跑偏就顾不上；这里用代码补最后一条 hotel，不指望 LLM 自觉。
  */
-function enforceDayClosure(items, outline) {
+function enforceDayClosure(items, outline, p) {
   const days = asArray(outline && outline.days);
   if (!days.length || !asArray(items).length) return items;
   const byDay = new Map();
@@ -433,9 +437,40 @@ function enforceDayClosure(items, outline) {
   const out = items.slice();
   byDay.forEach((list, di) => {
     if (!list.length || di < 0 || di >= days.length) return;
-    const tonight = String((days[di].overnight || days[di].city) || '').trim();
-    // 最后一天 ov 写"返程"：以回到出发地结束，不补"回酒店"
-    if (!tonight || /返程|回家/.test(tonight)) return;
+    const today = days[di] || {};
+    const tonight = String(today.overnight || today.city || '').trim();
+    // 最后一天 ov 应写"返程"；就算模型写漏了，最后一天也绝不能补"回酒店"
+    if (!tonight || /返程|回家/.test(tonight) || di === days.length - 1) {
+      // 返程日兜底：大交通到站后必须还有一条"回出发地（家）"的接驳，
+      // 到站不算到家——用户填的 origin 是具体地址（如"重庆市金童路"）
+      const origin = String((p && p.origin) || '').trim();
+      if (!origin) return;
+      const sorted = list.slice().sort((a, b) =>
+        String(a.startTime || '').localeCompare(String(b.startTime || '')));
+      const last = sorted[sorted.length - 1];
+      if (!last) return;
+      const backHome = samePlace(last.endLocation || '', origin)
+        || String(last.endLocation || '').includes(origin)
+        || String(last.activity || '').includes(origin);
+      if (backHome) return;
+      const from = String(last.endLocation || last.startLocation || '').trim();
+      const endMin = toMin(last.endTime);
+      const st = (endMin != null ? endMin : 19 * 60) + 10;
+      if (!from) return;
+      out.push({
+        dayIndex: di,
+        startTime: fmtMin(Math.min(st, 23 * 60 + 30)),
+        endTime: fmtMin(Math.min(st + 40, 23 * 60 + 59)),
+        activity: `从${from}返回${origin}，到家休息`,
+        category: 'transport',
+        startLocation: from,
+        endLocation: origin,
+        transportType: 'car',
+        note: '',
+      });
+      console.warn('[generatePlan] 返程日最后一条只到「%s」，补一条回家接驳', from.slice(0, 16));
+      return;
+    }
     const sorted = list.slice().sort((a, b) =>
       String(a.startTime || '').localeCompare(String(b.startTime || '')));
     const last = sorted[sorted.length - 1];
@@ -448,7 +483,9 @@ function enforceDayClosure(items, outline) {
       || /(回|回到|抵达|入住|办理入住)[^。，；]{0,8}(酒店|民宿|客栈|宾馆|青旅|住宿)/
         .test(String(last.activity || ''));
     if (last.category === 'hotel' || atLodging) {
-      if (last.category === 'hotel' && !String(last.endLocation || '').trim()) last.endLocation = tonight;
+      if (last.category === 'hotel' && !String(last.endLocation || '').trim()) {
+        last.endLocation = String(today.hotel || '').trim() || tonight;
+      }
       return;
     }
     const from = String(last.endLocation || last.startLocation || '').trim();
@@ -457,23 +494,214 @@ function enforceDayClosure(items, outline) {
     // 不用 samePlace 判断要不要导航：'眉山站'包含'眉山'会被判成同地，
     // 人明明还拎着行李在火车站，却连"从哪去酒店"的导航都不给了
     const moved = !!from && from !== tonight;
+    // 大纲给了具体推荐酒店就用它（可导航到真酒店），没给就退回住宿片区
+    const hotel = String(today.hotel || '').trim();
+    const destName = hotel || tonight;
     out.push({
       dayIndex: di,
       startTime: fmtMin(Math.min(st, 23 * 60 + 30)),
       endTime: fmtMin(Math.min(st + 30, 23 * 60 + 59)),
       activity: moved
-        ? `前往${tonight}的住宿地办理入住，放下行李休息`
-        : `回${tonight}的住宿地休息`,
+        ? `前往${destName}办理入住，放下行李休息`
+        : `回${destName}休息`,
       category: 'hotel',
       startLocation: moved ? from : '',
-      endLocation: moved ? tonight : '',
+      endLocation: moved ? destName : '',
       transportType: moved ? 'car' : '',
-      note: '',
+      note: hotel ? `今晚住${tonight}` : '',
     });
     console.warn('[generatePlan] 第%d天没有收在住宿地（最后一条：%s…），补一条回酒店',
       di + 1, String(last.activity || '').slice(0, 20));
   });
   return out;
+}
+
+/**
+ * 第一天出发接驳兜底：必须有「从出发地（家门口）→ 车站/机场」这一条
+ *
+ * 实测踩过：用户填"出发地 重庆市金童路、出发时间 15:30"，生成的行程第 1 条
+ * 直接是"15:30 乘高铁"——从金童路去重庆西站的接驳凭空消失。
+ * prompt 规则 7 已要求第 1 条就是接驳，但模型偶尔仍直接从大交通写起；
+ * 这里确定性补：第 0 天若没有任何"从出发地出发"的条目，就在大交通之前
+ * 插一条打车接驳（时刻按 goTime 与安检预留推算）。
+ */
+function enforceOriginAccess(items, p, outline) {
+  const origin = String((p && p.origin) || '').trim();
+  if (!origin || !asArray(items).length) return items;
+  const goMin = toMin(p && p.goTime);
+  const days = asArray(outline && outline.days);
+  const byDay = new Map();
+  asArray(items).forEach((it) => {
+    const di = Number(it.dayIndex || 0);
+    if (!byDay.has(di)) byDay.set(di, []);
+    byDay.get(di).push(it);
+  });
+  const list = byDay.get(0) || [];
+  if (!list.length) return items;
+
+  // 已经有"从出发地出发"的条目（模型写了接驳）→ 不重复插
+  const fromOrigin = (it) => samePlace(it.startLocation || '', origin)
+    || String(it.activity || '').includes(origin);
+  if (list.some(fromOrigin)) return items;
+
+  // 首段大交通：transportType 与 activity 双重识别
+  const isBigMove = (it) => /train|plane/.test(String(it.transportType || ''))
+    || /乘[^，。;；]*(列车|航班)|飞机|高铁|动车/.test(String(it.activity || ''));
+  const sorted = list.slice().sort((a, b) =>
+    String(a.startTime || '').localeCompare(String(b.startTime || '')));
+  const big = sorted.find(isBigMove);
+  if (!big) return items;
+
+  const plane = String(big.transportType || '') === 'plane'
+    || /航班|飞机/.test(String(big.activity || ''));
+  const station = String(big.startLocation
+    || (days[0] && asArray(days[0].moves)[0] && asArray(days[0].moves)[0].from) || '').trim();
+  if (!station) return items;
+
+  const checkIn = plane ? 120 : 45;   // 到站需提前：安检候车
+  const drive = 40;                   // 市内门到门
+  const trainS = toMin(big.startTime);
+  const s = goMin != null ? goMin : (trainS != null ? trainS - checkIn - drive : null);
+  if (s == null) return items;
+  let e = trainS != null ? trainS - checkIn : s + drive;
+  if (e <= s + 15) e = s + drive;     // 时间紧也保底给一段完整的接驳
+  const st = Math.min(s, 23 * 60 + 50);
+  const en = Math.max(Math.min(e, 23 * 60 + 59), st + 15);
+  items.push({
+    dayIndex: 0,
+    startTime: fmtMin(st),
+    endTime: fmtMin(en),
+    activity: `从${origin}打车前往${station}，准备乘车`,
+    category: 'transport',
+    startLocation: origin,
+    endLocation: station,
+    transportType: 'car',
+    note: '出发接驳（按用户填写的出发时间生成）',
+  });
+  console.warn('[generatePlan] 第一天没有从「%s」出发的接驳，补一条去「%s」', origin, station);
+  return items;
+}
+
+/**
+ * 每天早餐兜底：第 2 天起，若 10:00 前没有任何餐饮条目，补一条"早餐+收拾退房"。
+ * （第一天从家里出发，早餐在家吃，不补；出发太早赶早班车的也不硬塞。）
+ */
+function enforceMorningRoutine(items, outline) {
+  const days = asArray(outline && outline.days);
+  if (!days.length || !asArray(items).length) return items;
+  const byDay = new Map();
+  asArray(items).forEach((it) => {
+    const di = Number(it.dayIndex || 0);
+    if (!byDay.has(di)) byDay.set(di, []);
+    byDay.get(di).push(it);
+  });
+  byDay.forEach((list, di) => {
+    if (di <= 0 || di >= days.length || !list.length) return;
+    const hasBreakfast = list.some((it) =>
+      it.category === 'food' && toMin(it.startTime) != null && toMin(it.startTime) < 10 * 60);
+    if (hasBreakfast) return;
+    const sorted = list.slice().sort((a, b) =>
+      String(a.startTime || '').localeCompare(String(b.startTime || '')));
+    const first = sorted[0];
+    const fs = toMin(first.startTime);
+    if (fs == null || fs < 7 * 60 + 35) return;   // 赶早班车没空吃，别硬塞
+    const s = Math.max(7 * 60, fs - 40);
+    const e = fs - 5;
+    if (e <= s + 10) return;
+    const prevOv = String((days[di - 1] && (days[di - 1].overnight || days[di - 1].city)) || '').trim();
+    items.push({
+      dayIndex: di,
+      startTime: fmtMin(s),
+      endTime: fmtMin(e),
+      activity: prevOv ? `在${prevOv}吃早餐，收拾行李退房` : '吃早餐，收拾行李退房',
+      category: 'food',
+      startLocation: '',
+      endLocation: '',
+      transportType: '',
+      note: '',
+    });
+    console.warn('[generatePlan] 第%d天 10 点前没有吃饭安排，补一条早餐', di + 1);
+  });
+  return items;
+}
+
+/**
+ * 晚间安排兜底：非末日当天若 20:30 前就结束了（典型：第一天傍晚就到目的地、
+ * 行李一放就没事干），补晚餐/夜逛。必须跑在 enforceDayClosure 之前——
+ * 插完由 closure 收尾"回酒店"，闭环不断。
+ */
+function enforceEveningPlan(items, outline) {
+  const days = asArray(outline && outline.days);
+  if (!days.length || !asArray(items).length) return items;
+  const byDay = new Map();
+  asArray(items).forEach((it) => {
+    const di = Number(it.dayIndex || 0);
+    if (!byDay.has(di)) byDay.set(di, []);
+    byDay.get(di).push(it);
+  });
+  byDay.forEach((list, di) => {
+    if (di < 0 || di >= days.length - 1 || !list.length) return;
+    const today = days[di] || {};
+    const tonight = String(today.overnight || today.city || '').trim();
+    if (!tonight || /返程|回家/.test(tonight)) return;
+    const city = String(today.city || tonight).trim() || tonight;
+    const sorted = list.slice().sort((a, b) =>
+      String(a.startTime || '').localeCompare(String(b.startTime || '')));
+    const last = sorted[sorted.length - 1];
+    const endMin = toMin(last.endTime);
+    if (endMin == null || endMin >= 20 * 60 + 30) return;
+
+    if (last.category === 'hotel') {
+      // 人已经回酒店但天还没黑透 → 补一条"再出门夜逛"（closure 随后补回酒店）
+      const s = endMin + 30;
+      if (s + 40 > 22 * 60 + 30) return;
+      items.push({
+        dayIndex: di,
+        startTime: fmtMin(s),
+        endTime: fmtMin(Math.min(s + 90, 22 * 60 + 30)),
+        activity: `晚上出门到${city}市区逛逛，感受当地夜生活`,
+        category: 'sight',
+        startLocation: tonight,
+        endLocation: city,
+        transportType: 'car',
+        note: '时间充裕，按兴趣选夜市/江边/商圈',
+      });
+      console.warn('[generatePlan] 第%d天 %s 就收尾了，补一条夜逛', di + 1, last.endTime);
+      return;
+    }
+    // 人还在外面 → 补晚餐；时间够再补夜逛
+    const s = endMin + 15;
+    const dinnerEnd = Math.min(s + 75, 20 * 60 + 30);
+    if (dinnerEnd > s + 30) {
+      items.push({
+        dayIndex: di,
+        startTime: fmtMin(s),
+        endTime: fmtMin(dinnerEnd),
+        activity: `在${city}吃晚餐，尝当地特色菜`,
+        category: 'food',
+        startLocation: '',
+        endLocation: city,
+        transportType: '',
+        note: '',
+      });
+    }
+    const ns = dinnerEnd + 20;
+    if (ns + 40 <= 22 * 60) {
+      items.push({
+        dayIndex: di,
+        startTime: fmtMin(ns),
+        endTime: fmtMin(Math.min(ns + 60, 22 * 60)),
+        activity: `饭后到${city}市区夜游散步`,
+        category: 'sight',
+        startLocation: '',
+        endLocation: city,
+        transportType: 'walk',
+        note: '',
+      });
+    }
+    console.warn('[generatePlan] 第%d天 %s 就结束了，补晚餐/夜逛', di + 1, last.endTime);
+  });
+  return items;
 }
 
 /** 两个住宿地名是不是同一个地方（去掉括号补注与行政后缀再比，允许互相包含） */
@@ -619,14 +847,28 @@ function applyTripEdgeTimes(p, outline) {
     const first = days[0];
     const list = asArray(first && first.moves);
     const m = list.find(railLike) || list[0];
-    if (m) shiftSeg(m, goMin, 'start');
+    if (m) {
+      // goTime = **离开出发地（家门口/酒店）的时刻**，不是发车时刻！
+      // 实测踩过：用户填"重庆市金童路 15:30 出发"，大纲把高铁发车写成 15:30，
+      // 细化自然从"15:30 乘高铁"写起——从金童路去重庆西站的接驳凭空消失。
+      // 发车时刻 = goTime + 市内接驳 40 分钟 + 安检候车（高铁 45 分 / 飞机 2 小时）。
+      const modeStr = `${m.mode || ''}${m.code || ''}`.toLowerCase();
+      const buffer = /plane|航班|飞机/.test(modeStr) ? 160
+        : /train|高铁|动车|火车/.test(modeStr) ? 85
+        : 60;                                    // bus/car/ship：门到门 40 分 + 余量
+      shiftSeg(m, goMin + buffer, 'start');
+    }
   }
   if (backMin != null && days.length > 1) {
     const last = days[days.length - 1];
     const list = asArray(last && last.moves);
     // 最后一天可能先有短途接驳、再上车返程 → 取**最后一段**大交通当返程
     const m = list.slice().reverse().find(railLike) || list[list.length - 1];
-    if (m) shiftSeg(m, backMin, 'end');
+    if (m) {
+      // backTime = **回到出发地（到家）的时刻**：大交通到达后还要 ~40 分钟
+      // 市内返家接驳，到站时刻 = backTime - 40（到家那条由细化/DayClosure 生成）
+      shiftSeg(m, Math.max(0, backMin - 40), 'end');
+    }
   }
   return outline;
 }
@@ -644,6 +886,7 @@ function normalizeOutlineJson(raw, p) {
     highlights: asArray(d.hl).map((x) => String(x || '').trim()).filter(Boolean),
     meals: asArray(d.ml).map((x) => String(x || '').trim()).filter(Boolean),
     overnight: String(d.ov || d.city || '').trim(),
+    hotel: String(d.h || '').trim(),     // 每晚推荐酒店（按预算/节奏/兴趣挑，可空）
     note: String(d.n || '').trim(),
   }));
   const nights = asArray(raw && raw.nt).map((n) => ({ date: n.d || '', city: String(n.c || '').trim() }));
@@ -799,6 +1042,7 @@ ${JSON.stringify(outlineToShortJson(outline))}
       if (asArray(nd.highlights).length) target.highlights = nd.highlights;
       if (asArray(nd.moves).length) target.moves = nd.moves;
       if (nd.overnight) target.overnight = nd.overnight;
+      if (nd.hotel) target.hotel = nd.hotel;
       if (nd.note) target.note = nd.note;
       changed++;
     });
@@ -843,7 +1087,7 @@ function dayDetailPrompt(p, day, idx, outline) {
       : '') +
     (day.meals && asArray(day.meals).length ? `餐饮建议：${asArray(day.meals).join('、')}\n` : '') +
     (day.note ? `提示：${day.note}\n` : '') +
-    `当晚住宿：${day.overnight || day.city}\n\n` +
+    `当晚住宿：${day.overnight || day.city}${day.hotel ? `（推荐酒店：${day.hotel}，已按用户预算「${p.budget}」档挑选，最后的入住条目用它）` : ''}\n\n` +
     (prev ? `【昨天】${prev.date}｜${prev.theme}，昨晚住${prev.overnight || prev.city} —— 今天第一条行程从这里出发。\n` : '') +
     (next ? `【明天】${next.date}｜${next.theme}（今天的行程要为明天的移动留出余量）\n\n` : '\n');
 
@@ -856,16 +1100,17 @@ dayIndex 全部填 ${idx}。
 2. 每条 startTime / endTime 必须具体且**首尾相接**：后一条的 startTime 等于前一条的 endTime（中间留间隔也算合理，如 转场/休息），全天从起床开始、到回酒店休息结束。禁止输出空时间、"--:--"、或 endTime 等于 startTime。
 3. 时间分配要符合常识和${p.pace}节奏：早餐 07:00 前后；午餐 12:00-13:00；晚餐 18:30-20:00；景区游览至少 1-2 小时；晚上安排到 21:30-22:30 之间收尾回酒店。${p.pace === '轻松' ? '每天最多 2 个主景点，留出午休和慢逛时间。' : p.pace === '紧凑' ? '行程可以更满，但必须保证吃饭和必要的交通接驳时间。' : ''}
 4. activity 要写得像真人行程："14:44 乘 G2249 前往桂林西（约 4 小时 54 分）"、"20:10 去崇善米粉吃第一顿桂林米粉，点卤菜粉/锅烧粉"、"21:00 步行前往杉湖，看日月双塔夜景"。**要有具体名称**（店名/菜品/景点具体区域/观景台），不要写"吃晚饭""逛逛"这种空话。
+   4.1 **每个主要景点展开成完整链条**：抵达 → 游览（写清到底玩什么：哪段索道/哪个观景台/乘船还是徒步/核心体验与拍照点，可拆 1~3 条）→ 前往下一站。禁止只写一条"游览XX"就凭空跳到下一个景点；景区内的移动（乘索道/换观景台）也要单独成条。
 5. 涉及移动的动作必须填 startLocation / endLocation（起点空着时，用上一条的位置或昨晚住宿地），并填 transportType：步行=walk，打车/包车=car，公交地铁/电动车=ride，火车=train，飞机=plane。没有移动（吃饭、休息、游览）三项都留空。
 6. 备注写进 note：预约要求、末班车时间、门票信息、行李寄存、拍照机位、当地支付/语言提示等实用信息。
-7. ${isFirst ? `第一天：从${p.origin || '出发地'}出发，先写前往车站/机场的集合与安检预留时间（国内高铁至少提前 45 分钟到站，飞机提前 2 小时）。${p.goTime ? `**大交通必须在 ${p.goTime} 从${p.origin || '出发地'}启程（这是去程开始时间）**，请按这个时刻倒推集合、安检、候车时间，不要写成别的时刻。` : ''}` : ''}
-8. ${isLast ? `最后一天：以回到${p.origin || '出发地'}结束，写到家/到站为止，并预留返程交通时间。${p.backTime ? `**大交通必须在 ${p.backTime} 抵达${p.origin || '出发地'}（这是返程到达时间，不是发车时间）**，请按到达时刻往前倒推：发车/起飞时刻 → 前往车站机场 → 退房。` : ''}` : ''}
+7. ${isFirst ? `第一天：**第 1 条必须是出发接驳**——「${p.goTime || '按大交通倒推'} 从${p.origin || '出发地'}出发，前往${(asArray(day.moves)[0] && asArray(day.moves)[0].from) || '车站/机场'}」，startLocation 填${p.origin || '出发地'}、endLocation 填车站/机场、transportType=car；随后写到站安检候车（高铁提前 45 分钟，飞机提前 2 小时），再上大交通。${p.goTime ? `**${p.goTime} 是离开${p.origin || '出发地'}的时刻（去程开始时间），不是发车时刻**；大交通发车时刻以【今天的大交通】给的 s 为准，别把 ${p.goTime} 写成发车时间。` : ''}` : ''}
+8. ${isLast ? `最后一天：以回到${p.origin || '出发地'}结束——大交通到达站**之后**必须再写一条「从车站返回${p.origin || '出发地'}」（endLocation=${p.origin || '出发地'}，transportType=car），到家为止才算闭环。${p.backTime ? `**${p.backTime} 是回到${p.origin || '出发地'}的时刻（到家时刻，不是发车也不是到站）**：大交通到达时刻要为此留出市内返家接驳时间（约 40 分钟），发车/起飞时刻往前倒推。` : ''}` : ''}
 9. category 取值：景点游览=sight，餐饮=food，住宿/回酒店=hotel，交通=transport，门票预订/取票=ticket，其他=other。
 10. 输出顺序按时间先后。只输出数组，不要任何解释。
 11. **【今天的大交通】是既定路线**：交通方式、车次、出发站/到达站照抄，不许改成别的交通方式、不许编造新车次。
     - 大交通条目必须排在它**真实被乘坐的时刻位置**（15:00 的车就写在 15:00 前后的时段），严禁为了"衔接顺"把它提前写成"倒叙/桥接/预告"。
     - ${((isFirst && p.goTime) || (isLast && p.backTime))
-      ? '起止时刻是**用户指定的硬约束**，必须原样照抄，不许微调（首日按出发时刻、末日按到达时刻安排前后流程）。'
+      ? '起止时刻是**用户指定的硬约束**，必须原样照抄，不许微调（首日照抄发车时刻、末日照抄到达时刻，用户指定的启程/到家时刻用来安排前后接驳）。'
       : '大纲里的起止时刻只是**粗排参考**：若你确知该车次实际时刻与之不符、或与今天其他安排衔接不上，就按实际/合理的时刻微调，前后条目跟着顺移，保证全天时间线首尾相接；'}
     - 时刻要调就**静默地调**，绝不允许在 activity / note 里解释、质疑、论证冲突（"鉴于…必须原样执行…""此为错误约束""修正…"这类字样一概不许出现）——用户看不见你的思考过程，只看得见行程。
     - 写的是 train/高铁/动车 → 按火车站流程安排（提前 45 分钟到站、安检、候车、上车），全程不得出现"机场""航站楼""航班""值机"等字样，transportType 填 train。
@@ -1466,13 +1711,24 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
 
   // 行李规则放在 sanitize 之后：清洗会删条目（可能把"寄存行李"那条删掉，
   // 也可能把提醒取回的那条删掉），删完再看一遍才是最终要展示的结果。
-  // 收尾闭环也在 sanitize 之后补（清洗删完条目才知道哪天没回酒店），
-  // 补完再做时间重叠顺延（补的酒店条目开始时间取上一条结束 +10min，不会重叠）。
-  const items = fixDayTimeOverlaps(
-    enforceLuggageRules(
-      enforceDayClosure(
-        enforceDayStartLocation(
-          enforceMovesAlignment(sanitizeItems(detail.items), outline), outline), outline), outline));
+  // 链路顺序（每一步都有存在的理由）：
+  //   MovesAlignment  先把大交通拽回大纲既定时刻/车站（后面插接驳要按它算时刻）
+  //   DayStartLocation补每天第一条的起点（昨晚住宿地）
+  //   OriginAccess    第一天没有"从出发地→车站"接驳就补一条
+  //   MorningRoutine  第 2 天起 10 点前没吃饭就补早餐
+  //   EveningPlan     非末日 20:30 前就结束的补晚餐/夜逛
+  //   DayClosure      收尾闭环（用大纲推荐酒店；末日补"回出发地"接驳）
+  //   LuggageRules    行李 note 追加
+  //   fixDayTimeOverlaps 最后顺延重叠/倒退（插入的条目可能造成重叠）
+  // 用平铺变量代替俄罗斯套娃调用，括号错一层就是静默传错参数
+  let items = enforceMovesAlignment(sanitizeItems(detail.items), outline);
+  items = enforceDayStartLocation(items, outline);
+  items = enforceOriginAccess(items, p, outline);
+  items = enforceMorningRoutine(items, outline);
+  items = enforceEveningPlan(items, outline);
+  items = enforceDayClosure(items, outline, p);
+  items = enforceLuggageRules(items, outline);
+  items = fixDayTimeOverlaps(items);
 
   // 地理编码消歧要用的每天城市 + 地址→天下标映射。
   // savePlan 的 cityOf 靠它们给高德传 city 参数——之前只消费不生产，
@@ -1564,5 +1820,7 @@ module.exports = {
   normalizeInput, sanitizeAlarmCandidates, buildFallbackAlarms, fallbackAlarms,
   shiftDate, dayDiff, isHolidayRange,
   parseDestList, missingMustVisit, placeStem, duplicateHighlights,
-  applyTripEdgeTimes, enforceDayStartLocation, enforceDayClosure, enforceLuggageRules, enforceMovesAlignment, fixDayTimeOverlaps, samePlace, toMin, fmtMin,
+  applyTripEdgeTimes, enforceDayStartLocation, enforceDayClosure, enforceLuggageRules, enforceMovesAlignment,
+  enforceOriginAccess, enforceMorningRoutine, enforceEveningPlan,
+  fixDayTimeOverlaps, samePlace, toMin, fmtMin,
 };

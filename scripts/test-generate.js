@@ -175,8 +175,10 @@ const cleanDups = P.duplicateHighlights({
 });
 ok(cleanDups.length === 0, '不同景点不误报', JSON.stringify(cleanDups));
 
-// 5e. 去程开始时间 / 返程到达时间：代码兜底对齐（不靠 LLM 自觉）
-//     语义：goTime = 从出发城市启程的时刻；backTime = 回到出发城市的时刻（不是发车时刻）
+// 5e. 去程开始时间 / 返程到家时间：代码兜底对齐（不靠 LLM 自觉）
+//     语义（二次修正）：goTime = 离开出发地（家门口）的时刻 → 大交通发车
+//     = goTime + 市内接驳 40 分 + 安检候车 45 分（火车）/2 小时（飞机）；
+//     backTime = 到家时刻 → 大交通到站 = backTime - 40 分（市内返家接驳）
 const edgeP = normalizeInput({
   dest: '桂林', startDate: '2026-12-20', endDate: '2026-12-22',
   startTime: '08:30', endTime: '21:15',
@@ -194,20 +196,22 @@ const edgeOutline = {
   ],
 };
 const edged = P.applyTripEdgeTimes(edgeP, JSON.parse(JSON.stringify(edgeOutline)));
-ok(edged.days[0].moves[0].startTime === '08:30',
-  '去程：第一天大交通被对齐到「去程开始时间 08:30」', edged.days[0].moves[0].startTime);
-ok(edged.days[0].moves[0].endTime === '13:24',
-  '去程：运行时长保持不变（4h54m → 08:30-13:24）', edged.days[0].moves[0].endTime);
-ok(edged.days[2].moves[0].endTime === '21:15',
-  '返程：最后一天大交通被对齐到「返程到达时间 21:15」', edged.days[2].moves[0].endTime);
-ok(edged.days[2].moves[0].startTime === '16:21',
-  '返程：发车时刻按到达时刻倒推（4h54m → 16:21 发）', edged.days[2].moves[0].startTime);
+ok(edged.days[0].moves[0].startTime === '09:55',
+  '去程：大交通发车 = 出发时间 08:30 + 接驳 40 分 + 安检候车 45 分 = 09:55',
+  edged.days[0].moves[0].startTime);
+ok(edged.days[0].moves[0].endTime === '14:49',
+  '去程：运行时长保持不变（4h54m → 09:55-14:49）', edged.days[0].moves[0].endTime);
+ok(edged.days[2].moves[0].endTime === '20:35',
+  '返程：大交通到站 = 到家时间 21:15 - 市内返家 40 分 = 20:35',
+  edged.days[2].moves[0].endTime);
+ok(edged.days[2].moves[0].startTime === '15:41',
+  '返程：发车时刻按到站时刻倒推（4h54m → 15:41 发）', edged.days[2].moves[0].startTime);
 // 到达时刻太早（倒推会退到前一天）时只保证到达时刻，不硬挪起点
 const weird = P.applyTripEdgeTimes(
   normalizeInput({ dest: '桂林', startDate: '2026-12-20', endDate: '2026-12-22', endTime: '03:00' }),
   JSON.parse(JSON.stringify(edgeOutline)));
-ok(weird.days[2].moves[0].endTime === '03:00' && weird.days[2].moves[0].startTime === '09:12',
-  '到达时刻倒推会退到前一天时：只锁到达时刻，发车时刻不乱改',
+ok(weird.days[2].moves[0].endTime === '02:20' && weird.days[2].moves[0].startTime === '09:12',
+  '到达时刻倒推会退到前一天时：只锁到达时刻（到家 03:00 → 到站 02:20），发车时刻不乱改',
   weird.days[2].moves[0].startTime + '-' + weird.days[2].moves[0].endTime);
 
 // 5f. 行李规则兜底：换住处不能把行李留在酒店；寄了必须提醒取回
@@ -356,6 +360,93 @@ const homeByWord = P.enforceDayClosure([
 ], closureOutline);
 ok(homeByWord.length === 1, '描述里写了回酒店/民宿 → 视为已收尾，不重复补',
   JSON.stringify(homeByWord.map((x) => x.activity)));
+
+// 5i-2. 出发接驳 / 早餐 / 晚间安排 / 推荐酒店 / 到家接驳（确定性兜底）
+//       场景来自实测：出发地"重庆市金童路 15:30"被生成成"15:30 乘高铁"，
+//       从家去车站的接驳凭空消失；晚上 7 点到酒店后行程就断了。
+const accP = normalizeInput({
+  origin: '重庆市金童路', dest: '成都', startDate: '2026-09-26', endDate: '2026-09-28',
+  startTime: '15:30', endTime: '20:00',
+});
+const accOutline = { days: [
+  { date: '2026-09-26', city: '成都', overnight: '成都', hotel: '成都瑞城名人酒店',
+    moves: [{ from: '重庆西站', to: '成都东站', mode: 'train', code: 'G8505', startTime: '16:55', endTime: '19:30' }] },
+  { date: '2026-09-27', city: '成都', overnight: '成都', moves: [] },
+  { date: '2026-09-28', city: '成都', overnight: '返程',
+    moves: [{ from: '成都东站', to: '重庆北站', mode: 'train', code: 'G8506', startTime: '16:40', endTime: '19:20' }] },
+] };
+
+// a) 第一天没有从出发地出发的条目 → 补接驳
+const accItems = P.enforceOriginAccess([
+  { dayIndex: 0, startTime: '16:10', endTime: '16:55', activity: '在重庆西站安检候车', category: 'other' },
+  { dayIndex: 0, startTime: '16:55', endTime: '19:30', activity: '乘 G8505 次列车从重庆西站前往成都东站', category: 'transport', startLocation: '重庆西站', endLocation: '成都东站', transportType: 'train' },
+], accP, accOutline);
+const acc = accItems.filter((x) => x.startLocation === '重庆市金童路');
+ok(acc.length === 1 && acc[0].endLocation === '重庆西站' && acc[0].startTime === '15:30',
+  '第一天没有出发接驳 → 补「15:30 从金童路去重庆西站」', JSON.stringify(acc));
+
+// b) 已有接驳不重复插
+const accItems2 = P.enforceOriginAccess([
+  { dayIndex: 0, startTime: '15:30', endTime: '16:10', activity: '从重庆市金童路打车前往重庆西站', category: 'transport', startLocation: '重庆市金童路', endLocation: '重庆西站', transportType: 'car' },
+], accP, accOutline);
+ok(accItems2.length === 1, '已有出发接驳 → 不重复补');
+
+// c) 第 2 天 10 点前没吃饭 → 补早餐（接在首条出发前）
+const morning = P.enforceMorningRoutine([
+  { dayIndex: 1, startTime: '09:30', endTime: '10:00', activity: '从酒店出发前往都江堰', category: 'transport', startLocation: '成都', endLocation: '都江堰', transportType: 'car' },
+], accOutline);
+const brk = morning.filter((x) => x.category === 'food');
+ok(brk.length === 1 && brk[0].startTime === '08:50' && brk[0].endTime === '09:25',
+  '第 2 天没有早餐 → 补一条（接在首条出发前）', JSON.stringify(brk));
+
+// d) 已有早餐不补
+const morning2 = P.enforceMorningRoutine([
+  { dayIndex: 1, startTime: '08:00', endTime: '08:40', activity: '在酒店吃早餐', category: 'food' },
+  { dayIndex: 1, startTime: '09:00', endTime: '10:00', activity: '出发去景区', category: 'transport' },
+], accOutline);
+ok(morning2.length === 2, '已有早餐 → 不重复补');
+
+// e1) 人已回酒店但 19:00 就结束 → 补一条"再出门夜逛"（closure 随后补回酒店）
+const evening1 = P.enforceEveningPlan([
+  { dayIndex: 0, startTime: '17:00', endTime: '19:00', activity: '到酒店放行李', category: 'hotel', endLocation: '成都' },
+], accOutline);
+ok(evening1.filter((x) => x.category === 'sight').length === 1
+  && evening1[evening1.length - 1].startTime === '19:30'
+  && /夜生活|夜游|夜市/.test(evening1[evening1.length - 1].activity),
+  '19:00 就回酒店的非末日 → 补夜逛', JSON.stringify(evening1));
+
+// e2) 人还在外面 19:00 收尾 → 补晚餐 + 夜逛
+const evening2 = P.enforceEveningPlan([
+  { dayIndex: 0, startTime: '17:00', endTime: '19:00', activity: '逛春熙路', category: 'sight', endLocation: '春熙路' },
+], accOutline);
+ok(evening2.filter((x) => x.category === 'food').length === 1
+  && evening2.length === 3
+  && evening2[1].startTime === '19:15' && evening2[2].startTime === '20:50',
+  '19:00 还在外的非末日 → 补晚餐 + 夜逛', JSON.stringify(evening2));
+
+// f) 22:00 收尾 → 不补
+const evening3 = P.enforceEveningPlan([
+  { dayIndex: 0, startTime: '20:00', endTime: '22:00', activity: '夜游锦江', category: 'sight' },
+], accOutline);
+ok(evening3.length === 1, '22:00 收尾的天不再补晚间安排');
+
+// g) closure 用大纲推荐酒店补入住；返程日已到家不重复补
+const closedP = P.enforceDayClosure([
+  { dayIndex: 0, startTime: '18:00', endTime: '19:00', activity: '逛春熙路', category: 'sight', endLocation: '春熙路' },
+  { dayIndex: 2, startTime: '19:20', endTime: '20:00', activity: '从重庆北站打车返回重庆市金童路', category: 'transport', startLocation: '重庆北站', endLocation: '重庆市金童路', transportType: 'car' },
+], accOutline, accP);
+const hotelItem = closedP.filter((x) => x.dayIndex === 0 && x.category === 'hotel');
+ok(hotelItem.length === 1 && hotelItem[0].endLocation === '成都瑞城名人酒店',
+  '有推荐酒店 → 补的入住条目直接导航到酒店', JSON.stringify(hotelItem));
+ok(closedP.filter((x) => x.dayIndex === 2).length === 1, '返程日已写到家的 → 不重复补接驳');
+
+// h) 末日只到车站 → 补回家接驳
+const closedP2 = P.enforceDayClosure([
+  { dayIndex: 2, startTime: '16:40', endTime: '19:20', activity: '乘 G8506 抵达重庆北站', category: 'transport', startLocation: '成都东站', endLocation: '重庆北站', transportType: 'train' },
+], accOutline, accP);
+const home = closedP2.filter((x) => x.dayIndex === 2 && x.endLocation === '重庆市金童路');
+ok(home.length === 1 && home[0].startTime === '19:30',
+  '返程日只到车站 → 补「回家」接驳', JSON.stringify(home));
 
 // 5j. 已确认大交通对齐兜底：车次错时刻/漏排/重复/起终点错都要被拽回
 const alignOutline = { days: [
