@@ -33,22 +33,9 @@ function validDateStr(s) {
 // 否则会出现 15:15 → 23:15 这类 +8 小时错位、凌晨时间日期差一天等问题
 const { parseCnTime, tsToDateStr, tsToCnDateTimeStr } = require('./cn-time');
 
-// 省级地名（高德 city 参数只认城市/区县，塞省份没用）
-const PROVINCE_NAMES = new Set([
-  '河北', '山西', '辽宁', '吉林', '黑龙江', '江苏', '浙江', '安徽', '福建', '江西',
-  '山东', '河南', '湖北', '湖南', '广东', '海南', '四川', '贵州', '云南', '陕西',
-  '甘肃', '青海', '台湾', '内蒙古', '广西', '西藏', '宁夏', '新疆',
-]);
-
-/**
- * 从"广西 桂林 阳朔"这类 region 里挑出最适合给高德 city 参数的那个词：
- * 第一个不是省份的词。挑不到就返回空（让高德自己猜，总比塞个错参数强）。
- */
-function pickCity(region) {
-  const tokens = String(region || '').split(/[\s,，、]+/).map((s) => s.trim()).filter(Boolean);
-  const city = tokens.find((t) => !t.endsWith('省') && !PROVINCE_NAMES.has(t));
-  return city || '';
-}
+// pickCity 现在由 geocode.js 统一提供（那里挑出的城市词还要拿去做结果校验，
+// 两边必须是同一套规则，否则"挑的城市"和"校验的城市"可能对不上）
+const { pickCity } = require('./geocode');
 
 exports.main = async (event, context) => {
   const wxContext = cloud.getWXContext();
@@ -61,10 +48,14 @@ exports.main = async (event, context) => {
     const location = (event.location || '').trim();
     if (!location) return { code: -1, msg: '缺少 location' };
     try {
-      // event.city：前端传来的大地名（可能是"广西 桂林"整串）——挑出城市词再查，
-      // 帮高德消歧，避免定位到同名地点
-      const coord = await geocodeOne(location, pickCity(event.city) || String(event.city || '').trim());
-      if (!coord) return { code: -1, msg: '未配置 AMAP_KEY 或未查到该地点' };
+      // event.city：前端传来的大地名（可能是"广西 桂林"整串，也可能是该条自己的城市）。
+      // geocodeOne 内部会挑出城市词、并用它校验返回结果——城市对不上宁可不给坐标，
+      // 免得把"象鼻山"定位到南昌去。
+      const coord = await geocodeOne(location, event.city || '');
+      if (!coord) {
+        return { code: -1, msg: '没能在该城市内定位到「'
+          + String(location).slice(0, 12) + '」，可以复制地名到地图 App 搜索' };
+      }
       return { code: 0, data: coord };
     } catch (e) {
       return { code: -1, msg: e.message || '地理编码失败' };
@@ -130,6 +121,13 @@ exports.main = async (event, context) => {
           const e = coordMap.get(it.endLocation);
           if (s) { it.startLon = s.lon; it.startLat = s.lat; }
           if (e) { it.endLon = e.lon; it.endLat = e.lat; }
+        });
+      }
+      // 每条记下城市：前端点导航时用它消歧（解析出的攻略只有一个 region，粒度不够）
+      if (cityHint) {
+        items.forEach((it) => {
+          const to = it.endLocation || it.startLocation;
+          if (to && !it.city) it.city = cityHint;
         });
       }
     } catch (e) {

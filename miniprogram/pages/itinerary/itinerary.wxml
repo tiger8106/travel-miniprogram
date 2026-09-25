@@ -24,7 +24,7 @@
       </view>
       <view wx:for="{{group.items}}" wx:key="key" wx:for-item="item">
         <activity-item item="{{item}}"
-                       region="{{trip.region}}"
+                       region="{{item.city || trip.region}}"
                        readonly="{{true}}" />
       </view>
     </block>
@@ -49,7 +49,7 @@
     <block wx:else>
       <view wx:for="{{items}}" wx:key="key" wx:for-item="item">
         <activity-item item="{{item}}"
-                       region="{{trip.region}}"
+                       region="{{item.city || trip.region}}"
                        editing="{{item.editing}}"
                        editForm="{{item.editing ? editForm : null}}"
                        readonly="{{readonly}}"

@@ -245,7 +245,7 @@ const INPUT = {
   budget: '舒适',
   pace: '适中',
   interests: ['自然山水', '古镇古村', '当地美食', '拍照打卡'],
-  transport: '高铁优先',
+  transport: '高铁/动车优先',
   mustGo: '漓江游船、遇龙河竹筏',
   extra: '不想全程自驾，尽量公共交通+当地直通车',
 };

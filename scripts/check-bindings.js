@@ -223,5 +223,31 @@ ok('plan.js 调用点不再传数字 token 上限',
   !/chatWithRetry\([\s\S]{0,200}?,\s*\d{3,4}\s*,/.test(planJs));
 ok('截断会留日志（finish_reason=length）', /finish_reason === 'length'/.test(genLlm));
 
+// ---------- ⑩ 出行方式：高铁/动车优先 + 顺序调整 ----------
+const plannerJs = fs.readFileSync(path.join(MP, 'pages/planner/planner.js'), 'utf8');
+const transportLine = (plannerJs.match(/const TRANSPORT = \[([^\]]*)\]/) || [])[1] || '';
+ok('出行方式含「高铁/动车优先」', /高铁\/动车优先/.test(transportLine), transportLine);
+ok('自驾/包车排在飞机优先前面', (() => {
+  const list = transportLine.split(',').map((s) => s.replace(/['"]/g, '').trim());
+  return list.indexOf('自驾/包车') >= 0 && list.indexOf('飞机优先') >= 0
+    && list.indexOf('自驾/包车') < list.indexOf('飞机优先');
+})(), transportLine);
+ok('后端同时认高铁和动车（railFirst）', /railFirst = \/高铁\|动车\//.test(planJs));
+ok('没有合适高铁时允许走动车', /没有合适的高铁[\s\S]{0,120}?动车/.test(planJs));
+
+// ---------- ⑪ 导航定位：城市消歧 ----------
+const geoJs = fs.readFileSync(path.join(ROOT, 'cloudfunctions/parseTravelPlan/geocode.js'), 'utf8');
+const genGeoJs = fs.readFileSync(path.join(ROOT, 'cloudfunctions/generatePlan/geocode.js'), 'utf8');
+ok('定位走 POI 搜索（citylimit 才是硬限制）', /place\/text/.test(geoJs) && /citylimit=true/.test(geoJs));
+ok('返回结果要过城市校验，对不上就放弃', /function cityHit/.test(geoJs) && /放弃/.test(geoJs));
+// 两份是复制粘贴的（云函数各自独立打包，没法跨目录 require），
+// 只比正文部分——文件头的路径注释本来就不一样
+const bodyOf = (s) => s.slice(s.indexOf("require('https')"));
+ok('两个云函数的 geocode 实现一致', bodyOf(geoJs) === bodyOf(genGeoJs));
+const itinWxml = fs.readFileSync(path.join(MP, 'pages/itinerary/itinerary.wxml'), 'utf8');
+ok('导航优先用条目的城市（item.city）', /region="{{item\.city \|\| trip\.region}}"/.test(itinWxml));
+const navJs = fs.readFileSync(path.join(MP, 'utils/map.js'), 'utf8');
+ok('降级复制时带上城市（避免搜到外省同名点）', /function firstCity/.test(navJs) && /\$\{city\} \$\{/.test(navJs));
+
 console.log(failed ? `\n${failed} 项失败 ✗` : '\n全部通过 ✓');
 process.exit(failed ? 1 : 0);

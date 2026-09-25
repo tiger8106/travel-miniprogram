@@ -1,5 +1,5 @@
 // utils/map.js
-// 地图导航（2026-09-20 v3：一键直达 + 自动实时查坐标）
+// 地图导航（2026-09-25 v4：一键直达 + 自动实时查坐标 + 城市消歧）
 //
 // 微信平台规则：小程序禁止直接拉起第三方 App（高德/百度都不行），
 // 唯一的官方直达路径是 wx.openLocation：
@@ -7,23 +7,34 @@
 //   → 弹出手机上已装的地图 App 列表（高德/百度/腾讯）→ 选高德开始导航。
 //
 // 坐标来源：
-//   ① 解析攻略时云函数已地理编码（item.endLat / endLon）
+//   ① 生成/解析攻略时云函数已地理编码（item.endLat / endLon）
 //   ② 没有坐标时，点击瞬间调用云函数实时查（不用重新上传攻略）
+//
+// ⚠️ 定位准不准，关键在"城市"：全国同名地点一堆（象鼻山公园、西山、人民公园），
+//    云函数现在会先用城市限定 POI 搜索，再逐条校验返回结果的行政区，
+//    对不上宁可不给坐标。所以这里一定要把 region 传过去，
+//    并且降级复制时也要把城市带上——用户粘到高德里搜才是对的那个。
 
 const api = require('../services/api');
+
+/** 从"广西 桂林 阳朔"里取第一个城市词（复制给地图 App 搜索时用） */
+function firstCity(region) {
+  const tokens = String(region || '').split(/[\s,，、]+/).map((s) => s.trim()).filter(Boolean);
+  return tokens[0] || '';
+}
 
 /**
  * 打开导航（一键直达，无中间弹窗）
  * @param {object} opts { from, to, mode, endLat, endLon, region }
- *   region：省/市/县等大地名（如「广西 桂林」），只用于帮地理编码消歧，
- *   绝不会拼进显示名称——界面上看到的还是「龙脊梯田」而不是「广西桂林龙脊梯田」。
- *   没有它时，重名地点（全国一堆"西湖""人民公园"）可能定位到别的城市去。
+ *   region：城市/大地名（如「桂林」或「广西 桂林」），只用于帮地理编码消歧，
+ *   绝不会拼进显示名称——界面上看到的还是「象鼻山」而不是「桂林象鼻山」。
  */
 async function openAmapNav(opts) {
   let lat = Number(opts.endLat);
   let lon = Number(opts.endLon);
+  let reason = '';
 
-  // 没有坐标 → 实时查一次（约 200ms），带上大地名消歧
+  // 没有坐标 → 实时查一次（约 200ms），带上城市消歧
   if (!(lat && lon && !isNaN(lat) && !isNaN(lon))) {
     wx.showLoading({ title: '定位中…' });
     try {
@@ -35,12 +46,12 @@ async function openAmapNav(opts) {
       }
     } catch (e) {
       wx.hideLoading();
-      // 查不到，走降级
+      // 云函数会给一句能照做的提示（没配 Key / 该城市里没找到…）
+      reason = (e && e.message) || '';
     }
   }
 
   if (lat && lon && !isNaN(lat) && !isNaN(lon)) {
-    // 直接全屏打开微信地图，定位到目的地
     wx.openLocation({
       latitude: lat,
       longitude: lon,
@@ -52,16 +63,18 @@ async function openAmapNav(opts) {
     return;
   }
 
-  // 降级：说明云函数没配 AMAP_KEY
+  // 降级：把「城市 + 地名」复制给用户，粘到高德里搜才不会搜到外省的同名点
+  const city = firstCity(opts.region);
+  const keyword = city ? `${city} ${opts.to || ''}` : String(opts.to || '');
   wx.showModal({
     title: '暂时无法打开地图',
-    content: `云函数还没有配置高德 Key（AMAP_KEY），无法把「${String(opts.to || '').slice(0, 15)}」转成地图坐标。\n\n配置后即可一键打开地图导航。现在可以先复制目的地名称到高德 App 搜索。`,
-    confirmText: '复制目的地',
+    content: `${reason || '没能定位到这个地点。'}\n\n可以复制「${keyword}」到高德/百度地图里搜索，也能正常导航。`,
+    confirmText: '复制地名',
     cancelText: '取消',
     success: (r) => {
       if (r.confirm) {
         wx.setClipboardData({
-          data: String(opts.to || ''),
+          data: keyword,
           success: () => wx.showToast({ title: '已复制', icon: 'success' }),
         });
       }
@@ -70,11 +83,13 @@ async function openAmapNav(opts) {
 }
 
 /**
- * 兜底：复制目的地
+ * 兜底：复制目的地（带上城市，避免搜到同名地点）
  */
 function fallbackCopyRoute(opts) {
+  const city = firstCity(opts.region);
+  const keyword = city ? `${city} ${opts.to || ''}` : String(opts.to || '');
   wx.setClipboardData({
-    data: String(opts.to || ''),
+    data: keyword,
     success: () => wx.showToast({ title: '已复制目的地', icon: 'success' }),
   });
 }
@@ -82,4 +97,5 @@ function fallbackCopyRoute(opts) {
 module.exports = {
   openAmapNav,
   fallbackCopyRoute,
+  firstCity,
 };

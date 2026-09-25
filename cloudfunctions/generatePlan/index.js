@@ -28,8 +28,8 @@ const COL_SUG = 'suggestions';
 const GEN_VERSION = 'v1.1-gen';
 
 /** 给一批条目补经纬度（供 wx.openLocation 打开微信原生地图）
- *  cityOf(address)：返回该地点所属的大地名（省/市/县），帮高德消歧——
- *  全国同名地点太多，不带城市可能把"龙脊梯田"定位到别的省去。
+ *  cityOf(address)：返回该地点所属的城市，帮高德消歧——
+ *  全国同名地点太多，不带城市可能把"象鼻山"定位到南昌去。
  *  显示名称不受影响：经纬度只用于打开地图，用户看到的还是短地名。
  */
 async function geocodeItems(items, cityOf) {
@@ -48,6 +48,11 @@ async function geocodeItems(items, cityOf) {
         if (e) { it.endLon = e.lon; it.endLat = e.lat; }
       });
     }
+    // 每条也记下它自己的城市：前端点导航时用它消歧，比整个行程的城市串准得多
+    items.forEach((it) => {
+      const to = it.endLocation || it.startLocation;
+      if (to && !it.city) it.city = cityOf(to) || '';
+    });
   } catch (e) {
     console.error('[generatePlan] 地理编码失败（不影响主流程）:', e.message);
   }
@@ -68,12 +73,21 @@ async function savePlan(openid, plan, tripId) {
   const dayCities = Array.isArray(plan.dayCities) ? plan.dayCities : [];
   const region = [...new Set(dayCities.filter(Boolean))].join(' ');
   const firstCity = dayCities.find(Boolean) || '';
+  // 地址里自带城市名时以它为准（取最长匹配，避免"南宁东站"被短词误伤）：
+  // 城际段的终点常常不在当天城市里，用当天城市去约束会整条定位失败。
+  const cityInAddr = (addr) => {
+    let best = '';
+    dayCities.forEach((c) => {
+      if (c && String(addr || '').indexOf(c) >= 0 && c.length > best.length) best = c;
+    });
+    return best;
+  };
   const cityOf = (addr) => {
     const idx = plan.addrDay ? plan.addrDay.get(addr) : -1;
     const c = idx >= 0 ? (dayCities[idx] || '') : '';
     // 兜底用第一个城市：plan.dest 是"桂林、龙脊梯田、阳朔…"整串，
     // 直接塞给高德 city 参数只会被忽略，不能拿它兜底
-    return c || firstCity;
+    return cityInAddr(addr) || c || firstCity;
   };
   await geocodeItems(plan.items, cityOf);
 

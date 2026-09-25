@@ -408,7 +408,8 @@ Page({
     });
 
     list.sort((a, b) => a.st - b.st || a.di - b.di || a.seq - b.seq);
-    return list.slice(0, n).map((x) => this.decorateNowItem(x, now, trip.region || ''));
+    // 消歧优先用条目自己的城市（生成时逐条记的），没有再退回整条行程的大地名
+    return list.slice(0, n).map((x) => this.decorateNowItem(x, now, (x.it && x.it.city) || trip.region || ''));
   },
 
   // "14:30" 落到某一天上 → 时间戳；解析不了返回 null

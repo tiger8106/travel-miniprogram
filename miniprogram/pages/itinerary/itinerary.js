@@ -347,7 +347,8 @@ Page({
         : `导航到 ${to}`,
       endLat: item.endLat,
       endLon: item.endLon,
-      region: this.tripRegion(),
+      // 条目自己的城市最准；没有再退回整条行程的大地名
+      region: item.city || this.tripRegion(),
     });
   },
 
@@ -411,8 +412,9 @@ Page({
       let endCoord = null;
       if (needStart || needEnd) {
         const [a, b] = await Promise.all([
-          needStart ? this.tryGeocode(editForm.startLocation) : null,
-          needEnd ? this.tryGeocode(editForm.endLocation) : null,
+          // 消歧优先用这条自己的城市（生成时逐条记的），没有再退回整条行程的大地名
+          needStart ? this.tryGeocode(editForm.startLocation, old.city || this.tripRegion()) : null,
+          needEnd ? this.tryGeocode(editForm.endLocation, old.city || this.tripRegion()) : null,
         ]);
         startCoord = a;
         endCoord = b;
@@ -461,10 +463,10 @@ Page({
   },
 
   // 地名 → 经纬度（失败返回 null，交给导航时的实时查询兜底）
-  async tryGeocode(name) {
+  async tryGeocode(name, region) {
     if (!name) return null;
     try {
-      const r = await api.geocode(name, this.tripRegion());
+      const r = await api.geocode(name, region || this.tripRegion());
       if (!r) return null;
       const lon = r.lon != null ? r.lon : (r.lng != null ? r.lng : r.longitude);
       const lat = r.lat != null ? r.lat : r.latitude;
