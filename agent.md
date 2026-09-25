@@ -49,6 +49,21 @@ node scripts/check-bindings.js
 校验 wxml 绑定的 handler 是否都在 js 里实现、config 引用是否齐全、语法是否正确（50 条断言）。
 **全绿才能说做完了。**
 
+### 5. 隐私接口（选文件/头像/日历）：先授权，再调用
+
+- 统一走 `miniprogram/utils/privacy.js` 的 `privacy.ensure(show)`，别在页面里各写一套。
+- **顺序必须是"先授权 → 再调接口"**：`wx.getPrivacySetting` 看要不要授权 →
+  要就 `wx.requirePrivacyAuthorize()`（它会产生确定的 pending）→ 弹窗 → 用户点同意
+  → promise 返回 → 才去调真正的接口。
+- ❌ **禁止"被拦截 → 弹窗 → 同意后代码自动重试"**：微信拦截时可能同时回调一次 fail，
+  页面收到 fail 又弹、同意后又重试 → 弹窗反复出现（真出过的事故）。
+- ❌ 别自己 `setData({showPrivacy:true})` 就指望 `open-type="agreePrivacyAuthorization"`
+  的按钮生效：**没有 pending 的授权请求时，那个按钮点了没反应**，流程直接卡死。
+- 万能兜底：`wx.onNeedPrivacyAuthorization` 仍注册在 `app.js`（交给 `privacy.onNeed`），
+  老基础库或漏判的场景由它弹窗，但那条路径**不自动重试**。
+- 「同意了还是被拦」= 后台《用户隐私保护指引》没声明该类目或**没审核通过**
+  （保存 ≠ 生效）。`privacy.diagnose()` 会打出 `指引名称为空` 这类关键线索。
+
 > ⚠️ 本机已知假报错：`JS 语法 xxx.js` 这 6 条在本机会因为 `spawnSync` 报 **EBUSY**（沙箱不允许脚本再启 node 子进程）而恒失败，
 > 但这**不代表文件有语法错误**。验证方式：手动 `node --check miniprogram/<文件路径>` 通过即可。
 > wxml/js 事件对齐部分不受影响，正常可信。**

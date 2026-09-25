@@ -249,5 +249,21 @@ ok('导航优先用条目的城市（item.city）', /region="{{item\.city \|\| t
 const navJs = fs.readFileSync(path.join(MP, 'utils/map.js'), 'utf8');
 ok('降级复制时带上城市（避免搜到外省同名点）', /function firstCity/.test(navJs) && /\$\{city\} \$\{/.test(navJs));
 
+// ---------- ⑫ 隐私授权：先授权再调接口，禁止"同意后自动重试"的死循环 ----------
+const privacyJs = fs.readFileSync(path.join(MP, 'utils/privacy.js'), 'utf8');
+const uploadJs = fs.readFileSync(path.join(MP, 'pages/upload/upload.js'), 'utf8');
+const appJs = fs.readFileSync(path.join(MP, 'app.js'), 'utf8');
+const popupJs = fs.readFileSync(path.join(MP, 'components/privacy-popup/privacy-popup.js'), 'utf8');
+ok('隐私授权统一走 utils/privacy.js',
+  /require\(['"](\.\.\/)+utils\/privacy['"]\)/.test(uploadJs)
+  && /require\(['"]\.\/utils\/privacy['"]\)/.test(appJs));
+ok('调用隐私接口前先主动授权（requirePrivacyAuthorize）', /wx\.requirePrivacyAuthorize/.test(privacyJs));
+ok('upload：选文件前先过授权这一关', /await privacy\.ensure/.test(uploadJs) && /pickFile/.test(uploadJs));
+ok('upload：不再"同意后自动重试"（循环元凶）', !/_retryChoose/.test(uploadJs) && !/onClosePrivacy[\s\S]{0,200}onChooseFile/.test(uploadJs));
+ok('upload：连点防重入', /if \(this\._choosing\) return/.test(uploadJs));
+ok('upload：授权没生效只提示一次并给排查路径', /_privacyWarned/.test(uploadJs) && /用户隐私保护指引/.test(uploadJs));
+ok('弹窗把结果交回微信（没有 pending 也不卡死）', /privacy\.finish\(/.test(popupJs));
+ok('app.js 把拦截回调交给 privacy.onNeed', /wx\.onNeedPrivacyAuthorization\(\(resolve\) => privacy\.onNeed/.test(appJs));
+
 console.log(failed ? `\n${failed} 项失败 ✗` : '\n全部通过 ✓');
 process.exit(failed ? 1 : 0);

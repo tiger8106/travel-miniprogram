@@ -2,6 +2,7 @@
 const api = require('../../services/api');
 const auth = require('../../utils/auth');
 const homeCache = require('../../utils/homecache');
+const privacy = require('../../utils/privacy');
 
 const app = getApp();
 
@@ -18,7 +19,15 @@ Page({
     errorMsg: '',
   },
 
-  onChooseFile() {
+  /**
+   * 点「选择文件」
+   * ⚠️ 顺序很关键：**先拿到隐私授权，再去调 chooseMessageFile**。
+   * 以前是直接调、被微信拦截后再弹窗、同意后代码自动重试一次——
+   * 微信拦截时可能同时回调一次 fail，页面收到 fail 又弹、同意后又重试，
+   * 于是弹窗反复出现。现在先授权、后调用，且不再自动重试，循环从根上断掉。
+   */
+  async onChooseFile() {
+    if (this._choosing) return;      // 防重入：连点两次不会弹两轮
     if (!wx.chooseMessageFile) {
       wx.showModal({
         title: '微信版本过低',
@@ -27,25 +36,69 @@ Page({
       });
       return;
     }
-    wx.chooseMessageFile({
-      count: 1,
-      type: 'file',
-      extension: ['docx', 'doc'],
-      success: (res) => this.handleFile(res.tempFiles[0]),
-      fail: (err) => this.onChooseFail(err),
+    this._choosing = true;
+    try {
+      const ok = await privacy.ensure(() => this.setData({ showPrivacy: true }));
+      this.setData({ showPrivacy: false });   // 授权这一关过了，弹窗收起来
+      if (!ok) {
+        // 授权没走通：先分清是"用户没同意"还是"后台指引压根没生效"，
+        // 两种情况的下一步完全不同，别都丢一句"请先同意"把人打发走
+        const info = await privacy.diagnose('upload');
+        const notReady = !!info && !info.contract;  // 指引名称为空 = 后台还没生效
+        wx.showModal({
+          title: notReady ? '隐私指引还没生效' : '还没完成授权',
+          content: notReady
+            ? '小程序后台的《用户隐私保护指引》还没有生效（读到的指引名称是空的）。\n\n'
+              + '请到后台 → 设置 → 服务内容声明 → 用户隐私保护指引，'
+              + '勾选「读取聊天文件」这一类并提交，等微信审核通过（保存不等于生效）。'
+            : '刚才没有完成授权，暂时不能选择文件。回到页面重新点一次，在弹窗里选「同意并继续」即可。',
+          showCancel: false,
+          confirmText: '知道了',
+        });
+        return;
+      }
+      await this.pickFile();
+    } finally {
+      this._choosing = false;
+    }
+  },
+
+  /** 真正拉起文件选择（授权已就绪） */
+  pickFile() {
+    return new Promise((resolve) => {
+      wx.chooseMessageFile({
+        count: 1,
+        type: 'file',
+        extension: ['docx', 'doc'],
+        success: (res) => { this.handleFile(res.tempFiles[0]); resolve(); },
+        fail: (err) => { this.onChooseFail(err); resolve(); },
+      });
     });
   },
 
-  // 选文件失败绝不能"静默没反应"（实锤踩过：隐私指引重新审核后授权状态被重置，
-  // 微信拦下 chooseMessageFile 又没自动弹授权 → 用户点了跟没点一样，完全不知道发生了什么）
+  // 选文件失败绝不能"静默没反应"，但也绝不能再自动重试（重试就是弹窗反复出现的元凶）
   onChooseFail(err) {
     const msg = (err && err.errMsg) || '';
     console.error('[upload] chooseMessageFile 失败:', msg);
     if (/cancel/.test(msg)) return; // 用户自己取消，不算故障
     if (/privacy|scope|author/i.test(msg)) {
-      // 微信没自动弹授权 → 我们自己弹；用户点"同意"后立即替他重试一次
-      this._retryChoose = true;
-      this.setData({ showPrivacy: true });
+      // 走到这儿说明"同意"了还是被拦 —— 十有八九是后台的《用户隐私保护指引》
+      // 没声明「读取聊天文件」或还没审核通过（不是保存即生效）。
+      // 只提示一次，把排查路径讲清楚，不再弹授权窗、不再重试。
+      if (this._privacyWarned) return;
+      this._privacyWarned = true;
+      this.setData({ showPrivacy: false });
+      privacy.diagnose('upload');
+      wx.showModal({
+        title: '隐私授权还没生效',
+        content: '微信提示仍需要《用户隐私保护指引》授权。\n\n'
+          + '请在小程序后台 → 设置 → 服务内容声明 → 用户隐私保护指引里：\n'
+          + '1）勾选「读取聊天文件」这一类；\n'
+          + '2）提交后等微信审核通过（不是保存即生效）。\n\n'
+          + '生效后重新进入本页即可选择文件。',
+        showCancel: false,
+        confirmText: '知道了',
+      });
       return;
     }
     wx.showModal({
@@ -56,7 +109,7 @@ Page({
     });
   },
 
-  // 兼容旧版 chooseMessageFile
+  // 兼容旧版 chooseMessageFile（不带 extension 参数）
   onChooseFileLegacy() {
     wx.chooseMessageFile({
       count: 1,
@@ -101,15 +154,10 @@ Page({
     this.setData({ showPrivacy: false });
   },
 
-  onClosePrivacy(e) {
+  // 只负责关弹窗：后续动作由 onChooseFile 里 await privacy.ensure() 的结果决定，
+  // 不再在这里"同意后自动重试" —— 那正是弹窗反复出现的元凶
+  onClosePrivacy() {
     this.setData({ showPrivacy: false });
-    // 从失败回调里手动弹的授权（不是微信拦截自动触发的）：
-    // 用户点"同意"后微信不会自动重试刚才被拦的调用，这里替他再选一次
-    const agreed = !!(e && e.detail && e.detail.agreed);
-    if (this._retryChoose) {
-      this._retryChoose = false;
-      if (agreed) setTimeout(() => this.onChooseFile(), 300);
-    }
   },
 
   async onShow() {

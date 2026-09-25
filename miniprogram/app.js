@@ -2,6 +2,7 @@
 // 微信小程序入口文件
 const auth = require('./utils/auth');
 const alarm = require('./utils/alarm');
+const privacy = require('./utils/privacy');
 
 // ============================================================
 // ⚠️ 必填：云开发环境 ID（仅 USE_MOCK=false 时需要）
@@ -30,26 +31,11 @@ App({
 
   onLaunch() {
     // 隐私授权监听：调用 wx.chooseMessageFile 这类隐私接口时微信会拦截，
-    // 这里把 resolve 交给当前页面弹窗，用户点「同意」后再放行
-    this.globalData.privacyResolve = null;
+    // 这里把 resolve 交给当前页面弹窗，用户点「同意」后再放行。
+    // 具体流程统一收在 utils/privacy.js（各页面不再各写一套，避免重复弹窗）
     this._privacyHandler = null;   // 由使用隐私接口的页面注册
     if (wx.onNeedPrivacyAuthorization) {
-      wx.onNeedPrivacyAuthorization((resolve) => {
-        this.globalData.privacyResolve = resolve;
-        if (typeof this._privacyHandler === 'function') {
-          this._privacyHandler();
-        } else {
-          // 页面没挂自定义弹窗时用系统弹窗兜底，别直接放弃（否则用户点了没反应）
-          wx.showModal({
-            title: '用户隐私保护提示',
-            content: '使用该功能前，需要先阅读并同意《用户隐私保护指引》。',
-            confirmText: '同意',
-            cancelText: '不同意',
-            success: (r) => resolve({ event: r.confirm ? 'agree' : 'disagree' }),
-            fail: () => resolve({ event: 'disagree' }),
-          });
-        }
-      });
+      wx.onNeedPrivacyAuthorization((resolve) => privacy.onNeed(resolve));
     }
 
     // mock 模式下直接用默认行程 ID，不需要登录

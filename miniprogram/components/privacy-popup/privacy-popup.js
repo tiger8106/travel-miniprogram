@@ -1,6 +1,10 @@
 // components/privacy-popup/privacy-popup.js
 // 用户隐私保护授权弹窗：调用隐私接口（选文件）前由微信触发，必须用户点「同意」才放行
-const app = getApp();
+//
+// 「同意」按钮是 open-type="agreePrivacyAuthorization"，微信在用户点击时会自己放行
+// 被挂起的接口调用；这里再调一次 privacy.finish 是双保险（老基础库/没有 pending 时），
+// 重复 resolve 无害，丢掉才是真出事。
+const privacy = require('../../utils/privacy');
 
 Component({
   options: {
@@ -29,16 +33,12 @@ Component({
     },
 
     onAgree() {
-      const resolve = app.globalData.privacyResolve;
-      if (resolve) resolve({ event: 'agree' });
-      app.globalData.privacyResolve = null;
+      privacy.finish('agree');
       this.triggerEvent('close', { agreed: true });
     },
 
     onDisagree() {
-      const resolve = app.globalData.privacyResolve;
-      if (resolve) resolve({ event: 'disagree' });
-      app.globalData.privacyResolve = null;
+      privacy.finish('disagree');
       this.triggerEvent('close', { agreed: false });
       wx.showToast({ title: this.properties.denyTip, icon: 'none' });
     },
