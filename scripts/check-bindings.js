@@ -286,15 +286,32 @@ ok('行李规则有代码兜底且挂在 sanitize 之后', /function enforceLugg
 ok('已确认大交通有确定性对齐兜底（车次错时刻/漏排/重复/起终点错都能拽回）',
   /function enforceMovesAlignment/.test(planJs)
   && /时刻漂移/.test(planJs) && /全天未安排，补一条/.test(planJs));
-ok('细化清洗链按序挂全（对齐→起点→接驳→早餐→晚间→闭环→行李→顺延）',
+ok('细化清洗链按序挂全（对齐→起点→接驳→早餐→禁午睡→晚间→餐次纠偏→闭环→行李→顺延）',
   /items = enforceMovesAlignment\(sanitizeItems/.test(planJs)
     && /items = enforceDayStartLocation\(items, outline\)/.test(planJs)
-    && /items = enforceOriginAccess\(items, p, outline\)/.test(planJs)
+    && /items = enforceOriginAccess\(items, p, outline, roundDays\)/.test(planJs)
     && /items = enforceMorningRoutine\(items, outline\)/.test(planJs)
+    && /items = enforceNoMiddayHotel\(items, outline\)/.test(planJs)
     && /items = enforceEveningPlan\(items, outline\)/.test(planJs)
+    && /items = fixMealLabels\(items, outline\)/.test(planJs)
     && /items = enforceDayClosure\(items, outline, p\)/.test(planJs)
     && /items = enforceLuggageRules\(items, outline\)/.test(planJs)
     && /items = fixDayTimeOverlaps\(items\);/.test(planJs));
+ok('细化失败/残缺天有骨架重建（skeletonForEmptyDays，只在非 partial 轮，排除已完成天）',
+  /function skeletonForEmptyDays/.test(planJs)
+    && /skeletonForEmptyDays\(p, outline, detail\.items, detail\.doneDayIndexes\)/.test(planJs));
+ok('包车/大巴段宽松匹配，已有同向交通条目时不重复补（isScheduledMove 分流）',
+  /function isScheduledMove/.test(planJs) && /已由细化安排（宽松匹配），不补/.test(planJs));
+ok('餐次词按实际时刻纠偏（早上不出现"晚餐"）',
+  /function fixMealLabels/.test(planJs) && /t < 10 \* 60 \+ 30/.test(planJs));
+ok('早餐兜底只在上午补，中午后补午餐而不是早餐',
+  /fs <= 11 \* 60 \+ 30/.test(planJs) && /补午餐而不是早餐/.test(planJs));
+ok('细化 prompt 禁止白天回酒店睡觉（15:00 前）',
+  /白天不许回酒店睡觉/.test(planJs) && /15:00 前禁止安排/.test(planJs));
+ok('大纲 prompt：相邻两天核心片区相距超 1 小时必须换基地',
+  /必须换基地/.test(planJs) && /来回通勤 4 小时/.test(planJs));
+ok('大纲 prompt：ml 三餐都要点名（店名或片区+招牌菜）',
+  /ml 一日三餐都要点名/.test(planJs));
 ok('goTime 语义 = 离开出发地时刻（大交通发车按接驳+安检预留后移，goTime+85/160）',
   /goMin \+ buffer/.test(planJs) && /\? 160/.test(planJs) && /\? 85/.test(planJs));
 ok('backTime 语义 = 到家时刻（大交通到站 = backTime-40）',

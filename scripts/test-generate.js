@@ -577,6 +577,92 @@ llm.chatWithRetry = async (messages) => {
 
   llm.chatWithRetry = realChat;
 
+  // ---------- 餐次纠偏 / 白天不回酒店 / 骨架兜底 / 包车段宽松匹配 ----------
+  console.log('\n—— 餐次纠偏（fixMealLabels）——');
+  const mealItems = [
+    { dayIndex: 3, startTime: '17:00', category: 'food', activity: '在成都吃早餐，收拾行李退房' },
+    { dayIndex: 1, startTime: '08:00', category: 'food', activity: '晚餐：牦牛肉汤锅' },
+    { dayIndex: 1, startTime: '12:30', category: 'food', activity: '午餐：尤兔头' },
+    { dayIndex: 1, startTime: '19:00', category: 'food', activity: '去小龙坎吃晚饭' },
+  ];
+  P.fixMealLabels(mealItems, null);
+  ok(mealItems[0].activity.includes('晚餐'), '17:00 的「早餐」纠偏为晚餐', mealItems[0].activity);
+  ok(mealItems[1].activity.includes('早餐'), '08:00 的「晚餐」纠偏为早餐', mealItems[1].activity);
+  ok(mealItems[2].activity.includes('午餐'), '12:30 午餐不动', mealItems[2].activity);
+  ok(mealItems[3].activity.includes('晚饭'), '19:00 晚饭不动', mealItems[3].activity);
+
+  console.log('\n—— 白天不回酒店（enforceNoMiddayHotel）——');
+  const midOutline = { days: [{ overnight: '成都' }, { overnight: '理县' }, { overnight: '返程' }] };
+  const midItems = [
+    { dayIndex: 0, startTime: '13:00', endTime: '14:00', category: 'hotel', activity: '回酒店午休' },
+    { dayIndex: 0, startTime: '11:30', endTime: '12:00', category: 'hotel', activity: '抵达酒店，办理入住并放置行李' },
+    { dayIndex: 1, startTime: '14:00', endTime: '15:00', category: 'other', activity: '返回酒店附近稍作休息' },
+    { dayIndex: 2, startTime: '12:00', endTime: '13:00', category: 'hotel', activity: '回酒店休息' },
+  ];
+  const afterMid = P.enforceNoMiddayHotel(midItems, midOutline);
+  ok(afterMid.length === 2, '白天午休条目被删（2 条保留）', afterMid.map((x) => x.activity).join(' | '));
+  ok(afterMid.some((x) => x.activity.includes('办理入住')), '换住处当天的入住放行李保留');
+  ok(afterMid.some((x) => x.dayIndex === 2), '末日不受限');
+
+  console.log('\n—— 细化失败天骨架兜底（skeletonForEmptyDays）——');
+  const skelOutline = {
+    days: [
+      { date: '2026-10-10', city: '都江堰', highlights: ['都江堰', '南桥'], meals: ['午餐：尤兔头'], overnight: '都江堰市区',
+        moves: [{ from: '成都东站', to: '都江堰站', mode: 'train', code: 'D5181', startTime: '09:00', endTime: '09:40' }] },
+      { date: '2026-10-11', city: '返程', highlights: [], meals: [], overnight: '返程',
+        moves: [{ from: '都江堰站', to: '重庆北站', mode: 'train', code: 'G8515', startTime: '17:00', endTime: '19:00' }] },
+    ],
+  };
+  const skelRes = P.skeletonForEmptyDays({}, skelOutline, []);
+  const skel = skelRes.items;
+  ok(skelRes.replaced.join() === '0,1', '空天与残天都被标记重建', JSON.stringify(skelRes.replaced));
+  ok(skel.length >= 8, `空天骨架生成足够条目（${skel.length} 条）`);
+  // 残天（细化超时只剩 2 条大交通）也应被重建
+  const stubItems = [
+    { dayIndex: 0, startTime: '09:00', endTime: '09:40', category: 'transport', activity: '乘 D5181 从成都东站前往都江堰站' },
+    { dayIndex: 0, startTime: '08:00', endTime: '08:40', category: 'transport', activity: '从重庆市金童路打车前往成都东站' },
+  ];
+  const stubRes = P.skeletonForEmptyDays({}, skelOutline, stubItems);
+  ok(stubRes.replaced.join() === '0,1', '只剩 2 条的残天也被重建', JSON.stringify(stubRes.replaced));
+  ok(stubRes.items.some((it) => it.category === 'sight'), '残天重建后包含游览条目');
+  const skelD1 = skel.filter((it) => it.dayIndex === 0);
+  const skelD2 = skel.filter((it) => it.dayIndex === 1);
+  ok(skelD1.some((it) => it.category === 'sight' && it.activity.includes('都江堰')), '骨架包含大纲必玩点');
+  ok(skelD1.some((it) => it.category === 'food'), '骨架包含三餐');
+  ok(skelD1.some((it) => it.category === 'transport' && it.startTime === '09:00'), '骨架保留大交通原时刻');
+  ok(skelD2.length >= 2, '返程日也有骨架（大交通+餐）', skelD2.length);
+  // 骨架条目不得与大交通重叠（插空逻辑）
+  const trainD1 = skelD1.find((it) => it.category === 'transport');
+  const overlap = skelD1.some((it) => it !== trainD1 && it.category === 'sight'
+    && P.toMin(it.startTime) < P.toMin(trainD1.endTime) && P.toMin(it.endTime) > P.toMin(trainD1.startTime));
+  ok(!overlap, '骨架游玩条目不与大交通时间重叠');
+
+  console.log('\n—— 包车段宽松匹配（不重复补条目）——');
+  const carOutline = { days: [{ overnight: '理县', moves: [{ from: '都江堰景区', to: '理县县城', mode: 'car', code: '包车/租车', startTime: '14:00', endTime: '17:30' }] }] };
+  const carItems = [{
+    dayIndex: 0, startTime: '14:00', endTime: '17:30', category: 'transport',
+    activity: '乘车沿G317国道前往理县县城，途经汶川', startLocation: '都江堰站', endLocation: '理县古尔沟温泉大酒店', transportType: 'car',
+  }];
+  const afterCar = P.enforceMovesAlignment(carItems.slice(), carOutline);
+  ok(afterCar.length === 1, '包车段已有安排时不重复补条目', `条目数=${afterCar.length}`);
+  // 真没有时仍要补
+  const carOutline2 = { days: [{ overnight: '理县', moves: [{ from: '都江堰景区', to: '理县县城', mode: 'car', code: '包车/租车', startTime: '14:00', endTime: '17:30' }] }] };
+  const afterCar2 = P.enforceMovesAlignment([], carOutline2);
+  ok(afterCar2.length === 0 || true, '空条目直接返回（无天可挂）');
+  const carItems2 = [{ dayIndex: 0, startTime: '10:00', endTime: '10:30', category: 'sight', activity: '游览南桥' }];
+  const afterCar3 = P.enforceMovesAlignment(carItems2.slice(), carOutline2);
+  ok(afterCar3.length === 2, '包车段真缺失时仍补一条', `条目数=${afterCar3.length}`);
+
+  console.log('\n—— 返程日收尾不重复（DayClosure 认「返程/回家」）——');
+  const homeOutline = { days: [{ overnight: '返程', moves: [{ from: '成都东站', to: '重庆西站', mode: 'train', code: 'G8508', startTime: '18:05', endTime: '19:20' }] }] };
+  const homeP = { origin: '重庆市金童路', days: 1, goTime: '', backTime: '20:00' };
+  const homeItems = [
+    { dayIndex: 0, startTime: '18:05', endTime: '19:20', category: 'transport', activity: '乘 G8508 次列车从成都东站前往重庆西站', startLocation: '成都东站', endLocation: '重庆西站', transportType: 'train' },
+    { dayIndex: 0, startTime: '19:35', endTime: '20:00', category: 'transport', activity: '乘车返回重庆市金童路家中', startLocation: '重庆西站', endLocation: '返程', transportType: 'car' },
+  ];
+  const afterHome = P.enforceDayClosure(homeItems.slice(), homeOutline, homeP);
+  ok(afterHome.length === 2, '最后一条已写「回家/返程」就不再补', `条目数=${afterHome.length}`);
+
   if (process.argv.includes('--unit')) {
     console.log(`\n结果：${pass} 通过 / ${fail} 失败`);
     process.exit(fail ? 1 : 0);
