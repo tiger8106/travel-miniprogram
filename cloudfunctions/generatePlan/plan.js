@@ -16,7 +16,7 @@
 // 这样"某天失败 → 重试 → 耗尽放弃"这条链路可以脱离真实 LLM 确定性验证。
 const llm = require('./llm');
 const { parseJSONFromText, asArray, SYS_PROMPT } = require('./llm');
-const { sanitizeItems } = require('./normalize');
+const { sanitizeItems, META_PAT, META_HARD } = require('./normalize');
 const { parseCnTime, tsToDateStr, tsToCnDateTimeStr } = require('./cn-time');
 
 const MAX_DAYS = 12;
@@ -301,6 +301,116 @@ function enforceDayStartLocation(items, outline) {
     if (first && !String(first.startLocation || '').trim()) first.startLocation = prevOv;
   });
   return items;
+}
+
+/**
+ * 已确认大交通对齐兜底（确定性，不靠模型自觉）
+ *
+ * 实测踩过：大纲里"成都东→重庆西 G8528 15:00-17:00"被细化模型写到早上 09:00，
+ * 还在 activity 里自圆其说"实际行程将提前完成都江堰，此处为倒叙 bridge…此处特别
+ * 规划时间线以符合'上游规定'的约束"——用户看到的是"标的去重庆西，实际先玩都江堰"，
+ * 外加一整段内心戏。这里按车次码把大交通硬拽回既定的时刻和起终点：
+ *   · 全天没提这段大交通 → 补一条干净的交通条目（时刻/起终点取大纲）
+ *   · 同一车次码出现多条 → 留一条，其余丢弃（同一天不可能坐两次同一班车）
+ *   · 条目时刻漂移超 60 分钟 → 拽回大纲时刻（15:00 的车不许排在 09:00）
+ *   · 起终点强制对齐大纲车站（导航 chip 直接吃这两个字段，错一个字导去对面省）
+ *   · activity 还带着独白或串了别的地名 → 重写成干净版
+ */
+function enforceMovesAlignment(items, outline) {
+  const days = asArray(outline && outline.days);
+  if (!days.length || !asArray(items).length) return items;
+  const railLike = (m) => /train|plane|高铁|动车|火车|航班|飞机|ship|游船/
+    .test(`${m.mode || ''}${m.code || ''}`.toLowerCase());
+  const escapeRe = (s) => String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const moveActivity = (m) => {
+    const mode = String(m.mode || '').toLowerCase();
+    const code = String(m.code || '').trim();
+    if (/plane|航班|飞机/.test(mode)) return code ? `乘 ${code} 航班从${m.from}前往${m.to}` : `乘飞机从${m.from}前往${m.to}`;
+    if (/train|高铁|动车|火车/.test(mode)) return code ? `乘 ${code} 次列车从${m.from}前往${m.to}` : `乘火车从${m.from}前往${m.to}`;
+    if (/ship|游船/.test(mode)) return code ? `乘 ${code} 从${m.from}前往${m.to}` : `乘船从${m.from}前往${m.to}`;
+    return code ? `乘 ${code} 从${m.from}前往${m.to}` : `从${m.from}前往${m.to}`;
+  };
+  const transportTypeOf = (m) => {
+    const mode = String(m.mode || '').toLowerCase();
+    if (/plane|航班|飞机/.test(mode)) return 'plane';
+    if (/train|高铁|动车|火车/.test(mode)) return 'train';
+    return '';
+  };
+
+  const out = items.slice();
+  days.forEach((day, di) => {
+    const moves = asArray(day && day.moves)
+      .filter((m) => m && m.from && m.to && (String(m.code || '').trim() || railLike(m)));
+    if (!moves.length) return;
+    moves.forEach((m) => {
+      const code = String(m.code || '').trim();
+      const codeRe = code ? new RegExp(escapeRe(code)) : null;
+      const fStem = placeStem(m.from);
+      const tStem = placeStem(m.to);
+      const inDay = out.filter((it) => Number(it.dayIndex || 0) === di);
+      const matched = inDay.filter((it) =>
+        (codeRe ? codeRe.test(`${it.activity || ''}${it.note || ''}`) : false) ||
+        (!code && it.category === 'transport'
+          && String(it.activity || '').includes(fStem)
+          && String(it.activity || '').includes(tStem)));
+
+      if (!matched.length) {
+        // 大纲有这段大交通、模型全程没提 → 补一条
+        const st = toMin(m.startTime);
+        const et = toMin(m.endTime);
+        out.push({
+          dayIndex: di,
+          startTime: st != null ? fmtMin(st) : '',
+          endTime: et != null ? fmtMin(et) : '',
+          activity: moveActivity(m),
+          category: 'transport',
+          startLocation: String(m.from || '').trim(),
+          endLocation: String(m.to || '').trim(),
+          transportType: transportTypeOf(m),
+          note: '',
+        });
+        console.warn('[generatePlan] 第%d天大纲大交通 %s 全天未安排，补一条', di + 1, `${m.from}→${m.to} ${code}`);
+        return;
+      }
+
+      // 同一车次多条：留时刻最接近大纲的那条，其余丢弃
+      const wantS = toMin(m.startTime);
+      const driftOf = (it) => {
+        const v = toMin(it.startTime);
+        return wantS != null && v != null ? Math.abs(v - wantS) : 24 * 60;
+      };
+      matched.sort((a, b) => driftOf(a) - driftOf(b));
+      matched.slice(1).forEach((extra) => {
+        const idx = out.indexOf(extra);
+        if (idx >= 0) out.splice(idx, 1);
+        console.warn('[generatePlan] 第%d天车次 %s 出现多条，丢弃一条', di + 1, code || `${m.from}→${m.to}`);
+      });
+      const it = matched[0];
+
+      // 起终点强制对齐大纲车站
+      it.startLocation = String(m.from || '').trim();
+      it.endLocation = String(m.to || '').trim();
+      it.category = 'transport';
+      if (!it.transportType) it.transportType = transportTypeOf(m);
+
+      // 时刻漂移超 60 分钟 → 拽回大纲时刻（中间天模型按真实班次微调的半小时内不动）
+      const drift = driftOf(it);
+      if (drift > 60) {
+        it.startTime = fmtMin(wantS);
+        const wantE = toMin(m.endTime);
+        if (wantE != null) it.endTime = fmtMin(wantE);
+        console.warn('[generatePlan] 第%d天大交通 %s 时刻漂移 %d 分钟，拽回 %s',
+          di + 1, code || `${m.from}→${m.to}`, drift, it.startTime);
+      }
+
+      // activity 带独白 / 车次码或目的地被写丢 → 重写成干净版
+      const act = String(it.activity || '');
+      const contaminated = META_HARD.some((re) => re.test(act)) || META_PAT.some((re) => re.test(act));
+      const wrongDest = (code && !act.includes(code)) || (tStem && !act.includes(tStem));
+      if (contaminated || wrongDest) it.activity = moveActivity(m);
+    });
+  });
+  return out;
 }
 
 /**
@@ -753,6 +863,7 @@ dayIndex 全部填 ${idx}。
 9. category 取值：景点游览=sight，餐饮=food，住宿/回酒店=hotel，交通=transport，门票预订/取票=ticket，其他=other。
 10. 输出顺序按时间先后。只输出数组，不要任何解释。
 11. **【今天的大交通】是既定路线**：交通方式、车次、出发站/到达站照抄，不许改成别的交通方式、不许编造新车次。
+    - 大交通条目必须排在它**真实被乘坐的时刻位置**（15:00 的车就写在 15:00 前后的时段），严禁为了"衔接顺"把它提前写成"倒叙/桥接/预告"。
     - ${((isFirst && p.goTime) || (isLast && p.backTime))
       ? '起止时刻是**用户指定的硬约束**，必须原样照抄，不许微调（首日按出发时刻、末日按到达时刻安排前后流程）。'
       : '大纲里的起止时刻只是**粗排参考**：若你确知该车次实际时刻与之不符、或与今天其他安排衔接不上，就按实际/合理的时刻微调，前后条目跟着顺移，保证全天时间线首尾相接；'}
@@ -1360,7 +1471,8 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
   const items = fixDayTimeOverlaps(
     enforceLuggageRules(
       enforceDayClosure(
-        enforceDayStartLocation(sanitizeItems(detail.items), outline), outline), outline));
+        enforceDayStartLocation(
+          enforceMovesAlignment(sanitizeItems(detail.items), outline), outline), outline), outline));
 
   // 地理编码消歧要用的每天城市 + 地址→天下标映射。
   // savePlan 的 cityOf 靠它们给高德传 city 参数——之前只消费不生产，
@@ -1452,5 +1564,5 @@ module.exports = {
   normalizeInput, sanitizeAlarmCandidates, buildFallbackAlarms, fallbackAlarms,
   shiftDate, dayDiff, isHolidayRange,
   parseDestList, missingMustVisit, placeStem, duplicateHighlights,
-  applyTripEdgeTimes, enforceDayStartLocation, enforceDayClosure, enforceLuggageRules, fixDayTimeOverlaps, samePlace, toMin, fmtMin,
+  applyTripEdgeTimes, enforceDayStartLocation, enforceDayClosure, enforceLuggageRules, enforceMovesAlignment, fixDayTimeOverlaps, samePlace, toMin, fmtMin,
 };

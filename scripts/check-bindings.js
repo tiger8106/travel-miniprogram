@@ -281,7 +281,10 @@ ok('大纲 prompt 写清"行李随人走"', /行李随人走/.test(planJs));
 ok('细化 prompt 按住宿地判定行李走法（第 16 条）', /16\. \*\*行李处理/.test(planJs) && /sameBase/.test(planJs));
 ok('换住处禁止把行李留在上一家酒店', /禁止写"把大件行李寄存在/.test(planJs));
 ok('行李规则有代码兜底且挂在 sanitize 之后', /function enforceLuggageRules/.test(planJs)
-  && /enforceLuggageRules\(\s*enforceDayClosure\(\s*enforceDayStartLocation\(sanitizeItems/.test(planJs));
+  && /enforceLuggageRules\(\s*enforceDayClosure\(\s*enforceDayStartLocation\(\s*enforceMovesAlignment\(sanitizeItems/.test(planJs));
+ok('已确认大交通有确定性对齐兜底（车次错时刻/漏排/重复/起终点错都能拽回）',
+  /function enforceMovesAlignment/.test(planJs)
+  && /时刻漂移/.test(planJs) && /全天未安排，补一条/.test(planJs));
 
 // ---------- ⑭ 模型内心独白泄漏防护 + 收尾闭环 ----------
 const genNormJs = fs.readFileSync(path.join(ROOT, 'cloudfunctions/generatePlan/normalize.js'), 'utf8');
@@ -290,7 +293,7 @@ ok('细化 prompt 不再把大纲班次说成"用户可能手工改过"（自家
 ok('中间天班次时刻允许静默微调，首末日用户指定时刻才锁死',
   /粗排参考/.test(planJs) && /静默地调/.test(planJs) && /用户指定的硬约束/.test(planJs));
 ok('整段"内心独白"条目有硬识别（META_HARD）',
-  /const META_HARD/.test(genNormJs) && /鉴于上游/.test(genNormJs));
+  /const META_HARD/.test(genNormJs) && /鉴于上游/.test(genNormJs) && /倒叙/.test(genNormJs));
 ok('有起终点的独白条目抢救成干净交通条目，没起终点的丢弃',
   /从\$\{start\}前往\$\{end\}/.test(genNormJs) && /\.filter\(Boolean\)/.test(genNormJs));
 ok('收尾闭环有代码兜底（enforceDayClosure 挂在 sanitize 之后）',

@@ -64,6 +64,66 @@ function samePlace(a, b) {
   return s !== '' && s === e;
 }
 
+// LLM 的"内心独白"特征：推理、假设、自我纠错、把 prompt 里的字段名说出来。
+// 实测真跑时第 2 天出现了一整段：
+//   "*注：根据大纲『桂林磨盘山码头→阳朔龙头山码头』，若人已在阳朔…此处严格遵循【已确认跨城交通】"
+// 用户是会直接看到这段文字的，必须清掉。
+const META_PAT = [
+  /\*\s*注\s*[:：]/,
+  /[（(]\s*注\s*[:：]/,
+  /^\s*注\s*[:：]/,
+  /根据大纲|鉴于大纲|遵循大纲|依据大纲/,
+  /此处假设|此处严格|若用户|如果用户强制/,
+  /【已确认|【已确认的跨城交通】|【今天】|【昨天】|【明天】/,
+  /作为\s*(一个\s*)?(AI|人工智能|助手)|我无法|我需要|我将为你|让我/,
+  // 实测新一轮漏网（川西行程）：模型对"必须原样执行"的班次时刻有异议，
+  // 把论证过程整段写进了 activity —— 逐句剔除对整段独白无能为力，见 META_HARD
+  /鉴于上游|上游要求|必须原样|错误约束|修正正确|严格执行/,
+  // 实测又一轮漏网（重庆-都江堰行程）：模型把 15:00 的返程车次写到早上 09:00，
+  // 自圆其说"实际行程将提前完成都江堰，此处为倒叙 bridge…此处特别规划时间线
+  // 以符合'上游规定'的约束"——"倒叙""规划时间线""上游规定""既定交通"都是独白黑话
+  /倒叙|逆序|插叙|桥接|bridge/i,
+  /上游规定|既定交通|规划时间线|时间线以符合|此处特别/,
+  // 冒烟实测第三轮：整条 activity 只有一句"错误修正：此处应为乘车时间。根据既定路线"
+  /错误修正|错误更正|此处应为|应为乘车|根据既定|既定路线/,
+];
+
+// 整条条目都是"内心独白"的硬特征：命中即认为 activity 根本不是行程描述，
+// 而是模型对约束冲突的自我论证（实测："鉴于上游要求'必须原样执行'但给出了
+// 具体时刻 13:00-13:20，前序行程需大幅提前或此为错误约束。**修正正确**…"）。
+// 这种条目要整条处理（有起终点的抢救成干净的交通条目，否则丢弃），
+// 不能只靠 stripMeta 逐句删——整段都是独白时 stripMeta 会原样保留。
+const META_HARD = [
+  /鉴于上游|上游要求/,
+  /原[样似]执行|必须原样|照抄大纲/,
+  /错误约束|约束冲突|此为错误/,
+  /修正正确|更正如下/,
+  // 同上实测：整条都是"倒叙 bridge / 规划时间线"的自圆其说
+  /倒叙|逆序|插叙|桥接|bridge/i,
+  /上游规定|既定交通|规划时间线|时间线以符合|此处特别/,
+  /错误修正|错误更正|此处应为|应为乘车|根据既定|既定路线/,
+];
+
+/**
+ * 剔掉句子里的元叙述（推理/假设/自我纠错），只留"要做什么"
+ * 逐句判断，整段都被判为元叙述时保留原文——宁可啰嗦，也不能把行程说成空白。
+ */
+function stripMeta(text) {
+  const s = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  const tokens = s.split(/([。；;！!？?\n])/);
+  const kept = [];
+  for (let i = 0; i < tokens.length; i += 2) {
+    const body = tokens[i] || '';
+    const delim = tokens[i + 1] || '';
+    if (!body.trim()) continue;
+    if (META_PAT.some((re) => re.test(body))) continue;
+    kept.push(body + delim);
+  }
+  const out = kept.join('').trim();
+  return out || s;
+}
+
 /**
  * 清洗 LLM 输出的行程项数组
  * @param {Array} rawItems LLM 返回的 items
@@ -76,25 +136,60 @@ function sanitizeItems(rawItems) {
     .map((it) => {
       let di = parseInt(it.dayIndex, 10);
       if (!(di >= 0 && di < MAX_DAY)) di = 0;
+      const rawAct = String(it.activity || '');
+      const start = String(it.startLocation || '').trim();
+      const end = String(it.endLocation || '').trim();
+
+      // ---------- Pass 0：整条"内心独白"抢救 ----------
+      // 命中 META_HARD 说明这条 activity 是模型的自我论证，不是行程。
+      // 有明确起终点的（多半是交通条目）→ 独白扔掉、动作保留；否则整条丢弃。
+      if (META_HARD.some((re) => re.test(rawAct))) {
+        if (start && end && !samePlace(start, end)) {
+          return {
+            dayIndex: di,
+            startTime: normTime(it.startTime),
+            endTime: normTime(it.endTime),
+            activity: `从${start}前往${end}`.slice(0, 200),
+            category: 'transport',
+            startLocation: start,
+            endLocation: end,
+            transportType: it.transportType || '',
+            note: '',
+          };
+        }
+        return null;
+      }
+
       return {
         dayIndex: di,
         startTime: normTime(it.startTime),
         endTime: normTime(it.endTime),
-        activity: String(it.activity).trim().slice(0, 200),
+        activity: stripMeta(rawAct).slice(0, 200),
         category: ['sight', 'food', 'hotel', 'transport', 'ticket', 'other'].includes(it.category)
           ? it.category
           : 'other',
-        startLocation: String(it.startLocation || '').trim().slice(0, 60),
-        endLocation: String(it.endLocation || '').trim().slice(0, 60),
+        startLocation: start.slice(0, 60),
+        endLocation: end.slice(0, 60),
         transportType: it.transportType || '',
-        note: String(it.note || '').trim().slice(0, 300),
+        note: stripMeta(it.note).slice(0, 300),
       };
-    });
+    })
+    .filter(Boolean);
 
   // ---------- Pass 2：跨天位置继承 ----------
   // 逐天解析时每天是独立请求，"当天第一条移动"常因原文没写出发点而缺失起点。
   // 行程是连续的：人昨晚在哪，今天早上就从哪出发。按天序全局遍历，维护"当前所在位置"。
-  const sorted = items.slice().sort((a, b) => a.dayIndex - b.dayIndex); // 稳定排序，同天内保持原顺序
+  // 稳定排序：先按天，再按开始时间升序。LLM 偶尔会把某条排在前面却给了更晚的
+  // 时刻（实测约 2 处/8 天），展示出来就是"时间倒退"。这里只理顺顺序，不改内容。
+  // 缺时间的条目 (toMin → null) 排在当天最后，不打断正常条目。
+  const tOf = (t) => {
+    const v = toMin(t);
+    return v == null ? Number.MAX_SAFE_INTEGER : v;
+  };
+  const sorted = items.slice().sort((a, b) =>
+    (a.dayIndex - b.dayIndex) ||
+    (tOf(a.startTime) - tOf(b.startTime)) ||
+    (tOf(a.endTime) - tOf(b.endTime)));
   let lastKnown = ''; // 上一步结束时人所在的位置
   sorted.forEach((it) => {
     if (it.endLocation && !it.startLocation && lastKnown && lastKnown !== it.endLocation) {
@@ -204,4 +299,4 @@ function sanitizeItems(rawItems) {
   return items;
 }
 
-module.exports = { normTime, samePlace, sanitizeItems, toMin, fmtMin, parseDurationMin };
+module.exports = { normTime, samePlace, sanitizeItems, toMin, fmtMin, parseDurationMin, stripMeta, META_PAT, META_HARD };

@@ -24,7 +24,10 @@ const P = require('../cloudfunctions/generatePlan/plan.js');
 const { sanitizeItems } = require('../cloudfunctions/generatePlan/normalize.js');
 const META_HARD = require('../cloudfunctions/generatePlan/normalize.js').META_HARD;
 
-const META_HINT = /鉴于|上游要求|原样执行|修正正确|错误约束|此处假设|根据大纲|若用户|我无法|我需要/;
+// 冒烟检查的独白特征直接从 normalize.js 的 META_HARD 派生，永远跟生产清洗同频，
+// 避免生产新增了黑话而冒烟脚本还在用旧词表（实测漏过"错误修正：此处应为乘车时间"）
+const META_HINT = new RegExp(
+  require('../cloudfunctions/generatePlan/normalize.js').META_HARD.map((r) => r.source).join('|'), 'i');
 
 (async () => {
   console.log('生成 3 天川西小行程（真实 LLM）…');

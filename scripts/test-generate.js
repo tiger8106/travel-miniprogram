@@ -357,6 +357,59 @@ const homeByWord = P.enforceDayClosure([
 ok(homeByWord.length === 1, '描述里写了回酒店/民宿 → 视为已收尾，不重复补',
   JSON.stringify(homeByWord.map((x) => x.activity)));
 
+// 5j. 已确认大交通对齐兜底：车次错时刻/漏排/重复/起终点错都要被拽回
+const alignOutline = { days: [
+  { overnight: '成都', moves: [{ from: '重庆西站', to: '成都东站', mode: 'train', code: 'G8505', startTime: '08:30', endTime: '11:00' }] },
+  { overnight: '都江堰', moves: [{ from: '成都东站', to: '重庆西站', mode: 'train', code: 'G8528', startTime: '15:00', endTime: '17:00' }] },
+] };
+// a) 15:00 的返程被模型写到 09:00、终点还串成了当天景区 → 拽回 15:00-17:00、起终点回车站
+const aligned = P.enforceMovesAlignment([
+  { dayIndex: 1, startTime: '09:00', endTime: '10:30', activity: '乘 G8528 从成都东站前往重庆西站（此处为倒叙，规划时间线以符合上游规定）', category: 'transport', startLocation: '成都东站', endLocation: '都江堰景区离堆公园', transportType: 'train' },
+  { dayIndex: 1, startTime: '10:30', endTime: '12:30', activity: '游览都江堰景区', category: 'sight' },
+], alignOutline);
+const aTrain = aligned.find((x) => /G8528/.test(x.activity));
+ok(aTrain && aTrain.startTime === '15:00' && aTrain.endTime === '17:00',
+  '大交通时刻漂移超 60 分钟 → 拽回大纲既定时刻', aTrain && `${aTrain.startTime}-${aTrain.endTime}`);
+ok(aTrain && aTrain.startLocation === '成都东站' && aTrain.endLocation === '重庆西站',
+  '大交通起终点强制对齐大纲车站（导航 chip 不再串到景区）',
+  aTrain && `${aTrain.startLocation}→${aTrain.endLocation}`);
+ok(aTrain && !/倒叙|时间线|上游/.test(aTrain.activity),
+  '带独白的大交通条目重写成干净版', aTrain && aTrain.activity);
+// b) 大纲有这段大交通、模型全程没提 → 补一条
+const filled = P.enforceMovesAlignment([
+  { dayIndex: 0, startTime: '12:00', endTime: '13:00', activity: '午餐', category: 'food' },
+], alignOutline);
+const added = filled.find((x) => /G8505/.test(x.activity));
+ok(added && added.startTime === '08:30' && added.startLocation === '重庆西站' && added.endLocation === '成都东站'
+  && added.category === 'transport',
+  '大纲大交通全天未安排 → 补一条干净交通条目', added && JSON.stringify(added));
+// c) 同一车次出现两条 → 留时刻最接近大纲的，其余丢弃
+const deduped = P.enforceMovesAlignment([
+  { dayIndex: 1, startTime: '14:40', endTime: '17:00', activity: '乘 G8528 次列车从成都东站前往重庆西站', category: 'transport', startLocation: '成都东站', endLocation: '重庆西站', transportType: 'train' },
+  { dayIndex: 1, startTime: '09:00', endTime: '10:30', activity: '乘 G8528 从成都东站前往重庆西站（倒叙）', category: 'transport', startLocation: '成都东站', endLocation: '重庆西站', transportType: 'train' },
+], alignOutline);
+ok(deduped.filter((x) => /G8528/.test(x.activity)).length === 1
+  && deduped.find((x) => /G8528/.test(x.activity)).startTime === '14:40',
+  '同一车次重复条目只留一条（时刻最接近大纲的）',
+  JSON.stringify(deduped.filter((x) => /G8528/.test(x.activity)).map((x) => x.startTime)));
+// d) sanitize 层：整条"倒叙"独白没起终点 → 丢弃
+const droppedMono = sanitizeItems([
+  { dayIndex: 0, startTime: '09:00', endTime: '10:30', activity: '实际行程将提前完成都江堰，此处为倒叙 bridge，规划时间线以符合上游规定的约束' },
+]);
+ok(droppedMono.length === 0, '"倒叙/规划时间线"独白条目（无起终点）整条丢弃',
+  JSON.stringify(droppedMono));
+const rescuedMono = sanitizeItems([
+  { dayIndex: 0, startTime: '09:00', endTime: '10:30', activity: '乘 G8528 前往重庆西站（此处为倒叙 bridge）', startLocation: '成都东站', endLocation: '重庆西站' },
+]);
+ok(rescuedMono.length === 1 && rescuedMono[0].category === 'transport'
+  && !/倒叙/.test(rescuedMono[0].activity),
+  '"倒叙"独白条目有起终点 → 抢救成干净交通条目', JSON.stringify(rescuedMono));
+const fixedMono = sanitizeItems([
+  { dayIndex: 0, startTime: '16:15', endTime: '20:00', activity: '错误修正：此处应为乘车时间。根据既定路线' },
+]);
+ok(fixedMono.length === 0, '"错误修正/此处应为/既定路线"独白条目整条丢弃',
+  JSON.stringify(fixedMono));
+
 // 6. 失败天重试链路（不调真实 LLM：把 llm.chatWithRetry 换成假实现）
 //
 //    背景：之前某天细化失败会被直接排除在续跑队列外，partial=false 就结束了，
