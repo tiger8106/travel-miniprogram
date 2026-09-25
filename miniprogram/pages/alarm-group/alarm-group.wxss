@@ -157,12 +157,15 @@
 }
 
 /* 输入框 */
+/* input 必须给显式高度：只靠上下 padding 撑高会在开发者工具/部分机型上塌陷，
+   占位文字被裁掉，看起来像一条空白灰条 */
 .input-line {
   width: 100%;
   box-sizing: border-box;
   background: #f7f8fa;
   border-radius: 20rpx;
-  padding: 22rpx 24rpx;
+  height: 88rpx;
+  padding: 0 24rpx;
   font-size: 28rpx;
   color: #1a1a1a;
 }

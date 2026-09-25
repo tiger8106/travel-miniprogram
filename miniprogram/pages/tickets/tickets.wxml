@@ -110,8 +110,6 @@
       <text class="group-arrow">›</text>
     </view>
     <view wx:if="{{!groups.length}}" class="group-empty">所有分类都是空的</view>
-
-    <view wx:if="{{!editForm}}" class="add-btn" bindtap="onAdd">+ 添加提醒事项</view>
   </block>
   </block>
 
