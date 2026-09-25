@@ -140,6 +140,41 @@ ok(P.missingMustVisit({ mustVisit: ['龙脊梯田'] }, {
   days: [{ date: '2026-10-01', city: '桂林', theme: '市区', moves: [], highlights: ['象鼻山'], meals: [], overnight: '桂林', note: '' }],
 }).length === 1, '真漏了照样报缺');
 
+// 5d-3. "只路过"不算覆盖（都江堰事件的防线）：出现在 mv 描述 / n 提示里的
+// 「经过都江堰游客中心」不能当成"去玩了"——只认 城市/主题/必玩点 三个字段
+const transitOutline = {
+  days: [{
+    date: '2026-10-01', city: '毕棚沟', theme: '直奔毕棚沟',
+    moves: [{ from: '成都', to: '毕棚沟', m: 'car', c: '', s: '07:00', e: '12:00', n: '坐车经过都江堰游客中心' }],
+    highlights: ['毕棚沟'], meals: [], overnight: '毕棚沟', note: '',
+  }],
+};
+ok(P.missingMustVisit({ mustVisit: ['都江堰'] }, transitOutline).length === 1,
+  '「途经都江堰」不算覆盖：只在交通描述里出现照样报缺',
+  JSON.stringify(P.missingMustVisit({ mustVisit: ['都江堰'] }, transitOutline)));
+ok(P.missingMustVisit({ mustVisit: ['成都市'] }, transitOutline).length === 1,
+  '「成都市」按词干比对（成都）不被带"市"字卡住',
+  JSON.stringify(P.missingMustVisit({ mustVisit: ['成都市'] }, transitOutline)));
+
+// 5d-4. 跨天重复游玩检测（毕棚沟玩两次事件的防线）
+const dupOutline = {
+  days: [
+    { date: '2026-10-01', city: '毕棚沟', theme: '毕棚沟', moves: [], highlights: ['毕棚沟', '娜姆湖'], meals: [], overnight: '毕棚沟', note: '' },
+    { date: '2026-10-02', city: '成都', theme: '市区', moves: [], highlights: ['宽窄巷子'], meals: [], overnight: '成都', note: '' },
+    { date: '2026-10-03', city: '毕棚沟', theme: '再玩一次', moves: [], highlights: ['晨拍毕棚沟', '红军沟'], meals: [], overnight: '成都', note: '' },
+  ],
+};
+const dups = P.duplicateHighlights(dupOutline);
+ok(dups.length === 1 && dups[0].name === '毕棚沟' && dups[0].days.join(',') === '0,2',
+  '「毕棚沟」与「晨拍毕棚沟」算同一个，跨天报重', JSON.stringify(dups));
+const cleanDups = P.duplicateHighlights({
+  days: [
+    { date: '2026-10-01', city: '成都', theme: 'x', moves: [], highlights: ['宽窄巷子', '锦里'], meals: [], overnight: '成都', note: '' },
+    { date: '2026-10-02', city: '都江堰', theme: 'x', moves: [], highlights: ['青城山', '都江堰景区'], meals: [], overnight: '成都', note: '' },
+  ],
+});
+ok(cleanDups.length === 0, '不同景点不误报', JSON.stringify(cleanDups));
+
 // 5e. 去程开始时间 / 返程到达时间：代码兜底对齐（不靠 LLM 自觉）
 //     语义：goTime = 从出发城市启程的时刻；backTime = 回到出发城市的时刻（不是发车时刻）
 const edgeP = normalizeInput({
@@ -230,6 +265,31 @@ let r6 = P.enforceLuggageRules([
   { dayIndex: 2, startTime: '08:00', endTime: '09:00', activity: '吃早餐', category: 'food' },
 ], { days: [{ overnight: '阳朔' }, { overnight: '阳朔' }, { overnight: '返程' }] });
 ok(/今天返程/.test(r6[0].note || ''), '返程日的行李提醒改成"今天返程"口吻', r6[0].note);
+
+let r7 = lug([
+  { dayIndex: 1, startTime: '08:00', endTime: '08:30', activity: '携带全部行李打车前往汽车站', category: 'transport', note: '行李随身带，不寄存' },
+  { dayIndex: 1, startTime: '09:00', endTime: '12:00', activity: '前往明仕田园', category: 'transport', note: '严禁寄存回原酒店' },
+]);
+ok(!/取回寄存的行李/.test(r7[0].note || '') && !/取回寄存的行李/.test(r7[1].note || ''),
+  '否定句里的"寄存"（不寄存/严禁寄存）不算寄存，不冒出取回提醒',
+  JSON.stringify([r7[0].note, r7[1].note]));
+
+// 5g. 同天时间重叠兜底：LLM 偶尔排出"上一条没结束下一条就开始了"
+const overlapped = P.fixDayTimeOverlaps([
+  { dayIndex: 0, startTime: '09:00', endTime: '10:00', activity: 'A' },
+  { dayIndex: 0, startTime: '09:30', endTime: '11:00', activity: 'B' },
+  { dayIndex: 0, startTime: '08:00', endTime: '08:40', activity: 'C' },
+]);
+ok(overlapped[0].activity === 'C' && overlapped[1].activity === 'A' && overlapped[2].activity === 'B',
+  '同天条目按开始时间排序', JSON.stringify(overlapped.map((x) => x.activity)));
+ok(overlapped[2].startTime === '10:00' && overlapped[2].endTime === '11:00',
+  '重叠条目开始时间被顺延到上一条结束，结束时间保留', `${overlapped[2].startTime}-${overlapped[2].endTime}`);
+const contained = P.fixDayTimeOverlaps([
+  { dayIndex: 0, startTime: '09:00', endTime: '12:00', activity: 'A' },
+  { dayIndex: 0, startTime: '10:00', endTime: '10:30', activity: 'B' },
+]);
+ok(contained[1].startTime === '12:00' && contained[1].endTime === '12:30',
+  '完全被盖住的条目：顺延后至少给 30 分钟，不造零时长', `${contained[1].startTime}-${contained[1].endTime}`);
 
 // 6. 失败天重试链路（不调真实 LLM：把 llm.chatWithRetry 换成假实现）
 //
@@ -332,6 +392,12 @@ return (async () => {
     const hit = outlineJson.includes(name) || (stem.length >= 2 && outlineJson.includes(stem));
     ok(hit, `大纲包含点名地点「${name}」${hit ? '' : `（词干「${stem}」也没匹配上）`}`);
   });
+  // 漏点/重复的代码级检测（与云端修订用同一套判定）
+  const playMissing = P.missingMustVisit({ mustVisit }, phase1.outline);
+  ok(playMissing.length === 0, `大纲每个点名地点都有"真游玩"安排（不只是路过）`, playMissing.join('、'));
+  const outlineDups = P.duplicateHighlights(phase1.outline);
+  ok(outlineDups.length === 0, '大纲没有跨天重复游玩的景点',
+    outlineDups.map((d) => `${d.name}(第${d.days.map((x) => x + 1).join(',')}天)`).join('；'));
 
   // 去程开始 / 返程到达时刻必须落在大纲里（代码兜底对齐，不是靠 LLM 自觉）
   const od = phase1.outline.days || [];
@@ -443,7 +509,9 @@ return (async () => {
     const tonight = outlineDays[d].overnight || outlineDays[d].city || '';
     const lastNight = d > 0 ? (outlineDays[d - 1].overnight || outlineDays[d - 1].city || '') : '';
     if (!lastNight || P.samePlace(lastNight, tonight)) continue;   // 只查换住处的天
-    const txt = dayItems.map((it) => `${it.activity || ''} ${it.note || ''}`).join(' ');
+    // 否定句里的"寄存"（"行李随身带，不寄存""严禁寄存回原酒店"）不算寄存
+    const stripNeg = (s) => String(s || '').replace(/(不|勿|别|无需|无须|不用|避免|严禁|禁止|不要)(寄存|存放|存包|寄放)/g, '');
+    const txt = dayItems.map((it) => `${it.activity || ''} ${it.note || ''}`).map(stripNeg).join(' ');
     if (!/行李/.test(txt)) lugMissing.push(`第${d + 1}天`);
     if (/寄存|存放|存包/.test(txt)
       && !/取回|取件|拿回|领回/.test(txt)
@@ -475,11 +543,24 @@ return (async () => {
   const types = [...new Set(alarms.map((a) => a.type))];
   ok(types.length >= 3, `覆盖至少 3 类待办（${types.join('/')}）`, types.length);
 
-  // 查漏补齐后：每一晚住宿都该有自己的预订提醒（同酒店连住按晚各算）
+  // 查漏补齐后：每一晚住宿都该被预订提醒覆盖。LLM 会把连住合并成一条
+  // （「10月4日-10月6日共2晚」），所以按标题里能对上的晚数算，不按条数算。
+  // 临近出发时（提醒日已过去的晚）本来就不可能再提醒，只要求"可提醒的晚全覆盖"。
   const outlineNights = (phase1.outline.days || []).length - 1;
   const hotelAlarms = alarms.filter((a) => a.type === 'hotel');
-  ok(hotelAlarms.length >= Math.min(outlineNights, 5),
-    `酒店提醒覆盖住宿（${hotelAlarms.length} 条 / ${outlineNights} 晚，≥5 即算全覆盖同类）`, hotelAlarms.length);
+  let coveredNights = 0;
+  hotelAlarms.forEach((a) => {
+    const m = /共(\d+)晚/.exec(a.title || '');
+    coveredNights += m ? Number(m[1]) : 1;
+  });
+  const checkinDates = (phase1.outline.days || []).slice(0, -1).map((d) => d.date);
+  const remindable = checkinDates.filter((ds) => {
+    // 酒店提醒在入住日前 7 天的 20:00 触发，触发力在"现在"之前就算不可提醒
+    const fire = new Date(`${ds}T20:00:00+08:00`).getTime() - 7 * 86400000;
+    return fire >= Date.now();
+  }).length;
+  ok(coveredNights >= remindable,
+    `酒店提醒覆盖住宿（覆盖 ${coveredNights} 晚 / 可提醒 ${remindable} 晚，共 ${outlineNights} 晚）`, coveredNights);
 
   if (plan.suggestions && Object.keys(plan.suggestions).length) {
     console.log('\n建议字段:', Object.keys(plan.suggestions).join(', '));

@@ -75,6 +75,15 @@ ok(G.cityHit('阳朔县城（西街附近）', '广西壮族自治区|桂林市|
   '脏城市值清洗后仍能校验（阳朔县城（西街附近） → 阳朔）');
 ok(G.cityHit('龙脊梯田', '广西壮族自治区|桂林市|龙脊梯田景区') === true, '片区名靠详细地址也能命中');
 ok(G.cityHit('', 'anything') === true, '没给城市时不校验（老行为）');
+console.log('\n【1b】地点自身词根（selfTokens / selfMatch）');
+ok(JSON.stringify(G.selfTokens('大新县硕龙镇')) === JSON.stringify([{ t: '大新', suf: '县' }, { t: '硕龙', suf: '镇' }]),
+  '「大新县硕龙镇」提出 大新县/硕龙镇 两个词根', JSON.stringify(G.selfTokens('大新县硕龙镇')));
+ok(JSON.stringify(G.selfTokens('象鼻山')) === '[]', '没有行政后缀就没有词根（象鼻山）', JSON.stringify(G.selfTokens('象鼻山')));
+ok(JSON.stringify(G.selfTokens('成都市')) === JSON.stringify([{ t: '成都', suf: '市' }]), '「成都市」→ 成都+市', JSON.stringify(G.selfTokens('成都市')));
+ok(G.selfMatch(G.selfTokens('大新县硕龙镇'), '广西壮族自治区|崇左市|大新县|硕龙镇XX村') === true, '正确结果的 hay 含「大新县」→ 命中');
+ok(G.selfMatch(G.selfTokens('大新县硕龙镇'), '广西壮族自治区|桂林市|雁山区|桂林市大新水库') === false,
+  '「桂林市大新水库」里的裸「大新」不算命中（必须带县后缀）');
+ok(G.selfMatch(G.selfTokens('大新县硕龙镇'), '桂林市临桂区某地') === false, '桂林方向的错坐标不命中');
 
 // ---------------------------------------------------------------- 桩测试
 const realGet = https.get;
@@ -166,6 +175,42 @@ async function caseF() {
   return G.geocodeOne('桂林北站', '阳朔县城（西街附近）');
 }
 
+async function caseG() {
+  // 真实翻车场景（2026-09-25 硕龙镇）：条目挂在桂林那天，city=桂林，
+  // 「大新县硕龙镇」在桂林搜不到。geo/city 返回桂林方向的错坐标 ——
+  // hay 里含"桂林"，旧逻辑会放行（定位从桂西南跑到广西东北角）。
+  // 新逻辑：地址自带词根 大新/硕龙，只认词根证据 → 错坐标被拒，
+  // 不带 city 的自然查询返回崇左大新县的正确结果 → 放行。
+  stubHttp([
+    { match: (u) => u.includes('place/text'), resp: { status: '1', pois: [] } },
+    {
+      match: (u) => u.includes('geocode/geo') && u.includes('city=桂林'),
+      resp: { status: '1', geocodes: [geo('110.29,25.27', '广西壮族自治区', '桂林市', '雁山区', '桂林市大新水库')] },
+    },
+    {
+      match: (u) => u.includes('geocode/geo') && u.includes('address=桂林大新县硕龙镇'),
+      resp: { status: '1', geocodes: [geo('110.10,25.30', '广西壮族自治区', '桂林市', '临桂区', '桂林大新县硕龙镇')] },
+    },
+    {
+      match: (u) => u.includes('geocode/geo'),
+      resp: { status: '1', geocodes: [geo('106.75,22.85', '广西壮族自治区', '崇左市', '大新县', '广西壮族自治区崇左市大新县硕龙镇')] },
+    },
+  ]);
+  return G.geocodeOne('大新县硕龙镇', '桂林');
+}
+
+async function caseH() {
+  // 拼接兜底（geo/prefixed）想蒙混过关：返回的结果 hay 里含"桂林"
+  // 但不含词根「大新/硕龙」→ strict 校验必须拒掉，宁可不给坐标
+  stubHttp([
+    { match: (u) => u.includes('place/text'), resp: { status: '1', pois: [] } },
+    { match: (u) => u.includes('geocode/geo') && u.includes('address=桂林大新县硕龙镇'),
+      resp: { status: '1', geocodes: [geo('110.10,25.30', '广西壮族自治区', '桂林市', '临桂区', '桂林市临桂区某地')] } },
+    { match: (u) => u.includes('geocode/geo'), resp: { status: '1', geocodes: [] } },
+  ]);
+  return G.geocodeOne('大新县硕龙镇', '桂林');
+}
+
 (async () => {
   console.log('\n【2】策略链路（桩模拟高德响应）');
   const a = await caseA();
@@ -185,6 +230,13 @@ async function caseF() {
 
   const f = await caseF();
   ok(f === null, '脏城市值洗成「阳朔」后仍坚持拒绝错城坐标（宁缺毋错）', f);
+
+  const g = await caseG();
+  ok(g && g.lon === 106.75 && g.lat === 22.85,
+    '「大新县硕龙镇」@桂林那天 → 定位到崇左大新县（桂林方向的错坐标被词根拒掉）', g);
+
+  const h = await caseH();
+  ok(h === null, '拼接兜底返回的桂林结果不含词根 → 拒绝，不给坐标', h);
 
   https.get = realGet;
 

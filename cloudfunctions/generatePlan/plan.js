@@ -194,6 +194,8 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
    0.2.1 **行李随人走（铁律，为游客的方便着想）**：**只要当晚不回昨晚那家酒店（ov 与前一天不同），大件行李就必须随身走**，绝不允许"把大件行李寄存在 A 酒店、人去 B 住"——那等于逼游客折返取件。换住处那天的正确走法：退房带走行李 → 抵达新住宿地后**先到酒店放行李/寄存前台，再轻装出门玩**；若当天先去景区，行李随身带到景区，用游客中心的寄存处/存包柜，并在当天提示里写明"离开时取回行李"。
 0.3 **一个基地管一片**：同一片景点（如阳朔的西街/遇龙河/十里画廊/兴坪）住在同一个基地辐射游览，不要每天换酒店搬行李；能当天往返的远景点就当天往返。
 0.4 **交通+游览二合一的段优先这样串**：游船/观光列车这类"坐上去本身就是游览"的交通（如漓江游船桂林→阳朔），直接作为当天的转移方式（mv 的 m 填 ship，同时写进 hl），下船即开始玩，**不要"游完再原路坐车回来、再重新坐车过去"**。
+0.5 **目的地全覆盖（铁律）**：目的地清单里的每一个地点都必须作为**游玩目的地**安排（成为某天的 city / 当天主题 / 必玩点），绝不能只当成过路走廊。哪怕它恰好在两站之间（例：都江堰在成都与毕棚沟之间），也要安排半天到一天**真正进去游玩**，禁止只写"途经都江堰""车览都江堰"。用户点名要去的地方，没有"顺路看一眼"这个说法。
+0.6 **同一个景点只玩一次**：每个具体景点（hl 里的名字）在整个行程**只出现在一天**，禁止跨天重复游玩；也禁止"玩完 A 过两天又回头玩 A"。相邻目的地按地理顺序串成一条线，一趟走完。
 1. ds 恰好 ${p.days} 天，日期从 ${p.startDate} 连续到 ${p.endDate}，每天一个元素，顺序递增。
 2. 路线顺路：相邻两天不来回折返；同一城市连片玩完再换城。
 3. 第一天从（或抵达）目的地${p.origin ? `（出发地 ${p.origin}）` : ''}，最后一天返回${p.origin || '出发地'}。
@@ -223,19 +225,27 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
   // 点名地点兜底：LLM 偶尔会"自作主张"丢掉它认为不顺路的点
   // （用户点名"桂林、龙脊梯田、阳朔…"，结果整份大纲没有龙脊梯田——实锤踩过）。
   // 生成后对照清单逐个查，漏了且时间还够就发一次修订请求补回来。
+  // 同一条修订链路也管"跨天重复游玩"（毕棚沟被排了两天——实锤踩过）。
   const missing = missingMustVisit(p, outline);
-  if (missing.length) {
-    console.warn('[generatePlan] 大纲漏掉用户点名地点: %s → 发起修订', missing.join('、'));
+  const dups = duplicateHighlights(outline);
+  if (missing.length || dups.length) {
+    if (missing.length) console.warn('[generatePlan] 大纲漏掉用户点名地点: %s', missing.join('、'));
+    if (dups.length) console.warn('[generatePlan] 大纲跨天重复游玩: %s',
+      dups.map((d) => `${d.name}(第${d.days.map((x) => x + 1).join(',')}天)`).join('、'));
     // 修订现在只吐"改动的那几天"，几百 token 就够，12s 足够跑完
     if (outlineDeadline - Date.now() > 12 * 1000) {
-      const repaired = await repairOutline(p, outline, missing, outlineDeadline);
+      const repaired = await repairOutline(p, outline, missing, dups, outlineDeadline);
       if (repaired) {
-        const still = missingMustVisit(p, repaired);
-        if (!still.length) {
-          console.log('[generatePlan] 修订成功，点名地点已全部排入');
+        const stillMissing = missingMustVisit(p, repaired);
+        const stillDups = duplicateHighlights(repaired);
+        // 采纳条件：漏点全补齐，且重复问题严格减少（Math.max(1,·) 让
+        // "原本没有重复"也要求修订后仍是 0）
+        if (!stillMissing.length && stillDups.length < Math.max(1, dups.length)) {
+          console.log('[generatePlan] 修订成功（剩余：漏点 %d，重复 %d）', stillMissing.length, stillDups.length);
           return repaired;
         }
-        console.warn('[generatePlan] 修订后仍缺: %s（保留原大纲）', still.join('、'));
+        console.warn('[generatePlan] 修订后仍有问题（漏 %d，重复 %d），保留原大纲',
+          stillMissing.length, stillDups.length);
       }
     } else {
       console.warn('[generatePlan] 剩余时间不足，跳过修订，保留原大纲');
@@ -340,10 +350,14 @@ function enforceLuggageRules(items, outline) {
 
     const textOf = (it) => `${it.activity || ''} ${it.note || ''}`;
     const hasLuggage = (it) => /行李|箱子|大件/.test(textOf(it));
+    // 否定句里的"寄存"不是寄存："行李随身带，不寄存""严禁寄存回原酒店"
+    // ——先把否定短语剥掉再匹配，否则会莫名其妙冒出一条"记得取回行李"
+    const stripNegation = (s) => String(s || '')
+      .replace(/(不|勿|别|无需|无须|不用|避免|严禁|禁止|切记不要|不要)(寄存|存放|存包|寄放)/g, '');
     // 只把"真的把行李存下了"当成寄存：activity 里写了寄存动作，或备注里明确写了"寄存行李"。
     // 「码头有行李寄存柜」这种顺口一提不算——否则会莫名其妙冒出一条"记得取回行李"。
-    const isStore = (it) => (/寄存|存放|存包/.test(String(it.activity || '')) && hasLuggage(it))
-      || /寄存(大件)?行李|存放(大件)?行李|行李寄存/.test(String(it.note || ''));
+    const isStore = (it) => (/寄存|存放|存包/.test(stripNegation(String(it.activity || ''))) && hasLuggage(it))
+      || /寄存(大件)?行李|存放(大件)?行李|行李寄存/.test(stripNegation(String(it.note || '')));
     const isPickup = (it) => /取回|取件|拿回|领回/.test(textOf(it)) && hasLuggage(it);
     const appendNote = (it, tip) => {
       if (!it) return false;
@@ -492,18 +506,58 @@ function placeStem(name) {
   return stripped.length >= 2 ? stripped : s;
 }
 
-/** 用户点名的地点里，大纲还没覆盖到的（词干匹配，容忍"庄园/田园"这类一字之差） */
+/** 用户点名的地点里，大纲还没"真正去玩"的（词干匹配，容忍"庄园/田园"这类一字之差） */
 function missingMustVisit(p, outline) {
-  const text = JSON.stringify(outlineToShortJson(outline));
+  // 只认游玩字段：城市 / 当天主题 / 必玩点。mv 描述、n 提示里的出现不算——
+  // 真踩过：都江堰只出现在 mv 的"坐车经过都江堰游客中心"里，
+  // 整串 JSON 比对误判成已覆盖，用户想玩的地方被当成走廊开过去了。
+  const playText = outline.days.map((d) =>
+    [d.city, d.theme, ...asArray(d.highlights)].join('|')).join('|');
   return (p.mustVisit || []).filter((name) => {
-    if (text.includes(name)) return false;
+    if (playText.includes(name)) return false;
     const stem = placeStem(name);
-    return !text.includes(stem);
+    if (stem.length >= 2 && playText.includes(stem)) return false;
+    // 「成都市」→「成都」：城市字段常写简称，别因为带了个"市"字判成漏了
+    const bare = String(name || '').replace(/(市|县|区)$/, '');
+    if (bare.length >= 2 && playText.includes(bare)) return false;
+    return true;
   });
 }
 
+/** hl 里不算景点的泛化词（按天重复是正常的） */
+const GENERIC_HL = /^(自由活动|自由行|自由探索|酒店休息|休整|集合|出发|到达|抵达|返程|返程回家|逛逛|市区漫游|市区自由活动)$/;
+
 /**
- * 修订大纲：把漏掉的点名地点排进去，其余安排尽量保持不变。
+ * 跨天重复游玩的景点：同一个 hl 词条（或包含它的变体，如"晨拍毕棚沟"
+ * vs"毕棚沟"）出现在 ≥2 个不同的天。真踩过：毕棚沟在大纲里被排了两天，
+ * 行程硬生生多出一天重复爬山。
+ * @returns Array<{name, days:number[]}> days 是 dayIndex（0 起）
+ */
+function duplicateHighlights(outline) {
+  const items = [];
+  outline.days.forEach((d, i) => asArray(d.highlights).forEach((h) => {
+    const s = String(h || '').trim();
+    if (s && !GENERIC_HL.test(s)) items.push({ s, stem: placeStem(s), day: i });
+  }));
+  // 归并：词条 stem 相同，或一个是另一个的子串（"毕棚沟" ⊂ "晨拍毕棚沟"）就算同一个
+  const groups = [];
+  items.forEach((it) => {
+    const g = groups.find((grp) => grp.members.some((m) =>
+      m.stem === it.stem
+      || (m.stem.length >= 2 && it.s.includes(m.stem))
+      || (it.stem.length >= 2 && m.s.includes(it.stem))));
+    if (g) { g.members.push(it); g.days.add(it.day); } else {
+      groups.push({ members: [it], days: new Set([it.day]) });
+    }
+  });
+  return groups
+    .filter((g) => g.days.size >= 2)
+    .map((g) => ({ name: g.members[0].stem, days: [...g.days].sort((a, b) => a - b) }));
+}
+
+/**
+ * 修订大纲：把漏掉的点名地点排进去 / 清掉跨天重复游玩的景点，
+ * 其余安排尽量保持不变。
  *
  * ⚠️ 只让模型输出**需要改动的那几天**，不再让它重写整份大纲：
  *    整份 8 天大纲要写 ~2700 token（实测约 30s），而这次修订是在主大纲跑完之后
@@ -513,10 +567,17 @@ function missingMustVisit(p, outline) {
  * 兼容：模型万一还是返回了完整大纲（ds 天数 = 总天数），按整份替换处理。
  * 失败返回 null（保留原大纲）。
  */
-async function repairOutline(p, outline, missing, deadline) {
+async function repairOutline(p, outline, missing, dups, deadline) {
   try {
-    const prompt = `下面这份旅行路线大纲漏掉了用户点名要去的地点：${missing.join('、')}。
-请**只输出需要改动的那几天**（其余天不要输出），把它们安排进去（顺路串联或当天往返都可以）。
+    const issues = [];
+    if (missing.length) {
+      issues.push(`漏掉了用户点名要去的地点：${missing.join('、')}（每一个都必须安排进某天：成为城市、当天主题或必玩点，不能只"途经"）`);
+    }
+    if (dups.length) {
+      issues.push(`有景点被跨天重复安排：${dups.map((d) => `「${d.name}」出现在第 ${d.days.map((x) => x + 1).join('、')} 天`).join('；')}。重复的只保留一天，其余那天换成同区域其他不重复的景点`);
+    }
+    const prompt = `下面这份旅行路线大纲有问题：${issues.join('。')}。
+请**只输出需要改动的那几天**（其余天不要输出），把问题修掉。
 
 【旅行需求】${profileText(p)}
 
@@ -528,8 +589,8 @@ ${JSON.stringify(outlineToShortJson(outline))}
 
 # 要求
 1. ds 只包含**需要改动的天**（一般 1~2 天就够），d 必须原样抄当前大纲里的日期。
-2. ${missing.join('、')} 每一个都必须出现在某天的 city / t / hl 里。
-3. 改动尽量小：能塞进已有某天的 hl 就别重排整条路线，其他天保持原样。
+2. ${missing.length ? `${missing.join('、')} 每一个都必须出现在某天的 city / t / hl 里。` : ''}${dups.length ? `重复景点每个只保留一天，被清掉的那天补上新的、不重复的景点；不要因为去重就把某天改空。` : ''}
+3. 改动尽量小：能塞进已有某天的 hl 就别重排整条路线，其他天保持原样。住宿闭环别破坏：每晚 ov 保持原样。
 4. 只输出这个 JSON 对象，不要任何解释。`;
     const text = await llm.chatWithRetry([
       { role: 'system', content: SYS_PROMPT },
@@ -1163,6 +1224,33 @@ function withTimeout(promise, ms, fallback) {
   });
 }
 
+/**
+ * 同一天内时间线兜底：LLM 偶尔会排出"上一条 09:00-10:00，下一条 09:30 就开始"
+ * 的重叠（真跑 101 条里出过 1 条）。按开始时间排序，重叠的把开始时间顺延到
+ * 上一条结束；顺延后结束时间不晚于开始的，至少补 30 分钟，不造零时长条目。
+ * 只动时间字段，不改文本。返回按天分组、天内按时间排序的新数组。
+ */
+function fixDayTimeOverlaps(items) {
+  const days = [...new Set(asArray(items).map((it) => Number(it.dayIndex || 0)))].sort((a, b) => a - b);
+  const out = [];
+  days.forEach((d) => {
+    const list = asArray(items).filter((it) => Number(it.dayIndex || 0) === d);
+    list.sort((a, b) => String(a.startTime || '99:99').localeCompare(String(b.startTime || '99:99')));
+    for (let i = 1; i < list.length; i++) {
+      const prevEnd = toMin(list[i - 1].endTime);
+      const curStart = toMin(list[i].startTime);
+      if (prevEnd === null || curStart === null || curStart >= prevEnd) continue;
+      console.warn('[generatePlan] 第%d天「%s」%s 早于上一条结束 %s，顺延',
+        d + 1, String(list[i].activity || '').slice(0, 20), list[i].startTime, fmtMin(prevEnd));
+      list[i].startTime = fmtMin(prevEnd);
+      const curEnd = toMin(list[i].endTime);
+      if (curEnd !== null && curEnd <= prevEnd) list[i].endTime = fmtMin(prevEnd + 30);
+    }
+    out.push(...list);
+  });
+  return out;
+}
+
 async function buildPlan(rawInput, outlineData, opts = {}) {
   const p = normalizeInput(rawInput);
   const outline = (outlineData && outlineData.outline) || outlineData || {};
@@ -1198,7 +1286,8 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
 
   // 行李规则放在 sanitize 之后：清洗会删条目（可能把"寄存行李"那条删掉，
   // 也可能把提醒取回的那条删掉），删完再看一遍才是最终要展示的结果
-  const items = enforceLuggageRules(enforceDayStartLocation(sanitizeItems(detail.items), outline), outline);
+  const items = fixDayTimeOverlaps(
+    enforceLuggageRules(enforceDayStartLocation(sanitizeItems(detail.items), outline), outline));
 
   // 地理编码消歧要用的每天城市 + 地址→天下标映射。
   // savePlan 的 cityOf 靠它们给高德传 city 参数——之前只消费不生产，
@@ -1289,6 +1378,6 @@ module.exports = {
   generate, generateOutline, buildPlan, genDayItems,
   normalizeInput, sanitizeAlarmCandidates, buildFallbackAlarms, fallbackAlarms,
   shiftDate, dayDiff, isHolidayRange,
-  parseDestList, missingMustVisit, placeStem,
-  applyTripEdgeTimes, enforceDayStartLocation, enforceLuggageRules, samePlace, toMin, fmtMin,
+  parseDestList, missingMustVisit, placeStem, duplicateHighlights,
+  applyTripEdgeTimes, enforceDayStartLocation, enforceLuggageRules, fixDayTimeOverlaps, samePlace, toMin, fmtMin,
 };

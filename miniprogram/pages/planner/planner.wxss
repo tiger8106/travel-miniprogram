@@ -333,7 +333,12 @@
 
 .btn-generate {
   width: 100%;
-  white-space: nowrap;   /* 按钮文案一行显示，不换行 */
+  /* 生成中按钮会显示动态进度文案（"AI 正在规划路线 12s · 还需约 19s"），
+     长度不定，写死 nowrap 会把尾巴掐掉（用户看到的秒数没了）——允许换行 */
+  white-space: normal;
+  line-height: 1.45;
+  padding-top: 14rpx;
+  padding-bottom: 14rpx;
 }
 
 /* 生成中锁定表单：整体置灰，输入控件由 disabled / 事件守卫拦下 */
