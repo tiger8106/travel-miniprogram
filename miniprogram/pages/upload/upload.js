@@ -226,6 +226,11 @@ Page({
     if (!state.taskId) {
       this.setStage('读取文档…', 15);
       const init = await step({ step: 'init', fileID: state.fileID });
+      // 防御：callFn 约定云函数返回 {code:0,data}，若云端版本没对齐（返回平铺字段），
+      // 这里会拿到 undefined——给一句能定位问题的话，别让「reading 'taskId'」裸奔
+      if (!init || !init.taskId) {
+        throw new Error('解析服务返回异常（init 无 taskId）：请确认 parseTravelPlan 云函数已重新上传部署');
+      }
       state.taskId = init.taskId;
       state.dayCount = init.dayCount;
       state.dayIndex = 0;

@@ -111,7 +111,12 @@ exports.main = async (event, context) => {
     if (!openid) return { code: -1, msg: '未登录' };
     const db = cloud.database();
     try {
-      return await handleStep(event, { db, openid, now: Date.now() });
+      const r = await handleStep(event, { db, openid, now: Date.now() });
+      // ⚠️ 前端 callFn 的约定是 { code: 0, data: {...} }——它只 resolve res.result.data。
+      // handleStep 各 step 返回的是平铺字段，必须在这里统一包上 data，
+      // 否则前端拿到 undefined，报「Cannot read properties of undefined (reading 'taskId')」。
+      if (r && r.code === 0) return { code: 0, data: r };
+      return r;
     } catch (e) {
       console.error(`[parseTravelPlan] step=${event.step} 失败:`, e.message);
       return { code: -1, msg: e.message || '解析失败', step: event.step };

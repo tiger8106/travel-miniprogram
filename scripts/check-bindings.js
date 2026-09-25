@@ -340,6 +340,8 @@ ok('分步模式：地理编码传整串 region（geocodeOne 内部拆候选城�
 ok('分步模式与单次模式共用同一份文档元信息（docmeta）',
   /require\('\.\/docmeta'\)/.test(fs.readFileSync(path.join(ROOT, 'cloudfunctions/parseTravelPlan/llm.js'), 'utf8'))
     && /require\('\.\/docmeta'\)/.test(parseIdxJs));
+ok('分步模式：step 成功返回必须包 data（callFn 只 resolve res.result.data，平铺字段会让前端拿到 undefined）',
+  /code: 0, data: r \}/.test(parseIdxJs));
 ok('upload 页走分步流水线（init→day→collect→infer→geocode→commit，断点重试）',
   /runParsePipeline/.test(uploadJs) && /parseTravelPlanStep/.test(uploadJs)
     && /this\._taskState/.test(uploadJs));
