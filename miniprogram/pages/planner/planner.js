@@ -546,6 +546,10 @@ Page({
     } catch (e2) {
       this.stopTicker();
       this.setData({ generating: false, genTip: '' });
+      if (/已有一个行程正在生成/.test((e2 && e2.message) || '')) {
+        wx.showToast({ title: '已有行程在后台生成，请到首页查看', icon: 'none', duration: 2500 });
+        return;
+      }
       this.showDiag(e2);
     } finally {
       if (off) off();
@@ -911,6 +915,10 @@ Page({
       if (this._offGen) { this._offGen(); this._offGen = null; }
       this.stopTicker();
       this.setData({ generating: false, genTip: '' });
+      if (/已有一个行程正在生成/.test((err && err.message) || '')) {
+        wx.showToast({ title: '已有行程在后台生成，请到首页查看', icon: 'none', duration: 2500 });
+        return;
+      }
       this.showDiag(err);
     }
   },

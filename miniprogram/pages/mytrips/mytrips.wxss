@@ -16,6 +16,13 @@
   margin-top: 8rpx;
 }
 
+.trip-gen-error {
+  margin-top: 8rpx;
+  color: #c2410c;
+  font-size: 23rpx;
+  line-height: 1.45;
+}
+
 .trip-ops {
   display: flex;
   gap: 12rpx;

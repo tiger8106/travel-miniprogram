@@ -66,9 +66,17 @@ async function getItinerary(tripId) {
   return JSON.parse(JSON.stringify(STORE.itinerary));
 }
 
-async function listItineraries() {
+async function listItineraries(options) {
   await delay(150);
-  return [JSON.parse(JSON.stringify(STORE.itinerary))];
+  const trip = JSON.parse(JSON.stringify(STORE.itinerary));
+  if (options && options.compact) {
+    const summary = Object.assign({}, trip, {
+      itemCount: (trip.items || []).length,
+    });
+    if (options.fullTripId !== TRIP_ID) delete summary.items;
+    return [summary];
+  }
+  return [trip];
 }
 
 async function updateItinerary(tripId, patch) {

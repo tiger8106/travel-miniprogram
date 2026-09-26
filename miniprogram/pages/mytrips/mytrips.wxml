@@ -44,8 +44,10 @@
           <text wx:else class="tag">进行中</text>
           <text wx:if="{{trip.pinned}}" class="tag tag-success">已在首页</text>
           <text wx:if="{{trip.generating}}" class="tag tag-gen">生成中 {{trip.genDone}}/{{trip.genTotal}}</text>
+          <text wx:if="{{trip.genFailed}}" class="tag tag-warning">生成未完成</text>
         </view>
         <view class="text-secondary trip-meta">{{trip.dateRange}} · {{trip.itemCount}} 项行程</view>
+        <view wx:if="{{trip.genFailed && trip.genError}}" class="trip-gen-error">{{trip.genError}}</view>
       </view>
       <view class="trip-ops">
         <view class="op-btn" data-id="{{trip._id}}" catchtap="onTapView">查看</view>

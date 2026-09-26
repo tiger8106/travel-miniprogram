@@ -6,6 +6,7 @@ const tripUtil = require('../../utils/trip');
 const mapUtil = require('../../utils/map');
 const homeCache = require('../../utils/homecache');
 const auth = require('../../utils/auth');
+const genrunner = require('../../utils/genrunner');
 
 const app = getApp();
 
@@ -40,11 +41,21 @@ Page({
     this._homeList = null;  // 首页可展示的完整攻略
     this._trip = null;      // 当前完整攻略（含 items）
     this._snapSig = '';     // 上一次渲染快照的签名（用于跳过无变化的 setData）
+    this._loadPromise = null;
+    this._genPollTimer = null;
+    this._genRefreshTimer = null;
+    this._offGen = genrunner.subscribe((s) => {
+      if (s && (s.status === 'running' || s.status === 'done' || s.status === 'failed')) {
+        this.scheduleGenerationRefresh();
+      }
+    });
     // 订阅全局登录态：在「我的」登录后本页自动解锁；退出登录后自动清空
     this._offAuth = auth.watch(this, {
       onLogin: () => { this._snapSig = ''; this.loadTrip(); },
       onLogout: () => {
         this.stopTicker();
+        this.stopGenerationPolling();
+        this._trip = null;
         homeCache.clear();
         this._snapSig = '';
         this.setData({
@@ -56,15 +67,20 @@ Page({
   },
 
   onShow() {
+    this.startGenerationPolling();
     this.loadTrip();
   },
 
   onHide() {
     this.stopTicker();
+    this.stopGenerationPolling();
   },
 
   onUnload() {
     this.stopTicker();
+    this.stopGenerationPolling();
+    if (this._genRefreshTimer) { clearTimeout(this._genRefreshTimer); this._genRefreshTimer = null; }
+    if (this._offGen) { this._offGen(); this._offGen = null; }
     if (this._offAuth) { this._offAuth(); this._offAuth = null; }
   },
 
@@ -106,12 +122,48 @@ Page({
     this.loadTrip();
   },
 
+  startGenerationPolling() {
+    if (this._genPollTimer) return;
+    this._genPollTimer = setInterval(() => {
+      const trip = this._trip;
+      const runner = genrunner.get();
+      if ((trip && trip.genStatus === 'generating') || runner.status === 'running') {
+        this.loadTrip({ silent: true });
+      } else {
+        this.stopGenerationPolling();
+      }
+    }, 6000);
+  },
+
+  stopGenerationPolling() {
+    if (this._genPollTimer) {
+      clearInterval(this._genPollTimer);
+      this._genPollTimer = null;
+    }
+  },
+
+  scheduleGenerationRefresh() {
+    if (this._genRefreshTimer) return;
+    this._genRefreshTimer = setTimeout(() => {
+      this._genRefreshTimer = null;
+      this.loadTrip({ silent: true });
+    }, 250);
+  },
+
   // 加载流程（性能优化后的版本）：
   //   ① 冷启动先用本地快照秒开（不转圈），有数据就不显示 loading
   //   ② 只调一次 listItineraries —— 它返回的已经是完整文档，不再单独 get 一次
   //   ③ 闹钟时区校准挪到后台跑，且同一行程 10 分钟内只做一次，不再阻塞首屏
   //   ④ setData 只传渲染需要的精简字段（items 数组不再重复序列化两次）
-  async loadTrip() {
+  async loadTrip(options) {
+    if (this._loadPromise) return this._loadPromise;
+    this._loadPromise = this._loadTrip(options || {}).finally(() => {
+      this._loadPromise = null;
+    });
+    return this._loadPromise;
+  },
+
+  async _loadTrip(options) {
     // ⓪ 未登录 → 先自动静默登录一次（用户无感知）；仍然失败才显示登录门禁卡
     const ok = await auth.requireLogin();
     if (!ok) {
@@ -147,9 +199,14 @@ Page({
 
     try {
       // ② 拿当前用户的所有攻略（一次云调用）
-      const trips = await api.listItineraries();
+      const trips = await api.listItineraries({
+        compact: true,
+        fullTripId: app.globalData.currentTripId || '',
+      });
       this._trips = trips || [];
       if (!trips || !trips.length) {
+        this._trip = null;
+        this.stopGenerationPolling();
         homeCache.clear();
         this.applySnapshot({
           trip: null, days: [], nowItems: [], nowTitle: '',
@@ -184,10 +241,13 @@ Page({
 
       // list 返回的已经是完整文档，直接用；只在极少数没命中的情况下才补一次 get
       let trip = (this._trips || []).find((t) => t._id === tripId);
-      if (!trip) trip = await api.getItinerary(tripId);
+      if (!trip || !Array.isArray(trip.items)) trip = await api.getItinerary(tripId);
       this._trip = trip;
       app.globalData.currentTripId = tripId;
       app.globalData.currentTrip = trip;
+
+      if (trip.genStatus === 'generating') this.startGenerationPolling();
+      else this.stopGenerationPolling();
 
       this.applySnapshot(this.buildSnapshot(trip, homeList, idx, trips.length));
       this.startTicker();
@@ -212,6 +272,9 @@ Page({
         summary: trip.summary || '',
         startDate: trip.startDate,
         endDate: trip.endDate,
+        genStatus: trip.genStatus || '',
+        genProgress: trip.genProgress || null,
+        genError: trip.genError || '',
       },
       // 顶部日期文案：无效日期显示"日期未设置"，绝不能显示 "null → null"
       dateText: this.hasValidDate(trip.startDate)
@@ -275,7 +338,7 @@ Page({
     // 本地已有一份完整数据 → 先秒切渲染，再后台校准，不等网络
     const full = (this._trips || []).find((x) => x._id === t._id);
     const homeList = this._homeList || [];
-    if (full) {
+    if (full && Array.isArray(full.items)) {
       this._trip = full;
       app.globalData.currentTrip = full;
       this.applySnapshot(this.buildSnapshot(full, homeList, idx, this.data.totalTrips));

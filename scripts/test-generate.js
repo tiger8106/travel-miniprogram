@@ -537,6 +537,18 @@ ok(aTrain && aTrain.startLocation === '成都东站' && aTrain.endLocation === '
   aTrain && `${aTrain.startLocation}→${aTrain.endLocation}`);
 ok(aTrain && !/倒叙|时间线|上游/.test(aTrain.activity),
   '带独白的大交通条目重写成干净版', aTrain && aTrain.activity);
+// e) 12306 当天无候选时，大纲时刻为空不能被 fmtMin(null) 误写成 00:00
+const unavailableOutline = { days: [{ moves: [{
+  from: '重庆西站', to: '沙坪坝站', mode: 'train', code: '',
+  startTime: '', endTime: '', scheduleRequired: true,
+}] }] };
+const unavailableAligned = P.enforceMovesAlignment([
+  { dayIndex: 0, startTime: '11:00', endTime: '11:30',
+    activity: '乘火车从重庆西站前往沙坪坝站', category: 'transport',
+    startLocation: '重庆西站', endLocation: '沙坪坝站', transportType: 'train' },
+], unavailableOutline);
+ok(unavailableAligned[0].startTime === '11:00' && unavailableAligned[0].endTime === '11:30',
+  '官方无候选时保留占位时刻，不凭空改成 00:00', JSON.stringify(unavailableAligned[0]));
 // b) 大纲有这段大交通、模型全程没提 → 补一条
 const filled = P.enforceMovesAlignment([
   { dayIndex: 0, startTime: '12:00', endTime: '13:00', activity: '午餐', category: 'food' },
