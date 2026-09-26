@@ -35,13 +35,21 @@ const LIMITS = {
   giftDays: 30,         // 赠送额度有效期（天）—— 制造紧迫感，也防小号薅
   inviteAdd: 1,         // 邀请 1 位新用户双方各得
   inviteCap: 10,        // 邀请奖励上限（防刷小号）
-  vipMonthQuota: 50,    // 月卡每月上限
-  vipDayGen: 5,         // 会员每日生成上限（不是抠门：高德 Key 有每日配额）
-  freeDayGen: 3,        // 非会员每日生成上限
-  dayOutlineFree: 5,    // 每天「换个方案」重生成大纲次数（非会员）
-  dayOutlineVip: 20,    // 同上（会员）
+  vipMonthQuota: 50,    // 月卡每月上限（商品本身的定义，不是防刷）
   tipsPerTripDay: 5,    // 每行程每天刷新建议次数
 };
+
+// ---------------------------------------------------------------
+// 不再设限的两类动作（只统计，不拦截）
+// ---------------------------------------------------------------
+// ① 每天生成次数：用户是花真金白银买的次数，**只要还有额度就不该被时间卡住**。
+//    之前"非会员 3 次/天"的本意是保护高德 Key 的日配额，但它会造成一个很糟的体验：
+//    用户明明还剩 10 次没用，却被"今天用完了"挡在门外 —— 相当于买了东西不让拿。
+//    日配额的风险改由"总次数"这道真正的闸门承担（次数用完了自然就停了）。
+// ② 大纲「换个方案」：同一趟行程只收一次钱，换方案不扣额度；
+//    之前限次是怕脚本刷大纲烧 token，但它同样会挡住"还有额度却生成不了"的正常用户，
+//    得不偿失。刷量的真正防线是"生成要扣次数"，大纲本身不入库、不落盘，成本可控。
+const UNLIMITED_SCENES = new Set(['outline']);
 
 // 计费场景：一次完整攻略 = 1 次额度（大纲/细化/建议/闹钟/定位全链路都算在里面）
 const SCENES = {
@@ -133,29 +141,20 @@ function todayStat(u, ts) {
   };
 }
 
-/** 每天最多能生成几次 */
-function dayGenLimit(u, ts) {
-  return isVip(u, ts) ? LIMITS.vipDayGen : LIMITS.freeDayGen;
-}
-
 // ---------------------------------------------------------------
 // 核心判定：能不能生成一次攻略
+//
+// 唯一闸门 = **还有没有次数**。不再设"每天几次"这种时间维度的限制
+// （详见上方 UNLIMITED_SCENES 的说明）。dayStat.gen 仍然照记，
+// 只是用来看数据、不再拿来拒绝用户。
 // ---------------------------------------------------------------
 function canConsume(u, ts, scene) {
   const now = ts || Date.now();
   const x = normalizeUser(u);
   const av = available(x, now);
-  const st = todayStat(x, now);
-  const lim = dayGenLimit(x, now);
 
   if (av.total <= 0) {
     return { ok: false, reason: 'no_quota', msg: '次数用完了，买个套餐继续规划吧', needPay: true, left: 0 };
-  }
-  if (st.gen >= lim) {
-    return {
-      ok: false, reason: 'day_limit', needPay: false, left: av.total,
-      msg: `今天已经生成 ${st.gen} 次啦，明天再来（每天上限 ${lim} 次）`,
-    };
   }
   return {
     ok: true,
@@ -221,12 +220,12 @@ function canHit(u, ts, scene) {
   const now = ts || Date.now();
   const x = normalizeUser(u);
   const st = todayStat(x, now);
+  // 换方案不限次：用户还有额度却被"今天换够了"挡住是最伤的体验，
+  // 而且大纲不入库、重复生成没有额外存储成本。
+  if (UNLIMITED_SCENES.has(scene)) return { ok: true, left: 999, unlimited: true };
   let used = 0;
   let lim = 0;
-  if (scene === 'outline') {
-    used = st.outline;
-    lim = isVip(x, now) ? LIMITS.dayOutlineVip : LIMITS.dayOutlineFree;
-  } else if (scene === 'tips') {
+  if (scene === 'tips') {
     used = Number(st.tips || 0);
     lim = LIMITS.tipsPerTripDay;
   } else {
@@ -315,6 +314,6 @@ function inviteReward(inviter, invitee, ts) {
 module.exports = {
   GOODS, LIMITS, SCENES,
   dayKey, monthKey, normalizeUser, isVip, vipLeft, giftLeft, available,
-  todayStat, dayGenLimit, canConsume, applyConsume, applyRefund,
+  todayStat, UNLIMITED_SCENES, canConsume, applyConsume, applyRefund,
   canHit, applyHit, goodsById, applyDeliver, genInviteCode, inviteReward,
 };

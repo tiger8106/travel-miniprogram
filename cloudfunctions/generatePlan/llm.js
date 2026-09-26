@@ -98,6 +98,18 @@ function chat(messages, a, b) {
     if (REASONING_MODEL.test(model) && process.env.LLM_ENABLE_THINKING !== '1') {
       bodyObj.enable_thinking = false;
     }
+    // 联网检索（DashScope 的 enable_search）：车次/航班时刻这类**会实时变动**的信息，
+    // 模型的预训练知识根本靠不住（它记的是训练时的运行图，可能早就调过了）。
+    // 开了这个开关，模型在回答前会先去检索一遍，给出的是当下公开信息而不是记忆。
+    // 注意：非 DashScope 的端点不认这两个字段会被忽略/报错，所以只有显式开启时才带，
+    // 且调用方必须能容忍失败（见 schedule.js 的降级处理）。
+    if (opts.enableSearch) {
+      bodyObj.enable_search = true;
+      bodyObj.search_options = Object.assign({
+        forced_search: true,      // 强制走检索，别用"我觉得是"糊弄
+        search_strategy: 'turbo', // 速度与质量均衡（agent 策略会多轮检索，太慢）
+      }, opts.searchOptions || {});
+    }
     const body = JSON.stringify(bodyObj);
     const u = new URL(`${baseURL}/chat/completions`);
     const isHttps = u.protocol === 'https:';
@@ -169,10 +181,12 @@ async function chatWithRetry(messages, a, b) {
   const opts = normOpts(a, b);
   const maxTokens = opts.maxTokens;
   const deadline = opts.deadline;
+  const enableSearch = !!opts.enableSearch;
+  const searchOptions = opts.searchOptions;
   const budget = () => (deadline ? deadline - Date.now() : Infinity);
   const single = Math.max(8000, Math.min(REQUEST_TIMEOUT_MS, deadline ? budget() - 3000 : REQUEST_TIMEOUT_MS));
   try {
-    return await chat(messages, { maxTokens, timeoutMs: single });
+    return await chat(messages, { maxTokens, timeoutMs: single, enableSearch, searchOptions });
   } catch (e) {
     const left = budget();
     // 重试至少还要留 12s，否则这一轮大概率整体超时
@@ -182,7 +196,7 @@ async function chatWithRetry(messages, a, b) {
     }
     console.error('[generatePlan.llm] 调用失败，重试一次:', e.message, `剩余=${deadline ? left + 'ms' : '不限'}`);
     const again = Math.max(8000, Math.min(single, deadline ? budget() - 3000 : REQUEST_TIMEOUT_MS));
-    return chat(messages, { maxTokens, timeoutMs: again });
+    return chat(messages, { maxTokens, timeoutMs: again, enableSearch, searchOptions });
   }
 }
 

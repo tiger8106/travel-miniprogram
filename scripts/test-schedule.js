@@ -97,5 +97,92 @@ function ok(name, cond, extra) {
   ok('同为交通时仍保底顺延（时间线不断）', train.startTime === '14:30', train.startTime);
 }
 
+// ---------- 4. 联网检索到的真实班次：回写大纲 + 细化兜底 ----------
+console.log('== 4. 真实班次（联网检索） ==');
+{
+  const S = require('../cloudfunctions/generatePlan/schedule.js');
+
+  // 4.1 脏数据清洗：时刻不合法 / 车次号不成型的一律丢掉
+  const cleaned = S.normalizeList([
+    { code: 'G2249', from: 'A站', to: 'B站', s: '08:30', e: '13:20' },
+    { code: 'G99999', from: 'A站', to: 'B站', s: '09:00', e: '14:00' },  // 车次号不成型
+    { code: 'D1234', from: 'A站', to: 'B站', s: '25:00', e: '26:00' },   // 时刻非法
+    { code: '', from: 'A站', to: 'B站', s: '10:00', e: '15:00' },        // 没车次号
+    { code: 'G100', from: 'A站', to: 'B站', s: '7:05', e: '12:00' },     // 时刻要补零
+  ]);
+  ok('脏数据被洗掉、时刻补零、按出发时间排序',
+    cleaned.length === 2 && cleaned[0].code === 'G100' && cleaned[0].s === '07:05'
+      && cleaned[1].code === 'G2249', JSON.stringify(cleaned));
+
+  // 4.2 只收集城际段，且同方向只查一次
+  const outline = {
+    days: [
+      {
+        date: '2026-12-20', city: 'A市',
+        moves: [
+          { from: 'A站', to: 'B站', mode: 'train', code: 'G1', startTime: '08:00', endTime: '12:00' },
+          { from: 'B站', to: 'B酒店', mode: 'car', startTime: '12:20', endTime: '12:50' },
+        ], sched: [],
+      },
+      {
+        date: '2026-12-22', city: 'B市',
+        moves: [{ from: 'B站', to: 'A站', mode: 'train', code: 'G2', startTime: '09:00', endTime: '13:00' }],
+        sched: [],
+      },
+    ],
+  };
+  const segs = P.collectSegments(outline);
+  ok('只收集火车/飞机段（市内包车不算）', segs.length === 2, JSON.stringify(segs.map((s) => s.key)));
+  ok('往返是两个不同的段（方向不同）',
+    segs[0].key !== segs[1].key, segs.map((s) => s.key).join(' / '));
+
+  // 4.3 写回大纲：挑离原意最近的那一班，车站对得上才改站名
+  const found = new Map([
+    ['A站→B站', [
+      { code: 'G2249', from: 'A站', to: 'B站', s: '08:30', e: '13:20' },
+      { code: 'G2251', from: 'A站', to: 'B站', s: '18:00', e: '22:50' },
+    ]],
+  ]);
+  const stat = P.applyRealSchedules(outline, found);
+  ok('命中 1 段并换成了真实车次',
+    stat && stat.segments === 1 && stat.replaced === 1, JSON.stringify(stat));
+  ok('车次与时刻用的是检索结果',
+    outline.days[0].moves[0].code === 'G2249'
+      && outline.days[0].moves[0].startTime === '08:30'
+      && outline.days[0].moves[0].endTime === '13:20',
+    JSON.stringify(outline.days[0].moves[0]));
+  ok('候选列表塞进了当天（细化阶段照着挑）',
+    (outline.days[0].sched || []).length === 2, JSON.stringify(outline.days[0].sched));
+  ok('标记了来源，前端才能写"已核对"',
+    outline.days[0].moves[0].schedSource === 'search', outline.days[0].moves[0].schedSource);
+
+  // 4.4 检索结果串到别的城市时：只改车次时刻，不改车站
+  const o2 = { days: [{ moves: [{ from: '甲城站', to: '乙城站', mode: 'train', code: 'G1', startTime: '08:00', endTime: '12:00' }], sched: [] }] };
+  P.applyRealSchedules(o2, new Map([['甲城站→乙城站', [
+    { code: 'G7777', from: '完全不相干的站', to: '另一个站', s: '08:00', e: '12:00' },
+  ]]]));
+  ok('车站对不上时只换车次和时刻，不乱改地名',
+    o2.days[0].moves[0].code === 'G7777' && o2.days[0].moves[0].from === '甲城站',
+    JSON.stringify(o2.days[0].moves[0]));
+
+  // 4.5 细化兜底：模型自创了候选里没有的车次 → 拽回真实班次
+  const o3 = { days: [{ sched: [
+    { code: 'G2249', from: 'A站', to: 'B站', s: '08:30', e: '13:20' },
+    { code: 'G2251', from: 'A站', to: 'B站', s: '18:00', e: '22:50' },
+  ] }] };
+  const items = [
+    { dayIndex: 0, category: 'transport', transportType: 'train', startTime: '08:40', endTime: '13:20',
+      activity: '08:40 乘 G9999 前往B站', note: '' },
+    { dayIndex: 0, category: 'transport', transportType: 'train', startTime: '18:10', endTime: '22:50',
+      activity: '18:10 乘 G2251 前往B站', note: '' },
+  ];
+  const fixed = P.enforceRealSchedule(items.map((x) => Object.assign({}, x)), o3);
+  ok('自创车次被拽回真实班次',
+    /G2249/.test(fixed[0].activity) && !/G9999/.test(fixed[0].activity), fixed[0].activity);
+  ok('本来就在候选里的不动、并标记已核对',
+    /G2251/.test(fixed[1].activity) && fixed[1].schedSource === 'search', fixed[1].activity);
+  ok('拽回后时刻与检索结果一致', fixed[0].startTime === '08:30', fixed[0].startTime);
+}
+
 console.log(`\n通过 ${pass} 项，失败 ${fail} 项\n`);
 process.exit(fail ? 1 : 0);

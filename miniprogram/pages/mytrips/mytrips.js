@@ -4,6 +4,7 @@ const api = require('../../services/api');
 const tripUtil = require('../../utils/trip');
 const homeCache = require('../../utils/homecache');
 const auth = require('../../utils/auth');
+const genrunner = require('../../utils/genrunner');
 
 const app = getApp();
 
@@ -14,6 +15,7 @@ Page({
     trips: [],       // [{ _id, title, dateRange, itemCount, ended, pinned }]
     activeCount: 0,  // 进行中数量
     endedCount: 0,   // 已过期数量
+    genState: null,  // 后台生成进度（来自 genrunner）
   },
 
   onLoad() {
@@ -28,10 +30,41 @@ Page({
 
   onShow() {
     this.load();
+    // 回到本页先看一眼：有没有在后台生成中的行程。
+    // 场景：用户在向导页点了"生成详细行程"就退出了小程序 —— 云端还在接力跑，
+    // 这里 sync() 会立刻接上剩下的轮次，不用干等下一分钟的定时触发。
+    genrunner.sync();
+    if (!this._offGen) {
+      this._offGen = genrunner.subscribe((s) => {
+        this.setData({ genState: s || null });
+        // 跑完了刷新列表：条目数、闹钟、建议都是最后一步才写进去的
+        if (s && (s.status === 'done' || s.status === 'failed') && !this._refreshed) {
+          this._refreshed = true;
+          this.load();
+        }
+        if (s && s.status === 'running') this._refreshed = false;
+      });
+    }
   },
 
   onUnload() {
     if (this._offAuth) { this._offAuth(); this._offAuth = null; }
+    if (this._offGen) { this._offGen(); this._offGen = null; }
+  },
+
+  // 后台生成卡住了（比如那一轮被系统杀掉）：手动点一下接着跑
+  onResumeGen() {
+    wx.showLoading({ title: '继续生成中' });
+    genrunner.sync().then((s) => {
+      wx.hideLoading();
+      const tip = s.status === 'done' ? '已生成完成'
+        : s.status === 'running' ? '正在后台生成…' : (s.error || '暂时没法继续');
+      wx.showToast({ title: tip, icon: 'none' });
+      this.load();
+    }).catch(() => {
+      wx.hideLoading();
+      wx.showToast({ title: '继续生成失败', icon: 'none' });
+    });
   },
 
   // 登录成功后由门禁组件回调（正常情况下登录广播已刷新过，这里只兜底）
@@ -65,6 +98,10 @@ Page({
         itemCount: (t.items || []).length,
         ended: tripUtil.isEnded(t),
         pinned: pinned.indexOf(t._id) >= 0,
+        // 还在后台细化中（多天行程要跑好几轮）：列表里直接标出来
+        generating: t.genStatus === 'generating',
+        genDone: (t.genProgress && t.genProgress.done) || 0,
+        genTotal: (t.genProgress && t.genProgress.total) || 0,
       }));
       // 进行中/未来的排前面（按开始日期升序），已过期的沉到末尾
       trips.sort((a, b) => {

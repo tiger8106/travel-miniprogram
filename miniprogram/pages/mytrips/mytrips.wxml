@@ -16,6 +16,26 @@
       共 {{trips.length}} 个行程 · 进行中 {{activeCount}} · 已结束 {{endedCount}}（已结束自动沉底）
     </view>
 
+    <!-- 后台生成中：就算退出小程序也会继续跑，跑完自动补上闹钟和建议 -->
+    <view wx:if="{{genState.status === 'running'}}" class="gen-bar" bindtap="onResumeGen">
+      <text class="gen-spin">⏳</text>
+      <view class="gen-main">
+        <view class="gen-title">正在后台生成「{{genState.title || '新攻略'}}」</view>
+        <view class="gen-sub">
+          已细化 {{genState.progress.done || 0}}/{{genState.progress.total || 0}} 天 · 可以离开本页面，跑完会自动保存
+        </view>
+      </view>
+      <view class="gen-btn">催一下</view>
+    </view>
+    <view wx:elif="{{genState.status === 'failed'}}" class="gen-bar gen-bar-fail" bindtap="onResumeGen">
+      <text>⚠️</text>
+      <view class="gen-main">
+        <view class="gen-title">上次生成没跑完</view>
+        <view class="gen-sub">{{genState.error || '点这里可以继续生成'}}</view>
+      </view>
+      <view class="gen-btn">继续生成</view>
+    </view>
+
     <view wx:for="{{trips}}" wx:key="_id" wx:for-item="trip" class="trip-card card {{trip.ended ? 'trip-card-ended' : ''}}">
       <view class="trip-main" data-id="{{trip._id}}" bindtap="onTapView">
         <view class="trip-name">
@@ -23,6 +43,7 @@
           <text wx:if="{{trip.ended}}" class="tag tag-success">已结束</text>
           <text wx:else class="tag">进行中</text>
           <text wx:if="{{trip.pinned}}" class="tag tag-success">已在首页</text>
+          <text wx:if="{{trip.generating}}" class="tag tag-gen">生成中 {{trip.genDone}}/{{trip.genTotal}}</text>
         </view>
         <view class="text-secondary trip-meta">{{trip.dateRange}} · {{trip.itemCount}} 项行程</view>
       </view>

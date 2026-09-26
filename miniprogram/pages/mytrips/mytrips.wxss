@@ -39,3 +39,37 @@
   background: #fdecea;
   color: #e74c3c;
 }
+
+/* 后台生成进度条 */
+.gen-bar {
+  display: flex;
+  align-items: center;
+  padding: 20rpx 24rpx;
+  margin-bottom: 20rpx;
+  background: #eff6ff;
+  border: 1rpx solid #bfdbfe;
+  border-radius: 16rpx;
+}
+.gen-bar-fail {
+  background: #fff7ed;
+  border-color: #fed7aa;
+}
+.gen-spin { font-size: 34rpx; margin-right: 16rpx; }
+.gen-main { flex: 1; min-width: 0; }
+.gen-title { font-size: 27rpx; color: #1e40af; font-weight: 600; }
+.gen-bar-fail .gen-title { color: #c2410c; }
+.gen-sub { margin-top: 6rpx; font-size: 23rpx; color: #6b7280; line-height: 1.5; }
+.gen-btn {
+  flex-shrink: 0;
+  margin-left: 12rpx;
+  padding: 8rpx 18rpx;
+  background: #2563eb;
+  color: #fff;
+  font-size: 23rpx;
+  border-radius: 999rpx;
+}
+.gen-bar-fail .gen-btn { background: #ea580c; }
+.tag-gen {
+  background: #dbeafe !important;
+  color: #1e40af !important;
+}

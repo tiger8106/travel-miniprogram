@@ -105,6 +105,25 @@ async function generateDiag() {
   return callFn('generatePlan', { action: 'diag' });
 }
 
+// ---------- 后台生成（中途退出小程序也能跑完） ----------
+
+// 建任务 + 跑首轮。返回的 jobId 用来续跑
+async function startGen(input) {
+  return callFn('generatePlan', Object.assign({ action: 'build', jobMode: true }, input));
+}
+
+// 续跑一轮。带 expectRound 做乐观锁：只有"没人替我跑过"时才真的跑
+async function resumeGen(jobId, expectRound) {
+  const data = { action: 'resume', jobId };
+  if (expectRound != null) data.expectRound = expectRound;
+  return callFn('generatePlan', data);
+}
+
+// 查当前有没有正在后台生成的任务
+async function genJobStatus() {
+  return callFn('generatePlan', { action: 'jobStatus' });
+}
+
 // 上传 / 下载
 async function uploadDoc(localPath) {
   const ts = Date.now();
@@ -136,6 +155,9 @@ module.exports = {
   generateOutline,
   buildPlan,
   generateDiag,
+  startGen,
+  resumeGen,
+  genJobStatus,
   uploadDoc,
   downloadFromCloud,
 };

@@ -112,6 +112,15 @@ App({
 
   onShow() {
     alarm.refreshAlarms();
+    // 回到小程序（包括从后台切回来）先看一眼有没有没跑完的生成任务。
+    // 用户点完"生成详细行程"就退出小程序时，云端 genWorker 已经在一轮轮接力了，
+    // 这里 sync() 会立刻接手剩下的轮次，不等下一分钟的定时触发。
+    try {
+      const genrunner = require('./utils/genrunner');
+      genrunner.sync();
+    } catch (e) {
+      console.warn('[app] 后台生成续跑检查失败（不影响使用）', e);
+    }
   },
 
   onHide() {

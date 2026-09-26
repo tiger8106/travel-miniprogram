@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "openapi": []
+  },
+  "triggers": [
+    {
+      "name": "genPollEveryMinute",
+      "type": "timer",
+      "config": "0 * * * * * *"
+    }
+  ]
+}

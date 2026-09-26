@@ -29,7 +29,7 @@
         </view>
         <view class="quota-row">
           <text>今日已生成</text>
-          <text class="quota-row-val">{{info.dayGen || 0}} / {{info.dayGenLimit || 3}}</text>
+          <text class="quota-row-val">{{info.dayGen || 0}} 次（不限量）</text>
         </view>
       </view>
     </block>
@@ -98,7 +98,7 @@
     <view class="rule-item">· 行程没生成出来不扣次数</view>
     <view class="rule-item">· 查看行程、编辑、导航、闹钟提醒永久免费</view>
     <view class="rule-item">· 虚拟商品，额度到账后不支持退款，请按需购买</view>
-    <view class="rule-item">· 每天有生成次数上限，保护服务稳定</view>
+    <view class="rule-item">· 有余额就能用，不限制每天生成几次</view>
   </view>
 
 </view>

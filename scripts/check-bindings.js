@@ -551,5 +551,51 @@ ok('付费页已注册且展示计费说明（避免"为什么又扣钱"的投�
 ok('付了钱额度没到账有补救入口（sync 补发，幂等不重复加）',
   /onSync\(\)/.test(payPageJs) && /action: 'sync'/.test(quotaUtil));
 
+// ---------- ⑮ 有额度就不限量 + 后台生成 + 联网班次 ----------
+const rulesJs = fs.readFileSync(path.join(CF, 'quota/rules.js'), 'utf8');
+const gpIdx = fs.readFileSync(path.join(CF, 'generatePlan/index.js'), 'utf8');
+const schedJs = fs.readFileSync(path.join(CF, 'generatePlan/schedule.js'), 'utf8');
+const genLlmJs = fs.readFileSync(path.join(CF, 'generatePlan/llm.js'), 'utf8');
+const workerIdx = fs.existsSync(path.join(CF, 'genWorker/index.js'))
+  ? fs.readFileSync(path.join(CF, 'genWorker/index.js'), 'utf8') : '';
+const genrunnerJs = fs.readFileSync(path.join(ROOT, 'miniprogram/utils/genrunner.js'), 'utf8');
+
+ok('还有额度就不限每日次数（canConsume 里没有 day_limit 分支）',
+  !/day_limit/.test(rulesJs) && !/dayGenLimit\(/.test(rulesJs)
+    && /UNLIMITED_SCENES/.test(rulesJs));
+
+ok('「换个方案」不限次数（云函数不再因为计次被拦截）',
+  !/hit\.code === -3/.test(gpIdx) && /只计次不拦截/.test(gpIdx)
+    && /UNLIMITED_SCENES\.has\(scene\)/.test(rulesJs));
+
+ok('后台生成：任务落库 + 支持续跑（resume / jobStatus）',
+  /COL_JOB = 'gen_jobs'/.test(gpIdx) && /action === 'resume'/.test(gpIdx)
+    && /action === 'jobStatus'/.test(gpIdx) && /runJobRound/.test(gpIdx));
+
+ok('后台生成：租约防并发（同一任务不会被跑两遍）',
+  /JOB_LEASE_MS/.test(gpIdx) && /leaseUntil/.test(gpIdx)
+    && /expectRound/.test(gpIdx) && /const busy/.test(gpIdx));
+
+ok('后台生成：有定时触发器兜底（用户关掉小程序也能跑完）',
+  /genWorker/.test(workerIdx) && /action: 'resume'/.test(workerIdx)
+    && /"type": "timer"/.test(fs.readFileSync(path.join(CF, 'genWorker/config.json'), 'utf8')));
+
+ok('后台生成：续跑循环跑在全局模块里（离开页面不会断）',
+  /api\.resumeGen\(/.test(genrunnerJs) && /module\.exports/.test(genrunnerJs));
+
+ok('行程带生成中状态（列表页能显示进度，不需要额外查任务表）',
+  /genStatus: plan\.partial \? 'generating' : 'done'/.test(gpIdx));
+
+ok('联网检索真实班次（车次/时刻这类实时信息不能靠模型记忆）',
+  /enableSearch: true/.test(schedJs) && /enable_search/.test(genLlmJs)
+    && /forced_search/.test(genLlmJs) && /enableSearch/.test(genLlmJs));
+
+ok('检索结果注入细化 prompt（模型只挑，不许自创车次与时刻）',
+  /真实班次（已联网核对）/.test(planJs) && /day\.sched/.test(planJs)
+    && /enforceRealSchedule/.test(planJs));
+
+ok('检索失败静默降级（绝不因为查不到就出不了行程）',
+  /沿用模型编排/.test(schedJs) && /沿用模型编排/.test(planJs));
+
 console.log(failed ? `\n${failed} 项失败 ✗` : '\n全部通过 ✓');
 process.exit(failed ? 1 : 0);

@@ -106,11 +106,17 @@ Component({
       if (!item || item.category !== 'transport') return '';
       const t = String(item.transportType || '').toLowerCase();
       const act = String(item.activity || '');
+      // 生成时联网核对过的班次，说法要不一样：用户看到"已核对"才敢照着买票
+      const verified = item.schedSource === 'search';
       if (t === 'train' || /高铁|动车|火车|列车|城际/.test(act)) {
-        return '🚄 班次与时刻为 AI 参考编排，乘车前请在 12306 核实实际车次与时刻';
+        return verified
+          ? '🚄 班次已联网检索核对，仍建议购票前在 12306 复核（运行图可能临时调整）'
+          : '🚄 班次与时刻为 AI 参考编排，乘车前请在 12306 核实实际车次与时刻';
       }
       if (t === 'plane' || /航班|飞机|航站楼/.test(act)) {
-        return '✈️ 航班时刻为 AI 参考编排，出行前请以航司实际信息为准';
+        return verified
+          ? '✈️ 航班已联网检索核对，出行前请以航司实际信息为准'
+          : '✈️ 航班时刻为 AI 参考编排，出行前请以航司实际信息为准';
       }
       return '';
     },

@@ -58,29 +58,36 @@ console.log('== 3. 会员每月 50 次，跨月自动重置 ==');
   ok(R.isVip(vip2, T0 + 61 * DAY) === false, '会员到期后不再是会员', R.isVip(vip2, T0 + 61 * DAY));
 }
 
-console.log('== 4. 每日生成上限（防刷，也保护高德日配额）==');
+console.log('== 4. 每日不再限量（还有额度就能用）==');
 {
-  const u = { quota: 100, dayStat: { d: R.dayKey(T0), gen: R.LIMITS.freeDayGen } };
+  // 以前这条是"非会员 3 次/天"，会出现"还剩 100 次却被今天用完了挡住"的荒唐体验
+  const u = { quota: 100, dayStat: { d: R.dayKey(T0), gen: 99 } };
   const r = R.canConsume(u, T0);
-  ok(r.ok === false && r.reason === 'day_limit', '非会员每天最多 3 次生成', r);
-  ok(r.needPay === false, '撞日限额不该让用户去付费（付费也用不了）', r.needPay);
-  const vip = { vipUntil: T0 + DAY, dayStat: { d: R.dayKey(T0), gen: 4 } };
-  ok(R.canConsume(vip, T0).ok === true, '会员每天 5 次，第 5 次放行', R.canConsume(vip, T0));
-  // 跨天重置
+  ok(r.ok === true, '当天已生成 99 次、但还有额度 → 放行（不再设每日上限）', r);
+  ok(r.reason !== 'day_limit', '不存在 day_limit 这种拒绝理由', r.reason);
+  const vip = { vipUntil: T0 + DAY, dayStat: { d: R.dayKey(T0), gen: 40 } };
+  ok(R.canConsume(vip, T0).ok === true, '会员同样不限每日次数', R.canConsume(vip, T0));
+  // 真正的闸门只剩"次数用完"
+  const none = { quota: 0, giftQuota: 0, dayStat: { d: R.dayKey(T0), gen: 0 } };
+  const r2 = R.canConsume(none, T0);
+  ok(r2.ok === false && r2.reason === 'no_quota' && r2.needPay === true,
+    '唯一的拒绝理由 = 次数用完（引导付费）', r2);
+  // 跨天统计仍然照记（看数据用）
   const u2 = { quota: 100, dayStat: { d: '2020-01-01', gen: 99 } };
-  ok(R.canConsume(u2, T0).ok === true, '换一天后日计数归零', R.todayStat(u2, T0));
+  ok(R.canConsume(u2, T0).ok === true && R.todayStat(u2, T0).gen === 0,
+    '换一天后日计数归零', R.todayStat(u2, T0));
 }
 
-console.log('== 5. 大纲重生成 / 建议刷新的日限额（不扣额度，只计次）==');
+console.log('== 5. 换方案不限次 / 建议刷新仍限次 ==');
 {
-  const u = { dayStat: { d: R.dayKey(T0), outline: R.LIMITS.dayOutlineFree } };
-  ok(R.canHit(u, T0, 'outline').ok === false, '非会员每天最多换 5 次方案');
+  const u = { dayStat: { d: R.dayKey(T0), outline: 999 } };
+  ok(R.canHit(u, T0, 'outline').ok === true, '「换个方案」不限次数（还有额度就能一直换）');
   const vip = { vipUntil: T0 + DAY, dayStat: { d: R.dayKey(T0), outline: 19 } };
-  ok(R.canHit(vip, T0, 'outline').ok === true, '会员可换 20 次');
+  ok(R.canHit(u, T0, 'outline').unlimited === true, '换方案被标记为不限次', R.canHit(u, T0, 'outline'));
   const t = { dayStat: { d: R.dayKey(T0), tips: R.LIMITS.tipsPerTripDay } };
   ok(R.canHit(t, T0, 'tips').ok === false, '每个行程每天最多刷新 5 次建议');
   const hit = R.applyHit({ dayStat: { d: R.dayKey(T0) } }, T0, 'outline');
-  ok(hit.patch.dayStat.outline === 1, '计次写回当天统计', hit.patch.dayStat);
+  ok(hit.patch.dayStat.outline === 1, '换方案仍照常计次（只看数据，不拦人）', hit.patch.dayStat);
 }
 
 console.log('== 6. 退款（生成失败不收钱）==');

@@ -137,8 +137,7 @@ function publicInfo(u, ts) {
     vipUntil: x.vipUntil,
     vipLeft: av.vipLeft,
     total: av.total,
-    dayGen: st.gen,
-    dayGenLimit: R.dayGenLimit(x, ts),
+    dayGen: st.gen,      // 只做统计展示：不再有"每天几次"的上限
     inviteCode: x.inviteCode,
     inviteCount: x.inviteCount,
     inviteRewarded: x.inviteRewarded,

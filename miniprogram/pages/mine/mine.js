@@ -191,7 +191,7 @@ Page({
     if (!info) return;
     const txt = info.vip
       ? `月卡会员 · 本月还剩 ${info.vipLeft} 次`
-      : `剩余 ${info.total} 次 · 今日 ${info.dayGen}/${info.dayGenLimit}`;
+      : `剩余 ${info.total} 次 · 今日已生成 ${info.dayGen || 0} 次`;
     this.setData({ quotaText: txt });
   },
 

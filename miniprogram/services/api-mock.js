@@ -263,6 +263,21 @@ module.exports = {
       provider: 'mock', model: 'mock-model', baseURL: 'mock://', cfgError: '', ping: '正常（mock）',
     };
   },
+  // mock 模式：后台生成一次就返回完成，不模拟多轮续跑
+  startGen: async function () {
+    await delay(1500);
+    return {
+      jobId: 'mock-job', tripId: 'mock-trip', itemCount: 12, alarmCount: 2,
+      partial: false, status: 'done', progress: { done: 1, total: 1 }, round: 1, mock: true,
+    };
+  },
+  resumeGen: async function () {
+    await delay(300);
+    return { jobId: 'mock-job', tripId: 'mock-trip', partial: false, status: 'done', round: 1 };
+  },
+  genJobStatus: async function () {
+    return { jobs: [], job: null };
+  },
   uploadDoc,
   downloadFromCloud,
 };

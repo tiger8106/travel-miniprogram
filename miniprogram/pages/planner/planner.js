@@ -9,6 +9,7 @@ const auth = require('../../utils/auth');
 const homeCache = require('../../utils/homecache');
 const eta = require('../../utils/eta');
 const quota = require('../../utils/quota');
+const genrunner = require('../../utils/genrunner');
 
 const app = getApp();
 
@@ -168,8 +169,16 @@ Page({
     this.updateEtaTexts();
   },
 
+  onHide() {
+    // 用户离开了本页（去别处逛 / 关小程序）：生成照常在后台跑（genrunner 是全局单例），
+    // 只是**跑完不再硬拽他回详情页** —— 那样会把人从正在看的页面劫走。
+    this._left = true;
+  },
+
   onUnload() {
     if (this._offAuth) { this._offAuth(); this._offAuth = null; }
+    if (this._offGen) { this._offGen(); this._offGen = null; }
+    this._left = true;
     this.stopTicker();
     this.resetEdge();   // 清掉拖动自动滚动的定时器
   },
@@ -801,12 +810,16 @@ Page({
 
   // ---------- 阶段二：展开逐天详情并入库 ----------
   //
-  // 无感续跑：云函数一次最多跑 45 秒，天多的时候会返回 partial=true
-  // （已生成的天已经存进库里了）。这里立刻接着调下一次，loading 文案与遮罩
-  // 全程不中断，用户只会觉得"AI 一直在细化"，感觉不到中间续过。
+  // 生成过程中**用户可以随时离开**：细化要跑好几轮（云函数一次最多 60 秒），
+  // 这个循环现在跑在全局 genrunner 里而不是本页面上 —— 用户返回上一页、
+  // 切到别的 tab 甚至关掉小程序，剩下的轮次照样往下跑：
+  //   · 小程序还活着 → genrunner 接着跑（无空档）
+  //   · 小程序被关掉 → 云端 genWorker 每分钟接力，跑完自动入库
+  // 回来时在「我的行程」能看到"生成中 x/y"，点进去就是已生成的部分。
   async onConfirmOutline() {
     if (this.data.generating) return;
     this.setData({ generating: true });
+    this._left = false;      // 用户是否离开了本页（离开了就不劫持跳转）
 
     const base = Object.assign({}, this._input, {
       title: this.data.title,
@@ -817,28 +830,26 @@ Page({
     const t0 = Date.now();
     this.startTicker('正在细化每天的安排', eta.estimate('detail', totalDays));
 
-    let result = null;
-    let payload = base;
-    let attempts = {};        // 每轮云函数回传的失败次数，下一轮原样带回（决定谁能再重试）
-    try {
-      for (let round = 0; round < 6; round++) {
-        const res = await api.buildPlan(payload, payload);
-        result = res;
-        if (!res || !res.partial) break;
-        attempts = res.attempts || attempts;
-        const done = (res.doneDayIndexes || []).length;
-        this.setTipExtra(`已细化 ${Math.min(done, totalDays)}/${totalDays} 天`);
-        // 开局是"按总天数"粗估的；续跑时已知还剩几天，用「已用 + 剩余天数预估」
-        // 刷新倒计时 —— 差 3 天和差 8 天差一倍，不修正的话倒计时会越跑越离谱
-        this.setEst((Date.now() - t0) + eta.estimate('detail', Math.max(0, totalDays - done)));
-        // 还有天没生成完（或某天失败要重试）：带上 tripId 继续，loading 全程不中断
-        payload = Object.assign({}, base, {
-          tripId: res.tripId,
-          doneDayIndexes: res.doneDayIndexes || [],
-          attempts,
-        });
+    // 订阅进度：续跑时把"已细化 x/y 天"刷到遮罩上，并明确告诉用户可以走了
+    let toldCanLeave = false;
+    this._offGen = genrunner.subscribe((s) => {
+      if (!s || s.status !== 'running') return;
+      const p = s.progress || {};
+      const done = p.done || 0;
+      if (p.total) {
+        this.setTipExtra(toldCanLeave ? `已细化 ${Math.min(done, p.total)}/${p.total} 天`
+          : `已细化 ${Math.min(done, p.total)}/${p.total} 天（可离开，后台继续）`);
+        this.setEst((Date.now() - t0) + eta.estimate('detail', Math.max(0, p.total - done)));
       }
-      if (!result || !result.tripId) throw new Error('生成失败，请重试');
+      if (s.round >= 1 && !toldCanLeave && !this._left) {
+        toldCanLeave = true;
+        wx.showToast({ title: '可以先去逛逛，后台会继续生成', icon: 'none', duration: 2000 });
+      }
+    });
+
+    try {
+      const result = await genrunner.start(base);
+      if (this._offGen) { this._offGen(); this._offGen = null; }
       this.stopTicker();
       // 记下真实耗时（含续跑的每一轮），下次预估就按这个来
       eta.record('detail', totalDays, Date.now() - t0);
@@ -847,8 +858,15 @@ Page({
       app.globalData.currentTripId = result.tripId;
       homeCache.clear();
       quota.clear();          // 云端已扣 1 次，本地缓存作废，下次进来看到的是最新余额
+      this.setData({ generating: false, genTip: '' });
+      if (this._left) {
+        // 人已经不在这页了：别把他从正在看的页面劫走，提示一声就行
+        wx.showToast({ title: '攻略已生成', icon: 'success' });
+        return;
+      }
       this.gotoTrip(result);
     } catch (err) {
+      if (this._offGen) { this._offGen(); this._offGen = null; }
       this.stopTicker();
       this.setData({ generating: false, genTip: '' });
       this.showDiag(err);
