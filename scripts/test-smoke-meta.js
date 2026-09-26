@@ -49,8 +49,24 @@ const META_HINT = new RegExp(
   console.log(`大纲完成 ${Date.now() - t0}ms：${outlineRes.title}`);
   outline.days.forEach((d) => console.log(`  ${d.date} ${d.city}｜${d.theme}｜ov=${d.overnight}｜hotel=${d.hotel || '-'}｜mv=${(d.moves || []).map((m) => `${m.code} ${m.startTime}-${m.endTime}`).join(';')}`));
 
-  const plan = await P.buildPlan(input, outline);
-  console.log(`细化完成，共 ${plan.items.length} 条，耗时 ${Date.now() - t0}ms\n`);
+  // 细化有 60s 墙钟预算，3 天经常一轮跑不完（partial=true）。
+  // 之前这里只调一次就拿结果去断言"末日收在出发地"——末日压根还没生成，
+  // 脚本把"已生成的最后一天"当成末日查，必然失败（false positive）。
+  // 与 test-generate 一致：续跑到全部完成为止，再合并每轮新生成的天。
+  let plan = null;
+  let rounds = 0;
+  const allItems = [];
+  for (let r = 0; r < 6; r++) {
+    plan = await P.buildPlan(input, Object.assign({}, input, { outline }), {
+      doneDayIndexes: plan && plan.doneDayIndexes,
+      attempts: plan && plan.attempts,
+    });
+    rounds = r + 1;
+    allItems.push(...plan.items);
+    if (!plan.partial) break;
+  }
+  if (allItems.length !== plan.items.length) plan.items = allItems;
+  console.log(`细化完成，共 ${plan.items.length} 条，${rounds} 轮，耗时 ${Date.now() - t0}ms\n`);
 
   let fail = 0;
   const ok = (cond, msg, extra) => {

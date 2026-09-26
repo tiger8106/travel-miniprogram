@@ -596,15 +596,36 @@ function enforceDayClosure(items, outline, p) {
         || String(last.activity || '').includes(origin)
         || /回家|到家/.test(String(last.activity || ''));
       if (backHome) return;
-      const from = String(last.endLocation || last.startLocation || '').trim();
+      // "从哪出发回家"的兜底链：最后一条的终点 → 当天最后一个已知位置 → 当天所在城市。
+      // 实测坑：末日最后一条常是「步行返回酒店休息」这种连地名都没写的条目，
+      // 旧代码只取 last 的起终点，`if (!from) return` 直接放弃 → 末日收在酒店，没回家。
+      const pickReturnFrom = () => {
+        for (let i = sorted.length - 1; i >= 0; i--) {
+          const p = String(sorted[i].endLocation || sorted[i].startLocation || '').trim();
+          if (p && !/^(返程|回家|家中|家)$/.test(p)) return p;
+        }
+        const c = String(today.city || '').trim();
+        if (c && !/返程|回家/.test(c)) return c;
+        const ov = String(tonight || '').trim();
+        if (ov && !/返程|回家/.test(ov)) return ov;
+        return '';
+      };
+      const from = pickReturnFrom();
+      if (!from) return;
       const endMin = toMin(last.endTime);
       const st = (endMin != null ? endMin : 19 * 60) + 10;
-      if (!from) return;
+      // 末日当天压根没有跨城大交通 = 模型把返程整段漏了，此时"40 分钟到家"是假的
+      // （人还在目的地城市）。判据只看当天有没有城际交通条目，不认任何具体地名。
+      const intercity = sorted.some((it) => it.category === 'transport'
+        && /高铁|动车|火车|城际|列车|航班|飞机/.test(`${it.activity || ''}${it.transportType || ''}`));
+      const dur = intercity ? 40 : 180;
       out.push({
         dayIndex: di,
         startTime: fmtMin(Math.min(st, 23 * 60 + 30)),
-        endTime: fmtMin(Math.min(st + 40, 23 * 60 + 59)),
-        activity: `从${from}返回${origin}，到家休息`,
+        endTime: fmtMin(Math.min(st + dur, 23 * 60 + 59)),
+        activity: intercity
+          ? `从${from}返回${origin}，到家休息`
+          : `从${from}出发返回${origin}，到家休息（返程大交通班次请另行查询）`,
         category: 'transport',
         startLocation: from,
         endLocation: origin,

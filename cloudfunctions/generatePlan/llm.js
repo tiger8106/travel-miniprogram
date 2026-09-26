@@ -217,7 +217,16 @@ function parseJSONFromText(text) {
   try {
     return JSON.parse(json);
   } catch (e) {
-    // 截断抢救：截到最后一个完整的 "}"（对象数组）或 "],"/"}"（对象）处
+    // 抢救一：元素之间漏了逗号（LLM 常见写法："…}{…"「…}] […」）。
+    // 合法 JSON 里 `}`/`]` 后面绝不可能直接跟 `{`/`[`，所以补逗号是安全的。
+    const glued = json.replace(/([}\]])\s*(?=[{\[])/g, '$1,');
+    if (glued !== json) {
+      try {
+        console.warn('[generatePlan.llm] JSON 元素间缺逗号，已自动补上');
+        return JSON.parse(glued);
+      } catch (e0) { /* 补逗号也不行，继续下面的截断抢救 */ }
+    }
+    // 抢救二：截断——截到最后一个完整的 "}"（对象数组）或 "],"/"}"（对象）处
     const lastObjEnd = json.lastIndexOf('}');
     if (lastObjEnd > 0) {
       let salvaged = json.slice(0, lastObjEnd + 1).replace(/,\s*$/, '');

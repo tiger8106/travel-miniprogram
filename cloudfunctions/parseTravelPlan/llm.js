@@ -163,7 +163,18 @@ function parseJSONFromText(text) {
   if (start < 0 || end <= start) throw new Error('文本中没有 JSON 结构');
   json = json.slice(start, end + 1);
   json = json.replace(/,(\s*[}\]])/g, '$1'); // 去尾逗号
-  return JSON.parse(json);
+  try {
+    return JSON.parse(json);
+  } catch (e) {
+    // 元素之间漏了逗号（LLM 常见："…}{…"）→ 补上再试。
+    // 合法 JSON 里 `}`/`]` 后面绝不可能直接跟 `{`/`[`，所以补逗号是安全的。
+    const glued = json.replace(/([}\]])\s*(?=[{\[])/g, '$1,');
+    if (glued !== json) {
+      console.warn('[parseTravelPlan.llm] JSON 元素间缺逗号，已自动补上');
+      return JSON.parse(glued);
+    }
+    throw e;
+  }
 }
 
 const SYS_PROMPT =
@@ -189,7 +200,7 @@ const DAY_RULES = `# 拆分与时间规则（必须遵守）
 1. 一句原文常包含多段连续动作/移动（例："10:30～11:00抵达金坑大寨停车场，下车后坐观光车前往田头寨，之后步行前往龙脊别院"）。要拆成多条行程项，但每条都必须有确定的 startTime，禁止输出空 startTime 或 "--:--"：
    - 第一段用原文的起始时间（10:30 抵达金坑大寨停车场）
    - 后续段按原文时间线索与常识耗时依次顺延（10:40 乘观光车前往田头寨 → 11:00 步行前往龙脊别院），区间终点、"步行约40分钟/1.5小时"这类时长提示都要用上
-2. 路线型原文要逐段拆分并逐段给导航（例：note 或正文出现"路线：遇龙河→工农桥→大榕树→月亮山→返回酒店"），拆成多条行程项：每段一个 startTime（按骑行/步行常识依次顺延）、各自的 startLocation/endLocation/transportType（如 ride/car/walk）；"不用每个景点都买票"这类整体提示放进第一段的 note。
+2. 路线型原文要逐段拆分并逐段给导航（例：note 或正文出现"路线：遇龙河→工农桥→大榕树→月亮山→返回酒店"），拆成多条行程项：每段一个 startTime（按骑行/步行常识依次顺延）、各自的 startLocation/endLocation/transportType（如 ride/car/walk）。原文里针对这一整段行程的提醒/说明（包括但不限于"不用每个景点都买票""沿途才是精华""某段路在修"）**必须原样保留**，写进第一段的 note；**禁止因为拆成多段就把这类整体提示丢掉**——它对用户是"要不要掏钱/值不值得走"的关键信息。
 3. 输出顺序必须与原文一致，按时间先后排列。
 4. 没有发生位置移动的安排（起床、吃饭、休息、洗澡、看夜景、拍照等），startLocation、endLocation、transportType 一律留空字符串；绝不允许出现起点和终点相同（如"民宿→民宿"）的条目。
 5. 凡是"前往/去/回/逛/到达"类的移动动作，都必须填 startLocation 和 endLocation——哪怕原文没明说，也要根据上下文推断：起点=上一条安排的位置或背景里前一天结束的位置（如昨晚酒店），终点=动作指向的地点（"吃完步行逛东西巷"→ startLocation=上一条的餐厅，endLocation=东西巷；"到达重庆北站"→ endLocation=重庆北站，startLocation=此前所在位置）。
