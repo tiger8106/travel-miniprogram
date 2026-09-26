@@ -225,7 +225,7 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
    **禁止舍近求远**：如果某个站下车后还要长距离打车折返才能到当天目的地，就是选错了站，必须换成更近的站（哪怕车次少一点）。
    4.2 **每段 mv 都要给 st（到站/下机后到当天首个目的地的接驳方式与耗时，如"地铁30分钟""步行8分钟""打车20分钟"）**：st 是你自己检验选站是否合格的尺子。
    判据：**st 里写"打车/网约车 ≥25 分钟"就说明这个站选在了反方向**（下车还得花钱绕回目的地），必须重选更近的站，或改成"同城轨道交通/市域铁路 + 短驳"的组合，把 st 变成步行或地铁；轨交/步行 1 小时以内都算合格（大城市坐地铁 40 分钟到酒店很正常，不算绕路）。确实没有更近的站才保留，并在当天 n 里说明原因。
-   4.3 **车次/航班是"参考班次"，你没有实时时刻表（铁律）**：你拿不到 12306 与航司的实时数据，凭记忆给的车次号可能已停开、时刻可能已调整。所以：① 车次号选该线路**长期稳定开行**的典型走向，不要生造"G9999"这类罕见号段；② **运行时长必须符合两地实际距离**（同城/市域 0.5~1.5 小时、邻省高铁 2~5 小时、1500km 以上才考虑 6 小时+或飞机），e-s 算出来的时长拿常识再验一遍，**严禁出现"高铁几十分钟跨省"这类离谱时长**；③ 发车时刻取整点/半点附近的合理值，保证与当天其他安排衔接即可；④ 最终以 12306/航司实际为准（前端会向用户标注"仅供参考"）。
+   4.3 **车次/航班是"参考班次"，你没有实时时刻表（铁律）**：你拿不到 12306 与航司的实时数据，凭记忆给的车次号可能已停开、时刻可能已调整。所以：① 车次号选该线路**长期稳定开行**的典型走向，不要生造"G9999"这类罕见号段；② **运行时长必须符合两地实际距离**（同城/市域 0.5~1.5 小时、邻省高铁 2~5 小时、1500km 以上才考虑 6 小时+或飞机），e-s 算出来的时长拿常识再验一遍，**严禁出现"高铁几十分钟跨省"这类离谱时长**；③ 发车/到达时刻必须是 **5 分钟的整数倍**（整点、半点、5 分、10 分这类刻度，如 08:30 / 14:05 / 19:45），**绝不要出现 08:37、14:23 这种分钟数**——真实运行图里没有这种时刻，一眼就看出是编的；④ 最终以 12306/航司实际为准（前端会向用户标注"仅供参考"）。
 5. hl 每天 3-4 个**具体景点/片区名称**，别写"逛逛市区"这种废话；城市漫游日（如"成都市区"）也要点名具体街区/景点（例：宽窄巷子、人民公园、武侯祠、太古里），兼顾${p.pace}节奏${p.interests.length ? '和偏好' : ''}。
    5.1 **地名用地图搜得到的通用叫法**：写"象鼻山"就别写成"象鼻山公园"（外省真有同名公园，导航会导过去），不要自造"XX景区大门""XX游客中心"这类后缀，也不要带括号补注。
 6. ${p.mustGo ? `用户必去：${p.mustGo}，必须排进合适的一天。` : ''}${p.extra ? `特殊要求：${p.extra}` : ''}
@@ -1165,60 +1165,94 @@ function skeletonForEmptyDays(p, outline, items, doneDayIndexes) {
   return { items: out, replaced: rebuild };
 }
 
+/**
+ * 班次时刻规整到 5 分钟的整数倍。
+ * 真实列车运行图的发车/到达时刻只会出现整点、半点或 5 分/10 分这类刻度，
+ * "08:37 发车""16:02 到达"百分百是模型随手编的。规整之后至少"像个真班次"，
+ * 与真实时刻的偏差也控制在 2 分钟以内（用户查 12306 时才对得上号）。
+ */
+function snapScheduleMinutes(outline) {
+  const snap = (v) => {
+    const m = toMin(v);
+    return m == null ? v : fmtMin(Math.round(m / 5) * 5);
+  };
+  asArray(outline && outline.days).forEach((d) => {
+    asArray(d.moves).forEach((m) => {
+      const modeStr = `${m.mode || ''}${m.code || ''}`.toLowerCase();
+      if (!/train|plane|ship|高铁|动车|火车|航班|飞机|游船/.test(modeStr)) return;
+      if (m.startTime) m.startTime = snap(m.startTime);
+      if (m.endTime) m.endTime = snap(m.endTime);
+    });
+  });
+  return outline;
+}
+
 function applyTripEdgeTimes(p, outline) {
   const days = asArray(outline && outline.days);
   if (!days.length) return outline;
   // 只认城际大交通段（市内接驳不挪）
   const railLike = (m) => /train|plane|高铁|动车|火车|航班|飞机|ship|游船/
     .test(`${m.mode || ''}${m.code || ''}`.toLowerCase());
+  snapScheduleMinutes(outline);
 
-  /** 整体平移一段班次：保持时长不变，把指定那一端挪到 wantMin */
-  const shiftSeg = (m, wantMin, edge) => {
-    if (wantMin == null || !m) return false;
-    const s = toMin(m.startTime);
-    const e = toMin(m.endTime);
-    const dur = (s != null && e != null && e > s) ? e - s : null;
-    if (edge === 'start') {
-      if (s == null) return false;
-      m.startTime = fmtMin(wantMin);
-      if (dur != null) m.endTime = fmtMin(wantMin + dur);
-      return true;
-    }
-    if (e == null) return false;
-    m.endTime = fmtMin(wantMin);
-    // 倒推出来的发车时刻要是退到了前一天（比如"早上 8 点到家"意味着半夜出发），
-    // 就别硬挪起点了，只保证到达时刻对得上
-    if (dur != null && wantMin - dur >= 0) m.startTime = fmtMin(wantMin - dur);
-    return true;
+  // ⚠️ 这里的历史做法是把整段班次"整体平移"到用户填的时刻 —— 结果车次号还是
+  // 模型给的（如 G2249），时刻却被我们算成了 16:15，真实 G2249 根本不是这个点发车，
+  // 用户一查就"每班车都对不上"。
+  // 正确原则：**列车/航班时刻是事实，用户的出发意向才是可以商量的那个**。
+  // 代码绝不改写班次时刻，只在偏差明显时把真实时刻写进当天提示，让人自己调。
+  const TOL = 45;   // 期望与真实相差 45 分钟以内都算"对得上"
+
+  const noteOf = (day) => {
+    if (!day) return null;
+    day.note = String(day.note || '').trim();
+    return day;
+  };
+  const appendNote = (day, text) => {
+    if (!day) return;
+    const old = String(day.note || '').trim();
+    if (old && old.indexOf(text) >= 0) return;
+    day.note = old ? `${old}；${text}` : text;
   };
 
   const goMin = toMin(p.goTime);
   const backMin = toMin(p.backTime);
+
   if (goMin != null) {
     const first = days[0];
     const list = asArray(first && first.moves);
     const m = list.find(railLike) || list[0];
     if (m) {
-      // goTime = **离开出发地（家门口/酒店）的时刻**，不是发车时刻！
-      // 实测踩过：用户填"重庆市金童路 15:30 出发"，大纲把高铁发车写成 15:30，
-      // 细化自然从"15:30 乘高铁"写起——从金童路去重庆西站的接驳凭空消失。
-      // 发车时刻 = goTime + 市内接驳 40 分钟 + 安检候车（高铁 45 分 / 飞机 2 小时）。
+      // goTime = **离开出发地（家门口/酒店）的时刻**，不是发车时刻。
+      // 期望发车 = goTime + 市内接驳 40 分钟 + 安检候车（高铁 45 分 / 飞机 2 小时）。
       const modeStr = `${m.mode || ''}${m.code || ''}`.toLowerCase();
       const buffer = /plane|航班|飞机/.test(modeStr) ? 160
         : /train|高铁|动车|火车/.test(modeStr) ? 85
         : 60;                                    // bus/car/ship：门到门 40 分 + 余量
-      shiftSeg(m, goMin + buffer, 'start');
+      const wantStart = goMin + buffer;
+      const realStart = toMin(m.startTime);
+      noteOf(first);
+      if (realStart != null && Math.abs(realStart - wantStart) > TOL) {
+        // 真实班次与用户意向冲突：保留真实时刻，把该几点出门写进提示
+        const leaveAt = Math.max(0, realStart - buffer);
+        appendNote(first, `参考${m.code ? ` ${m.code}` : ''} ${m.startTime || ''} 发车，建议 ${fmtMin(leaveAt)} 前出发（原计划的 ${p.goTime} 当天没有合适班次）`);
+        console.warn('[generatePlan] 去程班次 %s %s 与用户出发时间 %s 冲突，保留真实时刻',
+          m.code || '', m.startTime || '', p.goTime || '');
+      }
     }
   }
   if (backMin != null && days.length > 1) {
     const last = days[days.length - 1];
     const list = asArray(last && last.moves);
-    // 最后一天可能先有短途接驳、再上车返程 → 取**最后一段**大交通当返程
     const m = list.slice().reverse().find(railLike) || list[list.length - 1];
     if (m) {
-      // backTime = **回到出发地（到家）的时刻**：大交通到达后还要 ~40 分钟
-      // 市内返家接驳，到站时刻 = backTime - 40（到家那条由细化/DayClosure 生成）
-      shiftSeg(m, Math.max(0, backMin - 40), 'end');
+      const wantEnd = Math.max(0, backMin - 40);   // 到站后还要 ~40 分钟市内返家
+      const realEnd = toMin(m.endTime);
+      noteOf(last);
+      if (realEnd != null && Math.abs(realEnd - wantEnd) > TOL) {
+        appendNote(last, `参考${m.code ? ` ${m.code}` : ''} ${m.endTime || ''} 到站，预计 ${fmtMin(Math.min(1439, realEnd + 40))} 到家（与计划的 ${p.backTime} 有出入）`);
+        console.warn('[generatePlan] 返程班次 %s %s 与用户到家时间 %s 冲突，保留真实时刻',
+          m.code || '', m.endTime || '', p.backTime || '');
+      }
     }
   }
   return outline;
@@ -2067,6 +2101,15 @@ function withTimeout(promise, ms, fallback) {
  * 上一条结束；顺延后结束时间不晚于开始的，至少补 30 分钟，不造零时长条目。
  * 只动时间字段，不改文本。返回按天分组、天内按时间排序的新数组。
  */
+/** 是否交通条目：这类条目带着真实班次时刻，时间线冲突时优先让别人让路 */
+function isTransportItem(it) {
+  if (!it) return false;
+  if (String(it.category || '') === 'transport') return true;
+  const t = String(it.transportType || '').toLowerCase();
+  if (t && t !== 'walk' && t !== 'ride') return true;
+  return /乘[^，。;；]*(列车|航班|高铁|动车|火车|飞机|大巴|班车)|前往/.test(String(it.activity || ''));
+}
+
 function fixDayTimeOverlaps(items) {
   const days = [...new Set(asArray(items).map((it) => Number(it.dayIndex || 0)))].sort((a, b) => a - b);
   const out = [];
@@ -2077,6 +2120,19 @@ function fixDayTimeOverlaps(items) {
       const prevEnd = toMin(list[i - 1].endTime);
       const curStart = toMin(list[i].startTime);
       if (prevEnd === null || curStart === null || curStart >= prevEnd) continue;
+      // 交通条目（尤其有真实班次的火车/飞机）**不许顺延**：把时刻一挪，
+      // 车次号还是那个车次号，发车时间却成了我们算出来的，用户一查就对不上。
+      // 正确做法：让上一条非交通的行程（景点/用餐/接驳）提前收尾来让路。
+      if (isTransportItem(list[i])) {
+        const prev = list[i - 1];
+        const prevStart = toMin(prev.startTime);
+        if (!isTransportItem(prev) && prevStart !== null && prevStart < curStart) {
+          console.warn('[generatePlan] 第%d天「%s」压缩到 %s 给交通让路（不改班次时刻）',
+            d + 1, String(prev.activity || '').slice(0, 20), list[i].startTime);
+          prev.endTime = list[i].startTime;
+          continue;
+        }
+      }
       console.warn('[generatePlan] 第%d天「%s」%s 早于上一条结束 %s，顺延',
         d + 1, String(list[i].activity || '').slice(0, 20), list[i].startTime, fmtMin(prevEnd));
       list[i].startTime = fmtMin(prevEnd);
@@ -2248,7 +2304,8 @@ module.exports = {
   normalizeInput, sanitizeAlarmCandidates, buildFallbackAlarms, fallbackAlarms,
   shiftDate, dayDiff, isHolidayRange,
   parseDestList, missingMustVisit, placeStem, duplicateHighlights,
-  applyTripEdgeTimes, enforceDayStartLocation, enforceDayClosure, enforceLuggageRules, enforceMovesAlignment,
+  applyTripEdgeTimes, snapScheduleMinutes, isTransportItem,
+  enforceDayStartLocation, enforceDayClosure, enforceLuggageRules, enforceMovesAlignment,
   enforceOriginAccess, enforceMorningRoutine, enforceEveningPlan,
   fixMealLabels, enforceNoMiddayHotel, skeletonDayItems, skeletonForEmptyDays,
   transferMinutes, isCarTransfer, detourTransfers, warnDetourTransfers,
