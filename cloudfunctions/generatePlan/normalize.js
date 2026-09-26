@@ -235,29 +235,43 @@ function sanitizeItems(rawItems) {
   // ---------- Pass 2：跨天位置继承 ----------
   // 逐天解析时每天是独立请求，"当天第一条移动"常因原文没写出发点而缺失起点。
   // 行程是连续的：人昨晚在哪，今天早上就从哪出发。按天序全局遍历，维护"当前所在位置"。
-  // 稳定排序：先按天，再按开始时间升序。LLM 偶尔会把某条排在前面却给了更晚的
-  // 时刻（实测约 2 处/8 天），展示出来就是"时间倒退"。这里只理顺顺序，不改内容。
-  // 缺时间的条目 (toMin → null) 排在当天最后，不打断正常条目。
-  const tOf = (t) => {
-    const v = toMin(t);
-    return v == null ? Number.MAX_SAFE_INTEGER : v;
-  };
-  const sorted = items.slice().sort((a, b) =>
-    (a.dayIndex - b.dayIndex) ||
-    (tOf(a.startTime) - tOf(b.startTime)) ||
-    (tOf(a.endTime) - tOf(b.endTime)));
+  //
+  // ⚠️ 天内顺序必须用 LLM 的**原始叙述顺序**，不能按 startTime 升序重排——踩过两个坑：
+  //  ① 没时刻的条目（"坐观光车前往…"）会被一起甩到当天最后，导致后面那条有时刻的
+  //     条目提前执行，继承了错误的出发点（实测：11:20"去民宿放行李"被排到 11:00 观光车
+  //     之前，起点继承成"金坑大寨停车场"，随后被 Pass 3 当成同点假导航把终点也清掉了）。
+  //  ② 行程跨零点是常态：某天原文写作「19:00 回民宿 → 次日 05:30 起床 → 06:00 出门看日出」，
+  //     按时刻排会把 19:00 挪到当天最后，于是次日清晨那条继承了前一天白天的位置
+  //     （实测错成"从锦江都城酒店出发去看日出"）。时刻倒退 ≠ 顺序写反。
+  // 另外：这里排的只是"继承遍历顺序"，输出顺序始终是 items 原始顺序，
+  // 所以按时刻排序从来也没能真正"理顺展示顺序"，去掉它没有任何损失。
+  const dayOrder = [];
+  const dayGroups = new Map();
+  items.forEach((it) => {
+    if (!dayGroups.has(it.dayIndex)) {
+      dayGroups.set(it.dayIndex, []);
+      dayOrder.push(it.dayIndex);
+    }
+    dayGroups.get(it.dayIndex).push(it);
+  });
+  dayOrder.sort((a, b) => a - b);
+
   let lastKnown = ''; // 上一步结束时人所在的位置
-  sorted.forEach((it) => {
-    if (it.endLocation && !it.startLocation && lastKnown && lastKnown !== it.endLocation) {
-      // 只写了目的地、原文没提前往哪 → 从上一步的位置出发
-      it.startLocation = lastKnown;
-    }
-    if (it.endLocation) {
-      lastKnown = it.endLocation;
-    } else if (it.startLocation) {
-      lastKnown = it.startLocation;
-    }
-    // 两者都空（吃饭/休息等未移动）→ 位置不变
+  dayOrder.forEach((d) => {
+    dayGroups.get(d).forEach((it) => {
+      if (it.endLocation && !it.startLocation && lastKnown && lastKnown !== it.endLocation) {
+        // 只写了目的地、原文没提前往哪 → 从上一步的位置出发
+        // （lastKnown === endLocation 说明人已经在那儿了，不造 A→A 的假移动，
+        //   保留单头终点给前端"导航到目的地"用）
+        it.startLocation = lastKnown;
+      }
+      if (it.endLocation) {
+        lastKnown = it.endLocation;
+      } else if (it.startLocation) {
+        lastKnown = it.startLocation;
+      }
+      // 两者都空（吃饭/休息等未移动）→ 位置不变
+    });
   });
 
   // ---------- Pass 3：假导航清除 ----------

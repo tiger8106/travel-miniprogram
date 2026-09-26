@@ -347,6 +347,17 @@ ok('backTime 语义 = 到家时刻（大交通到站 = backTime-40）',
 
 // ---------- ⑭ 模型内心独白泄漏防护 + 收尾闭环 ----------
 const genNormJs = fs.readFileSync(path.join(ROOT, 'cloudfunctions/generatePlan/normalize.js'), 'utf8');
+const parseNormJs = fs.readFileSync(path.join(ROOT, 'cloudfunctions/parseTravelPlan/normalize.js'), 'utf8');
+// normalize.js 和 geocode.js 一样是两份复制粘贴的（云函数各自独立打包，没法跨目录 require），
+// 改一份必须同步另一份——只比正文，文件头的路径注释本来就不同
+const bodyOfNorm = (s) => s.slice(s.indexOf('const MAX_DAY'));
+ok('两个云函数的 normalize 实现一致', bodyOfNorm(parseNormJs) === bodyOfNorm(genNormJs));
+// 跨天位置继承不能按 startTime 重排：行程跨零点是常态，重排会把"昨晚回民宿"
+// 甩到当天最后，次日清晨那条就继承了前一天白天的位置（实测踩过两次）
+ok('跨天位置继承按原始叙述顺序（不按时刻重排）',
+  /按天序全局遍历/.test(parseNormJs) && !/tOf\(a\.startTime\)/.test(parseNormJs));
+ok('人已在目的地时不造 A→A 假移动（保留单头终点给前端导航）',
+  /lastKnown !== it\.endLocation/.test(parseNormJs));
 ok('细化 prompt 不再把大纲班次说成"用户可能手工改过"（自家大纲的参考时刻被当成圣旨，模型会写独白抗议）',
   !/用户可能手工改过/.test(planJs) && /今天的大交通（路线既定）/.test(planJs));
 ok('中间天班次时刻允许静默微调，首末日用户指定时刻才锁死',

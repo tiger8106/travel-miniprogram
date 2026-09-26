@@ -195,24 +195,41 @@ const edgeOutline = {
       highlights: [] },
   ],
 };
+// ⚠️ 2026-09-26 起语义变了（Tiger 实锤"每班车都对不上"）：
+// 旧做法把整段班次"平移"到用户填的时刻 → 车次号还是 G2249，时刻却成了算出来的 16:15，
+// 用户一查 12306 就全对不上。现在的原则是**班次时刻是事实，代码绝不改写**：
+// 时刻只做 5 分钟刻度对齐，与用户意向冲突时把"建议几点出门/预计几点到家"写进当天 note。
 const edged = P.applyTripEdgeTimes(edgeP, JSON.parse(JSON.stringify(edgeOutline)));
-ok(edged.days[0].moves[0].startTime === '09:55',
-  '去程：大交通发车 = 出发时间 08:30 + 接驳 40 分 + 安检候车 45 分 = 09:55',
-  edged.days[0].moves[0].startTime);
-ok(edged.days[0].moves[0].endTime === '14:49',
-  '去程：运行时长保持不变（4h54m → 09:55-14:49）', edged.days[0].moves[0].endTime);
-ok(edged.days[2].moves[0].endTime === '20:35',
-  '返程：大交通到站 = 到家时间 21:15 - 市内返家 40 分 = 20:35',
-  edged.days[2].moves[0].endTime);
-ok(edged.days[2].moves[0].startTime === '15:41',
-  '返程：发车时刻按到站时刻倒推（4h54m → 15:41 发）', edged.days[2].moves[0].startTime);
-// 到达时刻太早（倒推会退到前一天）时只保证到达时刻，不硬挪起点
+ok(edged.days[0].moves[0].startTime === '14:45' && edged.days[0].moves[0].endTime === '19:40',
+  '去程：班次时刻保持模型给的真实值（只对齐 5 分钟刻度，不按出发时间平移）',
+  `${edged.days[0].moves[0].startTime}-${edged.days[0].moves[0].endTime}`);
+ok(/建议\s*\d{2}:\d{2}\s*前出发/.test(edged.days[0].note || ''),
+  '去程：与出发时间冲突时把"建议几点出门"写进当天提示（时刻本身不动）',
+  edged.days[0].note || '(无提示)');
+ok(edged.days[2].moves[0].startTime === '09:10' && edged.days[2].moves[0].endTime === '14:05',
+  '返程：班次时刻同样保持真实值（不按到家时间倒推发车）',
+  `${edged.days[2].moves[0].startTime}-${edged.days[2].moves[0].endTime}`);
+ok(/预计\s*\d{2}:\d{2}\s*到家/.test(edged.days[2].note || ''),
+  '返程：与到家时间冲突时把"预计几点到家"写进当天提示',
+  edged.days[2].note || '(无提示)');
+// 到家时间再离谱（凌晨 3 点）也不改班次时刻——旧版会倒推出"半夜发车"这种鬼时刻
 const weird = P.applyTripEdgeTimes(
   normalizeInput({ dest: '桂林', startDate: '2026-12-20', endDate: '2026-12-22', endTime: '03:00' }),
   JSON.parse(JSON.stringify(edgeOutline)));
-ok(weird.days[2].moves[0].endTime === '02:20' && weird.days[2].moves[0].startTime === '09:12',
-  '到达时刻倒推会退到前一天时：只锁到达时刻（到家 03:00 → 到站 02:20），发车时刻不乱改',
+ok(weird.days[2].moves[0].endTime === '14:05' && weird.days[2].moves[0].startTime === '09:10',
+  '到家时间再离谱也不倒推班次（不再出现"半夜发车"）',
   weird.days[2].moves[0].startTime + '-' + weird.days[2].moves[0].endTime);
+// 反向用例：模型给的班次本来就与用户意向吻合（13:20 出门 + 85 分 ≈ 14:45 发车）
+// → 时刻不动，也不该画蛇添足加"建议几点出门"的提示
+const alignedGo = P.applyTripEdgeTimes(
+  normalizeInput({ dest: '桂林', startDate: '2026-12-20', endDate: '2026-12-22', startTime: '13:20', endTime: '21:15' }),
+  JSON.parse(JSON.stringify(edgeOutline)));
+ok(alignedGo.days[0].moves[0].startTime === '14:45',
+  '对得上时时刻原样保留（不平移也不倒推）',
+  alignedGo.days[0].moves[0].startTime);
+ok(!/建议\s*\d{2}:\d{2}\s*前出发/.test(alignedGo.days[0].note || ''),
+  '对得上时不加多余提示（45 分钟容差内视为吻合）',
+  alignedGo.days[0].note || '(无提示)');
 
 // 5e+. 选站通用体检：到站后接驳耗时的解析与"接驳过长"判定（不认任何具体地名/车站）
 ok(P.transferMinutes('地铁30分钟') === 30, '接驳耗时：地铁30分钟 → 30', String(P.transferMinutes('地铁30分钟')));
@@ -310,10 +327,13 @@ ok(/今天返程/.test(r6[0].note || ''), '返程日的行李提醒改成"今天
 let r7 = lug([
   { dayIndex: 1, startTime: '08:00', endTime: '08:30', activity: '携带全部行李打车前往汽车站', category: 'transport', note: '行李随身带，不寄存' },
   { dayIndex: 1, startTime: '09:00', endTime: '12:00', activity: '前往明仕田园', category: 'transport', note: '严禁寄存回原酒店' },
+  // 中间夹了能愿动词的否定（"不可寄存"）也是否定——只写"不"会漏，被误判成真寄存
+  { dayIndex: 1, startTime: '12:30', endTime: '13:00', activity: '步行前往码头', category: 'transport', note: '行李需随身带走，不可寄存' },
+  { dayIndex: 1, startTime: '13:30', endTime: '14:00', activity: '登船', category: 'transport', note: '行李较多时不能寄存，请随身看管' },
 ]);
-ok(!/取回寄存的行李/.test(r7[0].note || '') && !/取回寄存的行李/.test(r7[1].note || ''),
-  '否定句里的"寄存"（不寄存/严禁寄存）不算寄存，不冒出取回提醒',
-  JSON.stringify([r7[0].note, r7[1].note]));
+ok(r7.every((it) => !/取回寄存的行李/.test(it.note || '')),
+  '否定句里的"寄存"（不寄存/严禁寄存/不可寄存/不能寄存）不算寄存，不冒出取回提醒',
+  JSON.stringify(r7.map((it) => it.note)));
 
 let r8 = lug([
   { dayIndex: 0, startTime: '07:30', endTime: '08:00', activity: '大件行李留在酒店房间或寄存前台，轻装出发', category: 'hotel' },
@@ -796,17 +816,38 @@ return (async () => {
   ok(outlineDups.length === 0, '大纲没有跨天重复游玩的景点',
     outlineDups.map((d) => `${d.name}(第${d.days.map((x) => x + 1).join(',')}天)`).join('；'));
 
-  // 去程开始 / 返程到达时刻必须落在大纲里（代码兜底对齐，不是靠 LLM 自觉）
+  // 去程 / 返程时刻：同上，不再"平移"班次，改成二选一的契约——
+  //   要么模型给的时刻本来就与用户意向吻合（45 分钟容差），
+  //   要么代码在当天 note 里把"建议几点出门 / 预计几点到家"说清楚。
+  // 两条都不占 = 用户拿到的时刻既对不上意向、又没有任何解释，这才是真 bug。
+  const minOf = (t) => {
+    const m = /^(\d{1,2}):(\d{2})$/.exec(String(t || ''));
+    return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
+  };
   const od = phase1.outline.days || [];
   const firstMove = (od[0] && od[0].moves || [])[0];
-  const lastMoves = (od[od.length - 1] && od[od.length - 1].moves) || [];
-  const lastMove = lastMoves[lastMoves.length - 1];
-  ok(!!firstMove && firstMove.startTime === '08:30',
-    '去程开始时间生效（第一天大交通 08:30 发车）', firstMove && firstMove.startTime);
-  ok(!!lastMove && lastMove.endTime === '21:15',
-    '返程到达时间生效（最后一天 21:15 抵达出发地）', lastMove && `${lastMove.startTime}-${lastMove.endTime}`);
-  ok(!!lastMove && lastMove.startTime !== '21:15',
-    '返程没把到达时间误当成发车时间', lastMove && lastMove.startTime);
+  // 返程段 = 大纲里最后一段交通（最后一天没写出来就往前找，别怪模型漏写）
+  let lastMove = null;
+  let backDay = null;
+  for (let i = od.length - 1; i >= 0 && !lastMove; i--) {
+    const mv = (od[i] && od[i].moves) || [];
+    if (mv.length) { lastMove = mv[mv.length - 1]; backDay = od[i]; }
+  }
+  const goReal = firstMove ? minOf(firstMove.startTime) : null;
+  const goNote = String(od[0] && od[0].note || '');
+  ok(!!firstMove && (goReal !== null && Math.abs(goReal - (8 * 60 + 30 + 85)) <= 45
+    || /建议\s*\d{2}:\d{2}\s*前出发/.test(goNote)),
+    '去程：发车时刻要么与出发时间对得上，要么在当天提示给出建议出门时刻（不硬改班次）',
+    firstMove && `${firstMove.startTime}｜note=${goNote.slice(0, 40)}`);
+  const backReal = lastMove ? minOf(lastMove.endTime) : null;
+  const backNote = String(backDay && backDay.note || '');
+  ok(!!lastMove && (backReal !== null && Math.abs(backReal - (21 * 60 + 15 - 40)) <= 45
+    || /预计\s*\d{2}:\d{2}\s*到家/.test(backNote)),
+    '返程：到站时刻要么与到家时间对得上，要么在当天提示给出预计到家时刻',
+    lastMove && `${lastMove.startTime}-${lastMove.endTime}｜note=${backNote.slice(0, 40)}`);
+  ok(!!lastMove && minOf(lastMove.startTime) !== null && minOf(lastMove.startTime) < (backReal || Infinity),
+    '返程没把到达时间误当成发车时间（发车必须早于到站）',
+    lastMove && `${lastMove.startTime}-${lastMove.endTime}`);
 
   // 阶段二：模拟云端续跑——一次跑不完（partial）就接着调，直到全部生成
   const t1 = Date.now();
