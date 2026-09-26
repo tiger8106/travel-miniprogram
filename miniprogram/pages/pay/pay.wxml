@@ -79,6 +79,17 @@
     <view wx:else class="invite-used">已使用邀请码 {{invite.invitedBy}}</view>
   </view>
 
+  <!-- 复制失败兜底：页面内浮层（showModal 里的字选不中） -->
+  <view wx:if="{{copyFallback}}" class="copy-mask" bindtap="onCloseCopyFallback">
+    <view class="copy-sheet" catchtap="noop2">
+      <view class="copy-title">自动复制没成功</view>
+      <view class="copy-hint">长按选中下面的邀请码手动复制，或点「再试一次」</view>
+      <view class="copy-code"><text user-select>{{copyCode}}</text></view>
+      <view class="btn-primary btn-block" bindtap="onCopyRetry">再试一次</view>
+      <view class="copy-close" bindtap="onCloseCopyFallback">关闭</view>
+    </view>
+  </view>
+
   <!-- 计费说明 -->
   <view class="card">
     <view class="card-title">📋 计费说明</view>

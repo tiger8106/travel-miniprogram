@@ -80,6 +80,7 @@ Component({
     categoryOptions: CATEGORY_OPTIONS,
     showDel: false, // 删除确认弹层
     navLegs: [],    // 导航段列表：[{ from, to, lat, lon }]，有中间点时一段一个按钮
+    schedTip: '',   // 火车/飞机条目的"班次仅供参考"提示（生成端拿不到实时时刻表）
   },
 
   observers: {
@@ -90,6 +91,7 @@ Component({
             ? transportIcon(item)
             : (CATEGORY_ICONS[item.category] || '📌'),
           navLegs: this.buildNavLegs(item),
+          schedTip: this.schedTip(item),
         });
       }
     },
@@ -97,6 +99,21 @@ Component({
 
   methods: {
     noop() {},
+
+    // 火车/飞机大交通条目统一标注：班次号与时刻由 AI 按典型走向编排，
+    // 拿不到 12306/航司实时数据，可能与现实有出入（免得用户拿行程去赶车被放鸽子）
+    schedTip(item) {
+      if (!item || item.category !== 'transport') return '';
+      const t = String(item.transportType || '').toLowerCase();
+      const act = String(item.activity || '');
+      if (t === 'train' || /高铁|动车|火车|列车|城际/.test(act)) {
+        return '🚄 班次与时刻为 AI 参考编排，乘车前请在 12306 核实实际车次与时刻';
+      }
+      if (t === 'plane' || /航班|飞机|航站楼/.test(act)) {
+        return '✈️ 航班时刻为 AI 参考编排，出行前请以航司实际信息为准';
+      }
+      return '';
+    },
 
     // 导航段拆分：起点 → [中间点…] → 终点，每段一个"直达目的地"按钮。
     // 用户在编辑抽屉加的中间点（如 漓江漂流沿途的 九马画山/黄布倒影/兴坪）

@@ -491,3 +491,11 @@
   font-weight: 600;
   box-shadow: 0 8rpx 20rpx rgba(231, 76, 60, 0.28);
 }
+
+/* 火车/飞机班次"仅供参考"标注 */
+.sched-tip {
+  margin-top: 10rpx;
+  font-size: 22rpx;
+  color: #9ca3af;
+  line-height: 1.5;
+}

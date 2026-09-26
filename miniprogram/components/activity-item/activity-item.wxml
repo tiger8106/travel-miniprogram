@@ -17,6 +17,7 @@
     </view>
 
     <view wx:if="{{item.note}}" class="note">{{item.note}}</view>
+    <view wx:if="{{schedTip}}" class="sched-tip">{{schedTip}}</view>
 
     <!-- 导航：独占一行；有中间点时按 段 依次铺开，每段直达目的地（每段独占一行） -->
     <view wx:if="{{navLegs.length}}" class="nav-row nav-multi">

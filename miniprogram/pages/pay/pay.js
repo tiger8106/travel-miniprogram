@@ -137,17 +137,31 @@ Page({
     wx.setClipboardData({
       data: code,
       success: () => wx.showToast({ title: '邀请码已复制', icon: 'none' }),
-      fail: () => {
-        // 模拟器/个别机型剪贴板会失败：兜底让用户长按选中手动复制
-        wx.showModal({
-          title: '自动复制没成功',
-          content: `请长按选中下面的邀请码手动复制：\n\n${code}`,
-          showCancel: false,
-          confirmText: '知道了',
-        });
-      },
+      // 弹窗里的文字选不中（showModal 不支持 user-select），失败就开页面内浮层
+      fail: () => this.setData({ copyFallback: true, copyCode: code }),
     });
   },
+
+  /** 复制兜底浮层里再试一次 */
+  onCopyRetry() {
+    const code = this.data.copyCode || '';
+    if (!code) return;
+    wx.setClipboardData({
+      data: code,
+      success: () => {
+        this.setData({ copyFallback: false });
+        wx.showToast({ title: '邀请码已复制', icon: 'none' });
+      },
+      fail: () => wx.showToast({ title: '还是不行，请长按邀请码手动复制', icon: 'none' }),
+    });
+  },
+
+  onCloseCopyFallback() {
+    this.setData({ copyFallback: false });
+  },
+
+  /** 浮层内容区挡住冒泡（点内容不关闭） */
+  noop2() {},
 
   onCodeInput(e) {
     this.setData({ inputCode: e.detail.value });
