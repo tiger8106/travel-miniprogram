@@ -499,14 +499,56 @@ Page({
       });
     } catch (err) {
       this.stopTicker();
-      this.setData({ generating: false, genTip: '' });
       // 额度/限流类提示不是"云函数坏了"，别去弹体检报告——直接给购买引导
       const msg = (err && err.message) || '';
       if (/次数|额度|上限/.test(msg)) {
+        this.setData({ generating: false, genTip: '' });
         wx.showToast({ title: msg.slice(0, 30), icon: 'none' });
         return;
       }
+      // 大纲阶段撞上云函数 60s 上限（长行程大纲本身就可能跑不进单次调用）：
+      // **不当失败处理** —— 整条链路转后台继续跑（云端先补大纲再细化），
+      // 完成后自动入库，用户留着看进度或者直接走都行。
+      if (/超时|timeout|TIME_LIMIT|执行时间/i.test(msg)) {
+        await this.bgGenerateAfterOutlineTimeout();
+        return;
+      }
+      this.setData({ generating: false, genTip: '' });
       this.showDiag(err);
+    }
+  },
+
+  // 大纲超时 → 转后台生成（不弹报错，继续生成直到跑完）
+  async bgGenerateAfterOutlineTimeout() {
+    this.startTicker('行程较长，已转后台继续生成', 0);
+    this.setTipExtra('可离开，完成后自动保存');
+    const off = genrunner.subscribe((s) => {
+      if (!s || s.status !== 'running') return;
+      const p = s.progress || {};
+      if (p.total) this.setTipExtra(`已排 ${Math.min(p.done || 0, p.total)}/${p.total} 天 · 可离开`);
+    });
+    try {
+      // 不带 outline 发起后台任务：云端任务首轮先生成大纲，之后照常细化入库
+      const result = await genrunner.start(this._input);
+      if (!result || !result.tripId) {
+        throw new Error((result && result.error) || '后台生成没有产出行程，请重试');
+      }
+      app.globalData.currentTripId = result.tripId;
+      homeCache.clear();
+      quota.clear();
+      this.stopTicker();
+      this.setData({ generating: false, genTip: '' });
+      if (this._left) {
+        wx.showToast({ title: '攻略已生成', icon: 'success' });
+        return;
+      }
+      wx.redirectTo({ url: `/pages/itinerary/itinerary?tripId=${result.tripId}&all=1` });
+    } catch (e2) {
+      this.stopTicker();
+      this.setData({ generating: false, genTip: '' });
+      this.showDiag(e2);
+    } finally {
+      if (off) off();
     }
   },
 

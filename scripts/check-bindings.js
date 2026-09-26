@@ -597,5 +597,16 @@ ok('检索结果注入细化 prompt（模型只挑，不许自创车次与时刻
 ok('检索失败静默降级（绝不因为查不到就出不了行程）',
   /沿用模型编排/.test(schedJs) && /沿用模型编排/.test(planJs));
 
+ok('大纲超时不报错：云端后台补大纲（失败留下一轮重试）+ 前端转后台继续',
+  /后台大纲完成/.test(gpIdx) && /attempts\.outline/.test(gpIdx)
+    && /bgGenerateAfterOutlineTimeout/.test(plannerJs2));
+
+ok('gen_jobs / schedule_cache 集合不存在时自动创建（-502005 兜底）',
+  /async function ensureCollection/.test(gpIdx) && /createCollection/.test(gpIdx)
+    && /ensureCollection\(db, COL_JOB\)/.test(gpIdx) && /ensureCollection\(db, COL_SCHED\)/.test(gpIdx));
+
+ok('模拟器不支持虚拟支付有明确提示（不再让用户以为支付坏了）',
+  /isDevtools/.test(quotaUtil) && /模拟器不支持虚拟支付/.test(quotaUtil));
+
 console.log(failed ? `\n${failed} 项失败 ✗` : '\n全部通过 ✓');
 process.exit(failed ? 1 : 0);

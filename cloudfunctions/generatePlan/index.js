@@ -331,6 +331,79 @@ async function runJobRound(openid, job) {
   delete payload.action;
   delete payload.jobMode;
 
+  // ★ 大纲缺失（前端大纲阶段撞 60s 上限转入后台 / 纯后台生成）：
+  //   本轮**只生成大纲**并写回任务，细化留给下一轮 —— 云函数 60s 装不下
+  //   "大纲 ~50s + 细化 ~40s" 两件大事，硬塞必然整轮被系统杀掉。
+  //   大纲失败也不放弃：任务保持 running，下一轮自动重试（最多 3 次）。
+  if (!(input.outline && input.outline.days && input.outline.days.length)) {
+    const t0 = Date.now();
+    const wantSearch = process.env.LLM_ENABLE_SEARCH !== '0';
+    try {
+      const res = await generateOutline(payload, wantSearch ? {
+        scheduleLookup: makeScheduleLookup(),
+        scheduleDeadline: t0 + 50000,
+        scheduleBudgetMs: Number(process.env.LLM_SEARCH_BUDGET_MS) || 22000,
+      } : {});
+      const totalDays = (res.outline && res.outline.days || []).length;
+      const now = Date.now();
+      await db.collection(COL_JOB).doc(job._id).update({
+        data: {
+          input: Object.assign({}, input, {
+            outline: res.outline, title: res.title, summary: res.summary,
+          }),
+          title: String(res.title || job.title || ''),
+          progress: { done: 0, total: totalDays },
+          round: (job.round || 0) + 1,
+          updatedAt: now,
+          leaseUntil: now + JOB_LEASE_MS,
+        },
+      }).catch((e) => console.warn('[generatePlan] 大纲写回任务失败:', e.message));
+      console.log('[generatePlan] 任务 %s 后台大纲完成：%d 天', job._id, totalDays);
+      return {
+        jobId: job._id,
+        tripId: job.tripId || '',
+        title: String(res.title || job.title || ''),
+        status: 'running',
+        partial: true,          // 细化还没开始 → 让驱动方接着跑下一轮
+        round: (job.round || 0) + 1,
+        progress: { done: 0, total: totalDays },
+        itemCount: 0,
+        error: '',
+        version: GEN_VERSION,
+      };
+    } catch (e) {
+      // 大纲没生成出来 ≠ 任务失败：还有下一轮。重试额度用完才认输。
+      const attempts = Object.assign({}, job.attempts || {});
+      attempts.outline = (attempts.outline || 0) + 1;
+      const giveUp = attempts.outline >= 3;
+      const now = Date.now();
+      await db.collection(COL_JOB).doc(job._id).update({
+        data: {
+          attempts,
+          round: (job.round || 0) + 1,
+          status: giveUp ? 'failed' : 'running',
+          error: giveUp ? `大纲连续 ${attempts.outline} 次没生成出来：${String(e.message || e).slice(0, 80)}` : '',
+          updatedAt: now,
+          leaseUntil: giveUp ? 0 : now + JOB_LEASE_MS,
+        },
+      }).catch(() => {});
+      if (giveUp) throw e;
+      console.warn('[generatePlan] 后台大纲生成失败，留给下一轮重试(%d/3):', attempts.outline, e.message);
+      return {
+        jobId: job._id,
+        tripId: job.tripId || '',
+        title: job.title || '',
+        status: 'running',
+        partial: true,
+        round: (job.round || 0) + 1,
+        progress: job.progress || { done: 0, total: 0 },
+        itemCount: 0,
+        error: '',
+        version: GEN_VERSION,
+      };
+    }
+  }
+
   const plan = await buildPlan(payload, payload, {
     doneDayIndexes: job.doneDayIndexes || [],
     attempts: job.attempts || {},
@@ -397,7 +470,9 @@ async function schedCacheGet(key) {
 async function schedCacheSet(key, list) {
   try {
     const now = Date.now();
-    await cloud.database().collection(COL_SCHED).doc(key)
+    const db = cloud.database();
+    await ensureCollection(db, COL_SCHED);
+    await db.collection(COL_SCHED).doc(key)
       .set({ data: { list, updatedAt: now, expireAt: now + SCHED_TTL_MS } });
   } catch (e) { console.warn('[generatePlan] 班次缓存写入失败:', e.message); }
 }
@@ -410,9 +485,25 @@ function makeScheduleLookup() {
   });
 }
 
+/**
+ * 集合不存在（-502005 Db or Table not exist）曾让后台生成直接挂掉：
+ * 写库前先兜底自动建集合。对已存在的集合 createCollection 会报错，吞掉即可。
+ * （部署清单里仍建议手动建好并配权限，这里是"忘了建也不炸"的保险。）
+ */
+const _ensuredCols = new Set();
+async function ensureCollection(db, name) {
+  if (_ensuredCols.has(name)) return;
+  try {
+    await db.createCollection(name);
+    console.log('[generatePlan] 已自动创建集合:', name);
+  } catch (e) { /* 多半是"集合已存在"，不用管 */ }
+  _ensuredCols.add(name);
+}
+
 /** 建任务（首轮）。只在建任务前查一次额度，续跑不再查（那一次的钱已经扣过了） */
 async function createJob(openid, event) {
   const db = cloud.database();
+  await ensureCollection(db, COL_JOB);
   const chk = await quotaCall(openid, { action: 'check', scene: 'plan' });
   if (chk.code === -2) return { code: -2, msg: chk.msg || '次数用完了，买个套餐继续吧', needPay: true };
   if (chk.code === -3) return { code: -3, msg: chk.msg || '暂时无法生成' };

@@ -91,6 +91,14 @@ function loginCode() {
   });
 }
 
+/** 当前是不是开发者工具/模拟器（虚拟支付只支持真机，模拟器必报 no permission） */
+function isDevtools() {
+  try {
+    const d = wx.getDeviceInfo ? wx.getDeviceInfo() : {};
+    return d.platform === 'devtools';
+  } catch (e) { return false; }
+}
+
 /**
  * 买一个套餐：下单（云函数算签名）→ 拉起支付 → 确认发货
  * @param {string} goodsId plan_1 / plan_5 / vip_month
@@ -98,6 +106,10 @@ function loginCode() {
 async function pay(goodsId) {
   if (typeof wx.requestVirtualPayment !== 'function') {
     throw new Error('当前微信版本不支持虚拟支付（需基础库 2.19.2+）');
+  }
+  // 模拟器不支持虚拟支付（报 "no permission"）：提前拦下来，别让用户以为支付坏了
+  if (isDevtools()) {
+    throw new Error('开发者工具的模拟器不支持虚拟支付，请点「预览」用真机扫码后再买');
   }
   wx.showLoading({ title: '下单中…', mask: true });
   let order;
@@ -130,6 +142,9 @@ async function pay(goodsId) {
         if (code === -2) reject(new Error('已取消支付'));
         else if (code === -15007) reject(new Error('登录态过期，请重新进入小程序后重试'));
         else if (code === -15010 || code === -15014) reject(new Error('商品还没发布生效，请稍等 10 分钟再试'));
+        else if (/no permission/i.test((err && err.errMsg) || '')) {
+          reject(new Error('虚拟支付在当前环境不可用：模拟器不支持支付，请用真机重试；真机仍报错请到小程序后台确认「虚拟支付」权限已开通'));
+        }
         else reject(new Error((err && err.errMsg) || '支付失败'));
       },
     });

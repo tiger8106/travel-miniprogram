@@ -39,6 +39,13 @@
       </view>
       <text class="text-placeholder">›</text>
     </view>
+    <view class="menu-item" bindtap="onTapPay">
+      <view class="menu-item-left">
+        <text>💳 我的额度</text>
+        <text class="menu-item-sub">{{quotaText}}</text>
+      </view>
+      <text class="text-placeholder">›</text>
+    </view>
     <view class="menu-item" bindtap="onTapUpload">
       <view class="menu-item-left">
         <text>📤 上传新攻略</text>
@@ -50,13 +57,6 @@
       <view class="menu-item-left">
         <text>✨ 制定新攻略</text>
         <text class="menu-item-sub">没现成攻略？填几个问题，AI 直接生成</text>
-      </view>
-      <text class="text-placeholder">›</text>
-    </view>
-    <view class="menu-item" bindtap="onTapPay">
-      <view class="menu-item-left">
-        <text>💳 我的额度</text>
-        <text class="menu-item-sub">{{quotaText}}</text>
       </view>
       <text class="text-placeholder">›</text>
     </view>
