@@ -16,10 +16,11 @@
 
 const cloud = require('wx-server-sdk');
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
+const crypto = require('crypto');
 
 const { generateOutline, buildPlan, dayDiff, collectSegments, applyRealSchedules } = require('./plan');
 const { geocodeBatch } = require('./geocode');
-const { lookupSchedules } = require('./schedule');
+const { lookupSchedules, canSearch } = require('./schedule');
 
 const COL_TRIP = 'trips';
 const COL_ALARM = 'ticket_alarms';
@@ -31,7 +32,7 @@ const COL_SCHED = 'schedule_cache';
 const SCHED_TTL_MS = 36 * 3600 * 1000;
 
 // 生成引擎版本（用于确认线上跑的是哪一版）
-const GEN_VERSION = 'v1.3-bgjob';
+const GEN_VERSION = 'v1.4-schedule-geo';
 
 // ---------------------------------------------------------------
 // 后台续跑（用户中途离开小程序也能跑完）
@@ -77,14 +78,18 @@ async function geocodeItems(items, cityOf, opts) {
   try {
     const addrSet = new Set();
     items.forEach((it) => {
-      if (it.startLocation) addrSet.add(it.startLocation);
-      if (it.endLocation) addrSet.add(it.endLocation);
+      // 行程卡片的导航以终点为主；先查终点可把高德请求量近似减半，
+      // 起点没有坐标时前端仍会用城市 + 地名实时消歧。
+      const target = String(it.endLocation || it.startLocation || '').trim();
+      if (target) addrSet.add(target);
     });
     const coordMap = await geocodeBatch([...addrSet], cityOf, opts);
     if (coordMap.size) {
       items.forEach((it) => {
-        const s = coordMap.get(it.startLocation);
-        const e = coordMap.get(it.endLocation);
+        const startName = String(it.startLocation || '').trim();
+        const endName = String(it.endLocation || '').trim();
+        const s = coordMap.get(startName);
+        const e = coordMap.get(endName);
         if (s) {
           it.startLon = s.lon; it.startLat = s.lat;
           if (s.matchedName && s.matchedName !== it.startLocation) {
@@ -96,6 +101,15 @@ async function geocodeItems(items, cityOf, opts) {
           if (e.matchedName && e.matchedName !== it.endLocation) {
             it.endLocation = e.matchedName;
           }
+        }
+        const hit = e || s;
+        if (hit && hit.city) {
+          // 以高德实际命中的行政区覆盖模型填的宽泛城市，避免后续实时导航
+          // 带着“广西”或错误的当天城市再次搜索。
+          it.city = hit.city;
+        } else if (!it.city) {
+          const target = endName || startName;
+          if (target) it.city = cityOf(target) || '';
         }
       });
     }
@@ -407,46 +421,54 @@ async function runJobRound(openid, job) {
   //   给检索一整个独立预算（不再和大纲/细化抢 60s），查到的真实班次
   //   写回大纲（day.sched + moves 时刻），细化阶段照着挑、enforceRealSchedule 兜底。
   //   查询失败/超时都静默降级（沿用模型编排），绝不卡住任务。
-  const wantSearch = process.env.LLM_ENABLE_SEARCH !== '0';
+  const wantSearch = canSearch();
   if (!job.schedDone && wantSearch) {
-    try {
-      const segs = collectSegments(input.outline);
-      const budget = Math.max(8000, Number(process.env.LLM_SEARCH_BUDGET_MS) || 26000);
-      const left = Math.min(budget, 50000);
-      if (segs.length && left > 6000) {
-        const t0 = Date.now();
-        const found = await lookupSchedules(segs, left, scheduleCacheAdapter());
-        const stat = applyRealSchedules(input.outline, found);
-        console.log('[generatePlan] 班次专轮：命中 %d 段 / 换 %d 段，用时 %dms',
-          stat ? stat.segments : 0, stat ? stat.replaced : 0, Date.now() - t0);
+    const segs = collectSegments(input.outline);
+    // 没有城际铁路/航班时直接进入细化，避免为纯市内行程白占一轮后台任务。
+    if (!segs.length) {
+      await db.collection(COL_JOB).doc(job._id).update({
+        data: { schedDone: true, updatedAt: Date.now() },
+      }).catch((e) => console.warn('[generatePlan] 班次状态写回失败:', e.message));
+      job.schedDone = true;
+    } else {
+      try {
+        const budget = Math.max(8000, Number(process.env.LLM_SEARCH_BUDGET_MS) || 26000);
+        const left = Math.min(budget, 50000);
+        if (left > 6000) {
+          const t0 = Date.now();
+          const found = await lookupSchedules(segs, left, scheduleCacheAdapter());
+          const stat = applyRealSchedules(input.outline, found);
+          console.log('[generatePlan] 班次专轮：命中 %d 段 / 换 %d 段，用时 %dms',
+            stat ? stat.segments : 0, stat ? stat.replaced : 0, Date.now() - t0);
+        }
+      } catch (e) {
+        console.warn('[generatePlan] 班次检索整体失败，沿用模型编排:', e.message);
       }
-    } catch (e) {
-      console.warn('[generatePlan] 班次检索整体失败，沿用模型编排:', e.message);
-    }
-    const now = Date.now();
-    await db.collection(COL_JOB).doc(job._id).update({
-      data: {
-        // applyRealSchedules 原地改写了 outline（day.sched / moves 时刻），要写回
-        'input.outline': input.outline,
-        schedDone: true,
+      const now = Date.now();
+      await db.collection(COL_JOB).doc(job._id).update({
+        data: {
+          // applyRealSchedules 原地改写了 outline（day.sched / moves 时刻），要写回
+          'input.outline': input.outline,
+          schedDone: true,
+          round: (job.round || 0) + 1,
+          updatedAt: now,
+          leaseUntil: now + JOB_LEASE_MS,
+        },
+      }).catch((e) => console.warn('[generatePlan] 班次写回任务失败:', e.message));
+      job.schedDone = true;
+      return {
+        jobId: job._id,
+        tripId: job.tripId || '',
+        title: job.title || '',
+        status: 'running',
+        partial: true,           // 细化下一轮开始
         round: (job.round || 0) + 1,
-        updatedAt: now,
-        leaseUntil: now + JOB_LEASE_MS,
-      },
-    }).catch((e) => console.warn('[generatePlan] 班次写回任务失败:', e.message));
-    job.schedDone = true;
-    return {
-      jobId: job._id,
-      tripId: job.tripId || '',
-      title: job.title || '',
-      status: 'running',
-      partial: true,           // 细化下一轮开始
-      round: (job.round || 0) + 1,
-      progress: job.progress || { done: 0, total: (input.outline.days || []).length },
-      itemCount: job.itemCount || 0,
-      error: '',
-      version: GEN_VERSION,
-    };
+        progress: job.progress || { done: 0, total: (input.outline.days || []).length },
+        itemCount: job.itemCount || 0,
+        error: '',
+        version: GEN_VERSION,
+      };
+    }
   }
 
   const plan = await buildPlan(payload, payload, {
@@ -500,12 +522,16 @@ async function runJobRound(openid, job) {
 }
 
 // ---------------------------------------------------------------
-// 真实班次缓存：同一条线路（from→to）7 天内不重复联网检索。
+// 真实班次缓存：同一条线路同一天短时不重复联网检索。
 // 「换个方案」现在不限次数了，不缓存的话反复换几次就烧掉一堆检索。
 // ---------------------------------------------------------------
+function schedDocId(key) {
+  return crypto.createHash('sha1').update(String(key), 'utf8').digest('hex');
+}
+
 async function schedCacheGet(key) {
   try {
-    const r = await cloud.database().collection(COL_SCHED).doc(key).get();
+    const r = await cloud.database().collection(COL_SCHED).doc(schedDocId(key)).get();
     const d = r && r.data;
     if (d && d.expireAt > Date.now() && Array.isArray(d.list) && d.list.length) return d.list;
   } catch (e) { /* 没缓存/集合不存在都当没有 */ }
@@ -517,7 +543,7 @@ async function schedCacheSet(key, list) {
     const now = Date.now();
     const db = cloud.database();
     await ensureCollection(db, COL_SCHED);
-    await db.collection(COL_SCHED).doc(key)
+    await db.collection(COL_SCHED).doc(schedDocId(key))
       .set({ data: { list, updatedAt: now, expireAt: now + SCHED_TTL_MS } });
   } catch (e) { console.warn('[generatePlan] 班次缓存写入失败:', e.message); }
 }
@@ -582,7 +608,10 @@ async function createJob(openid, event) {
  */
 async function runDiag(withPing) {
   const llm = require('./llm');
-  const KEYS = ['LLM_PROVIDER', 'LLM_BASE_URL', 'LLM_MODEL', 'LLM_API_KEY', 'AMAP_KEY'];
+  const KEYS = [
+    'LLM_PROVIDER', 'LLM_BASE_URL', 'LLM_MODEL', 'LLM_API_KEY', 'AMAP_KEY',
+    'LLM_ENABLE_SEARCH', 'LLM_SEARCH_CAPABLE',
+  ];
   const env = {};
   KEYS.forEach((k) => { env[k] = !!process.env[k]; });
 
@@ -596,6 +625,7 @@ async function runDiag(withPing) {
     provider: process.env.LLM_PROVIDER || '(未设置)',
     model: cfg ? cfg.model : null,
     baseURL: cfg ? cfg.baseURL : null,
+    searchEnabled: canSearch(),
     cfgError,
     ping: '未探测',
   };

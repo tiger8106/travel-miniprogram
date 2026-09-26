@@ -113,6 +113,14 @@ console.log('== 4. 真实班次（联网检索） ==');
   ok('脏数据被洗掉、时刻补零、按出发时间排序',
     cleaned.length === 2 && cleaned[0].code === 'G100' && cleaned[0].s === '07:05'
       && cleaned[1].code === 'G2249', JSON.stringify(cleaned));
+  const routeCleaned = S.normalizeList([
+    { code: 'G2249', from: 'A站', to: 'B站', s: '08:30', e: '13:20' },
+    { code: 'G2251', from: '别的站', to: 'B站', s: '09:00', e: '14:00' },
+    { code: 'G2252', from: 'A站', to: 'B站', s: '14:00', e: '13:00' },
+    { code: 'G2253', from: '', to: 'B站', s: '15:00', e: '16:00' },
+  ], { from: 'A站', to: 'B站' });
+  ok('带路线校验时拒绝串站、缺站和倒序时刻',
+    routeCleaned.length === 1 && routeCleaned[0].code === 'G2249', JSON.stringify(routeCleaned));
 
   // 4.2 只收集城际段，且同方向只查一次
   const outline = {
@@ -135,6 +143,16 @@ console.log('== 4. 真实班次（联网检索） ==');
   ok('只收集火车/飞机段（市内包车不算）', segs.length === 2, JSON.stringify(segs.map((s) => s.key)));
   ok('往返是两个不同的段（方向不同）',
     segs[0].key !== segs[1].key, segs.map((s) => s.key).join(' / '));
+  const sameRouteDifferentDates = P.collectSegments({
+    days: [
+      { date: '2026-12-20', moves: [{ from: 'A站', to: 'B站', mode: 'train' }] },
+      { date: '2026-12-21', moves: [{ from: 'A站', to: 'B站', mode: 'train' }] },
+    ],
+  });
+  ok('同线路不同日期分开检索和缓存',
+    sameRouteDifferentDates.length === 2
+      && sameRouteDifferentDates[0].scheduleKey !== sameRouteDifferentDates[1].scheduleKey,
+    JSON.stringify(sameRouteDifferentDates));
 
   // 4.3 写回大纲：挑离原意最近的那一班，车站对得上才改站名
   const found = new Map([
@@ -156,13 +174,14 @@ console.log('== 4. 真实班次（联网检索） ==');
   ok('标记了来源，前端才能写"已核对"',
     outline.days[0].moves[0].schedSource === 'search', outline.days[0].moves[0].schedSource);
 
-  // 4.4 检索结果串到别的城市时：只改车次时刻，不改车站
+  // 4.4 检索结果串到别的城市时：整条候选丢弃，不能把错车次写进攻略
   const o2 = { days: [{ moves: [{ from: '甲城站', to: '乙城站', mode: 'train', code: 'G1', startTime: '08:00', endTime: '12:00' }], sched: [] }] };
   P.applyRealSchedules(o2, new Map([['甲城站→乙城站', [
     { code: 'G7777', from: '完全不相干的站', to: '另一个站', s: '08:00', e: '12:00' },
   ]]]));
-  ok('车站对不上时只换车次和时刻，不乱改地名',
-    o2.days[0].moves[0].code === 'G7777' && o2.days[0].moves[0].from === '甲城站',
+  ok('车站对不上时不写入车次、不乱改地名',
+    o2.days[0].moves[0].code === 'G1' && o2.days[0].moves[0].from === '甲城站'
+      && !o2.days[0].moves[0].schedSource,
     JSON.stringify(o2.days[0].moves[0]));
 
   // 4.5 细化兜底：模型自创了候选里没有的车次 → 拽回真实班次
@@ -182,6 +201,20 @@ console.log('== 4. 真实班次（联网检索） ==');
   ok('本来就在候选里的不动、并标记已核对',
     /G2251/.test(fixed[1].activity) && fixed[1].schedSource === 'search', fixed[1].activity);
   ok('拽回后时刻与检索结果一致', fixed[0].startTime === '08:30', fixed[0].startTime);
+
+  const envBackup = {};
+  ['LLM_PROVIDER', 'LLM_BASE_URL', 'LLM_ENABLE_SEARCH', 'LLM_SEARCH_CAPABLE'].forEach((k) => {
+    envBackup[k] = process.env[k];
+    delete process.env[k];
+  });
+  process.env.LLM_PROVIDER = 'deepseek';
+  ok('不确认支持联网的端点不标记班次已核对', !S.canSearch());
+  process.env.LLM_SEARCH_CAPABLE = '1';
+  ok('自定义端点明确声明联网能力后才开启检索', S.canSearch());
+  Object.keys(envBackup).forEach((k) => {
+    if (envBackup[k] === undefined) delete process.env[k];
+    else process.env[k] = envBackup[k];
+  });
 }
 
 console.log(`\n通过 ${pass} 项，失败 ${fail} 项\n`);

@@ -269,10 +269,10 @@ async function caseK() {
   ok(c && c.lon === 110.29, '没城市信息时仍按老行为返回第一个结果', c);
 
   const d = await caseD();
-  ok(d && d.lon === 108.42, '跨城终点「南宁东站」能定位（城市已按地址修正）', d);
+  ok(d && d.lon === 108.42 && d.city === '南宁', '跨城终点「南宁东站」能定位并回传具体城市', d);
 
   const e = await caseE();
-  ok(e && e.lon === 108.42, '整行程 region 串：跨城段靠多城市词表命中（首页翻车场景）', e);
+  ok(e && e.lon === 108.42 && e.city === '南宁', '整行程 region 串：跨城段命中后不回传省级/上级城市', e);
 
   const f = await caseF();
   ok(f === null, '脏城市值洗成「阳朔」后仍坚持拒绝错城坐标（宁缺毋错）', f);

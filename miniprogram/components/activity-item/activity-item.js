@@ -80,7 +80,7 @@ Component({
     categoryOptions: CATEGORY_OPTIONS,
     showDel: false, // 删除确认弹层
     navLegs: [],    // 导航段列表：[{ from, to, lat, lon }]，有中间点时一段一个按钮
-    schedTip: '',   // 火车/飞机条目的"班次仅供参考"提示（生成端拿不到实时时刻表）
+    schedTip: '',   // 火车/飞机条目的班次来源提示
   },
 
   observers: {
@@ -100,17 +100,16 @@ Component({
   methods: {
     noop() {},
 
-    // 火车/飞机大交通条目统一标注：班次号与时刻由 AI 按典型走向编排，
-    // 拿不到 12306/航司实时数据，可能与现实有出入（免得用户拿行程去赶车被放鸽子）
+    // 没有通过真实候选校验的班次只能作为 AI 参考，避免用户拿行程去赶车被放鸽子。
     schedTip(item) {
       if (!item || item.category !== 'transport') return '';
       const t = String(item.transportType || '').toLowerCase();
       const act = String(item.activity || '');
-      // 生成时联网核对过的班次，说法要不一样：用户看到"已核对"才敢照着买票
+      // 通过出发站、到达站、日期和时刻校验的候选，提示用户仍以官方售票结果为准。
       const verified = item.schedSource === 'search';
       if (t === 'train' || /高铁|动车|火车|列车|城际/.test(act)) {
         return verified
-          ? '🚄 班次已联网检索核对，仍建议购票前在 12306 复核（运行图可能临时调整）'
+          ? '🚄 已按出行日期联网检索候选，购票前请以 12306 显示的车次和时刻为准'
           : '🚄 班次与时刻为 AI 参考编排，乘车前请在 12306 核实实际车次与时刻';
       }
       if (t === 'plane' || /航班|飞机|航站楼/.test(act)) {

@@ -13,7 +13,7 @@
 // 设计原则（通用，不认任何具体地名/线路）：
 //   · 只按"出发地 + 目的地 + 日期"去查，判据与具体城市无关；
 //   · 查不到 / 超时 / 报错 → 一律降级为"没查到"，沿用模型自己的编排，绝不硬塞；
-//   · 结果按 from|to 缓存 7 天（换方案反复生成同一条线时不用重复烧检索）。
+//   · 结果按 from|to|date 缓存短时（同一天反复生成不用重复烧检索，换日期不会串数据）。
 
 const { chat, parseJSONFromText } = require('./llm');
 
@@ -32,6 +32,23 @@ function segKey(from, to) {
 }
 
 /**
+ * 车站名称归一化：只去掉行政/枢纽写法差异，不把「北/南/东/西」去掉。
+ * 「成都东站」和「成都东」可以视为同一站；「成都东」和「成都南」不能混用。
+ */
+function stationKey(name) {
+  return norm(name)
+    .replace(/[（(][^）)]*[）)]/g, '')
+    .replace(/(?:高铁|动车|火车|铁路)?站$/, '')
+    .replace(/市$/, '');
+}
+
+function sameStation(a, b) {
+  const x = stationKey(a);
+  const y = stationKey(b);
+  return !!x && !!y && x === y;
+}
+
+/**
  * 缓存键必须带日期：同一线路不同日期的开行方案不一样（临客、调图、
  * 不是每天都跑的车次），不带日期会把 A 日期查到的结果套给 B 日期，
  * 用户一对照 12306 就是"车次对不上"。TTL 也因此只有 36 小时。
@@ -47,7 +64,7 @@ function padTime(t) {
 }
 
 /** 把模型返回的条目洗成可信的样子：时刻不合法 / 车次号不成型的一律丢掉 */
-function normalizeList(parsed) {
+function normalizeList(parsed, segment) {
   const raw = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.list) ? parsed.list : null);
   if (!raw) return [];
   const out = [];
@@ -60,7 +77,12 @@ function normalizeList(parsed) {
     if (!code || !CODE_RE.test(code)) return;   // 车次号不成型 → 宁可不要
     const from = String(it.from || it.f || '').trim();
     const to = String(it.to || it.t || '').trim();
-    if (from.length > 20 || to.length > 20) return;
+    // 没有两端站名就无法证明这条候选属于当前路线，宁可降级为 AI 参考。
+    if (!from || !to || from.length > 20 || to.length > 20) return;
+    if (segment && (!sameStation(from, segment.from) || !sameStation(to, segment.to))) return;
+    // 高铁/动车的跨日结果没有日期上下文，且 e<=s 时很容易是模型把路线串错；
+    // 这里只收同日正向时刻，避免把错误候选写进攻略。
+    if (e <= s) return;
     out.push({ code, from, to, s, e });
   });
   // 按出发时间从早到晚
@@ -98,9 +120,23 @@ async function lookupOne(seg, timeoutMs) {
     [{ role: 'system', content: SYS }, { role: 'user', content: promptOf(seg) }],
     { maxTokens: 1200, timeoutMs: Math.max(6000, Math.min(25000, timeoutMs)), enableSearch: true },
   );
-  const list = normalizeList(parseJSONFromText(text));
+  const list = normalizeList(parseJSONFromText(text), seg);
   console.log('[generatePlan.schedule] 检索 %s→%s 得到 %d 个候选', seg.from, seg.to, list.length);
   return list;
+}
+
+/**
+ * 只有明确支持 DashScope 联网搜索的端点才允许进入“已检索”链路。
+ * 其他兼容 OpenAI 的端点会忽略 enable_search，继续用模型记忆作答，
+ * 但旧代码会把这类结果误标成已核对，正是车次全错却看起来像联网的原因。
+ */
+function canSearch() {
+  if (process.env.LLM_ENABLE_SEARCH === '0') return false;
+  if (process.env.LLM_SEARCH_CAPABLE === '1') return true;
+  const provider = String(process.env.LLM_PROVIDER || '').toLowerCase();
+  const base = String(process.env.LLM_BASE_URL || '').toLowerCase();
+  return (provider === 'qwen' && (!base || base.indexOf('dashscope') >= 0))
+    || base.indexOf('dashscope') >= 0;
 }
 
 /**
@@ -108,10 +144,14 @@ async function lookupOne(seg, timeoutMs) {
  * @param {Array} segments  [{ from, to, date, modeHint }]
  * @param {number} deadlineMs 还剩多少毫秒可以用
  * @param {object} cache 可选 { get(key), set(key, list) }
- * @returns {Map<string, Array>} key = "出发地→目的地"
+ * @returns {Map<string, Array>} key = cacheKeyOf({ from, to, date })
  */
 async function lookupSchedules(segments, deadlineMs, cache) {
   const found = new Map();
+  if (!canSearch()) {
+    console.warn('[generatePlan.schedule] 当前 LLM 端点不确认支持联网搜索，跳过班次检索');
+    return found;
+  }
   const uniq = new Map();
   (segments || []).forEach((s) => {
     if (!s || !norm(s.from) || !norm(s.to)) return;
@@ -126,25 +166,31 @@ async function lookupSchedules(segments, deadlineMs, cache) {
   const setter = cache && typeof cache.set === 'function' ? cache.set : null;
 
   const todo = [];
-  for (const [k, seg] of uniq.entries()) {
+  // 缓存读取也并发：同一轮有多段跨城交通时，不让数据库查询逐段排队。
+  const cacheResults = await Promise.all([...uniq.entries()].map(async ([k, seg]) => {
     if (getter) {
       const hit = await getter(k).catch(() => null);
-      if (hit && hit.length) { found.set(segKey(seg.from, seg.to), hit); continue; }
+      const cleanHit = normalizeList(hit, seg);
+      if (cleanHit.length) {
+        found.set(k, cleanHit);
+        return null;
+      }
     }
-    todo.push([k, seg]);
-  }
+    return [k, seg];
+  }));
+  cacheResults.forEach((x) => { if (x) todo.push(x); });
   if (!todo.length) return found;
 
   // 时间不够就少查几段：查 1 段真实信息，好过 4 段都超时拿不到
-  const each = Math.max(6000, Math.floor((deadlineMs - 1500) / Math.max(1, todo.length)));
-  let budget = deadlineMs;
+  // 这些请求是并发的，单次预算不应再按段数相加；旧算法在 4 段线路时
+  // 把每次请求压到约 6 秒，联网搜索几乎必然超时，随后整份攻略又退回模型记忆。
+  const each = Math.max(9000, Math.min(18000,
+    Math.floor((deadlineMs - 1500) / Math.max(1, Math.min(todo.length, 2)))));
   await Promise.all(todo.map(async ([k, seg]) => {
-    if (budget < 5000) return;
-    const t0 = Date.now();
     try {
-      const list = await lookupOne(seg, Math.min(each, budget - 1000));
+      const list = await lookupOne(seg, each);
       if (list.length) {
-        found.set(segKey(seg.from, seg.to), list);
+        found.set(k, list);
         if (setter) setter(k, list).catch(() => {});
       }
     } catch (e) {
@@ -152,9 +198,8 @@ async function lookupSchedules(segments, deadlineMs, cache) {
       // 安静降级，代码会退回"让模型自己编排 + 前端标注仅供参考"
       console.warn('[generatePlan.schedule] %s 检索失败，本次沿用模型编排:', k, e.message);
     }
-    budget -= (Date.now() - t0);
   }));
   return found;
 }
 
-module.exports = { lookupSchedules, normalizeList, segKey, cacheKeyOf, padTime };
+module.exports = { lookupSchedules, normalizeList, segKey, cacheKeyOf, padTime, stationKey, sameStation, canSearch };

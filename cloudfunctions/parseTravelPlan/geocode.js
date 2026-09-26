@@ -506,7 +506,21 @@ async function geocodeOne(address, city, deadlineAt) {
   const strict = (r) => cityHit(fullCity, r.hay) && selfHit(r.hay) && levelOk(r) && geoOk(r);
   // 命中的是哪个候选城市（回传给调用方记进 item.city，下次实时定位直接用对城市）
   const tagTokens = [...tokens, ...addrCities];
-  const cityTagOf = (hay) => tagTokens.find((t) => String(hay || '').indexOf(t) >= 0) || '';
+  const cityTagOf = (hay) => {
+    const h = String(hay || '');
+    const hits = tagTokens.filter((t) => t && h.indexOf(t) >= 0);
+    hits.sort((a, b) => {
+      const aAddr = addrCities.includes(a) ? 1 : 0;
+      const bAddr = addrCities.includes(b) ? 1 : 0;
+      const aProv = PROVINCE_NAMES.has(a) ? 1 : 0;
+      const bProv = PROVINCE_NAMES.has(b) ? 1 : 0;
+      // 地址自身带出的市/县优先，其次优先具体城市、较长词；
+      // 这样「广西 桂林 阳朔」命中阳朔时不会被省名或上级城市抢走。
+      return (bAddr - aAddr) || (aProv - bProv) || (b.length - a.length)
+        || (tagTokens.lastIndexOf(b) - tagTokens.lastIndexOf(a));
+    });
+    return hits[0] || '';
+  };
 
   // 最后兜底的强名称匹配（不校验城市，见函数头注释 ⑧）。
   // ⚠️ 门槛：只对「无类别尾缀的独特地名」（金童路一奥天地）或

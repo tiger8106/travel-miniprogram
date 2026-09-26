@@ -19,7 +19,7 @@ const COL_TASK = 'parse_tasks';
 const GEOCODE_DEADLINE_MS = 35 * 1000;
 
 // 解析引擎版本：返回给前端展示，用于确认线上跑的是不是最新代码
-const PARSE_VERSION = 'v3.7-quota';
+const PARSE_VERSION = 'v3.8-geo-city';
 
 /**
  * 调额度中心（quota 云函数）。

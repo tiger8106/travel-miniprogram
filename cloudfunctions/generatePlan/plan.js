@@ -18,6 +18,7 @@ const llm = require('./llm');
 const { parseJSONFromText, asArray, SYS_PROMPT } = require('./llm');
 const { sanitizeItems, META_PAT, META_HARD } = require('./normalize');
 const { parseCnTime, tsToDateStr, tsToCnDateTimeStr } = require('./cn-time');
+const { cacheKeyOf: scheduleKeyOf, sameStation } = require('./schedule');
 
 const MAX_DAYS = 12;
 const DAY_MS = 86400000;
@@ -501,6 +502,10 @@ function transportCodeOf(it) {
   const m = /\b([A-Za-z]{1,2}\d{2,4})\b(?!\s*(?:号线|航站楼|号航站楼|站台))/
     .exec(`${it.activity || ''}${it.note || ''}`);
   return m ? m[1].toUpperCase() : '';
+}
+
+function escapeRegExp(s) {
+  return String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**
@@ -1652,7 +1657,9 @@ async function genDayItems(p, outline, opts = {}) {
     const perDay = lastCost
       ? Math.min(Math.ceil((lastCost / prevWave) * 1.2), 15 * 1000)
       : FIRST_PER_DAY_ESTIMATE;
-    const estimate = perDay * batch.length;
+    // batch 内请求是 Promise.all 并发，估算应接近最慢的一天；按天数相加会让
+    // 4 天首批在剩余 38 秒时被误判为 34 秒甚至更高，提前少跑一波。
+    const estimate = perDay + 1000;
     if (Date.now() + estimate > deadline) {
       console.log('[generatePlan] 时间预算不足，停止在已完成部分（续跑）: 已完成=%d 剩余=%d',
         finished.length, pending.length - finished.length - failed.length);
@@ -2100,11 +2107,17 @@ function collectSegments(outline) {
   asArray(outline && outline.days).forEach((d, di) => {
     asArray(d && d.moves).forEach((m) => {
       if (!isIntercityMove(m)) return;
-      const key = `${String(m.from).trim()}→${String(m.to).trim()}`;
+      const from = String(m.from).trim();
+      const to = String(m.to).trim();
+      const date = d.date || '';
+      const routeKey = `${from}→${to}`;
+      const key = scheduleKeyOf({ from, to, date });
       if (!seen.has(key)) {
         seen.set(key, {
-          key, from: String(m.from).trim(), to: String(m.to).trim(),
-          date: d.date || '', mode: String(m.mode || '').toLowerCase(),
+          key: routeKey,
+          scheduleKey: key,
+          from, to, date,
+          mode: String(m.mode || '').toLowerCase(),
         });
       }
     });
@@ -2112,7 +2125,7 @@ function collectSegments(outline) {
   return [...seen.values()];
 }
 
-/** 两个地名是否有 ≥2 字的公共片段（"桂林西" vs "桂林北" 共享"桂林"） */
+/** 保留旧版测试/调试使用的地名词干比较；真实班次回写使用 sameStation 严格校验。 */
 function shareStem(a, b) {
   const x = String(a || '');
   const y = String(b || '');
@@ -2142,31 +2155,45 @@ function pickSchedule(list, wantTime) {
 
 /**
  * 把检索到的真实班次写回大纲。
- * 只认"同一段"的候选：站名要能对得上（共享 ≥2 字片段）才连车站一起改，
- * 否则只改车次号和时刻 —— 免得检索结果串到别的城市去把行程搞乱。
+ * 只认"同一段"的候选：出发站和到达站都要经过 sameStation 校验，
+ * 不满足时整条候选丢弃，避免把串线车次写进攻略。
  */
 function applyRealSchedules(outline, found) {
   if (!found) return null;
   const get = (k) => (found.get ? found.get(k) : found[k]);
+  const routeKeyOf = (from, to) => `${String(from || '').trim()}→${String(to || '').trim()}`;
+  const listFor = (day, move) => {
+    const from = String(move.from || '').trim();
+    const to = String(move.to || '').trim();
+    const date = String(day.date || '').trim();
+    // 新格式按日期隔离；保留 route-only 回退，兼容本地测试和旧缓存适配器。
+    return get(scheduleKeyOf({ from, to, date })) || get(routeKeyOf(from, to));
+  };
+  const routeMatch = (list, move) => asArray(list).filter((c) =>
+    c && sameStation(c.from, move.from) && sameStation(c.to, move.to));
   let hit = 0;
   let replaced = 0;
   asArray(outline && outline.days).forEach((d) => {
     asArray(d && d.moves).forEach((m) => {
-      const list = get(`${String(m.from).trim()}→${String(m.to).trim()}`);
+      const list = routeMatch(listFor(d, m), m);
       if (!list || !list.length) return;
       hit += 1;
-      d.sched = list.slice(0, 8);        // 候选列表带给细化阶段，让模型照着挑
+      // 一天可能有两段铁路交通，候选不能被后一个 move 覆盖。
+      m.sched = list.slice(0, 8);
+      d.sched = asArray(d.sched).concat(list)
+        .filter((c, i, all) => all.findIndex((x) =>
+          x.code === c.code && x.s === c.s && x.e === c.e
+          && sameStation(x.from, c.from) && sameStation(x.to, c.to)) === i)
+        .slice(0, 16);
       const pick = pickSchedule(list, m.startTime);
       if (!pick) return;
       if (m.code !== pick.code || m.startTime !== pick.s) replaced += 1;
       m.code = pick.code;
       m.startTime = pick.s;
       m.endTime = pick.e;
-      // 车站只在"对得上"时才改：检索结果串到别的城市的话宁可不改
-      if (pick.from && pick.to && shareStem(pick.from, m.from) && shareStem(pick.to, m.to)) {
-        m.from = pick.from;
-        m.to = pick.to;
-      }
+      // routeMatch 已经要求出发站/到达站分别对得上，这里才允许采用官方结果的标准站名。
+      m.from = pick.from;
+      m.to = pick.to;
       m.schedSource = 'search';
     });
   });
@@ -2176,33 +2203,56 @@ function applyRealSchedules(outline, found) {
 
 /**
  * 细化结果兜底：当天写出了班次，但没落在检索到的候选里 → 拽回真实候选。
- * 判据与具体地名无关：只看"这一天的交通条目车次号在不在候选集合里"。
+ * 优先按起终点把候选绑定到具体 move；只有一天只有一段铁路交通时才回退到整天候选。
  */
 function enforceRealSchedule(items, outline) {
   const days = asArray(outline && outline.days);
   if (!days.length || !asArray(items).length) return items;
   const out = items.slice();
+  const listForItem = (day, item) => {
+    const moves = asArray(day && day.moves).filter((m) => asArray(m && m.sched).length);
+    if (item.startLocation && item.endLocation) {
+      const matchedMove = moves.find((m) => sameStation(m.from, item.startLocation)
+        && sameStation(m.to, item.endLocation));
+      if (matchedMove) return asArray(matchedMove.sched);
+    }
+    // 模型有时漏填起点；若这天只有一段真实铁路交通，仍可安全使用这组候选。
+    if (moves.length === 1) return asArray(moves[0].sched);
+    // 多段铁路交通但条目没有起终点时，不能把另一段的车次套过来，宁可保留 AI 参考。
+    return moves.length ? [] : asArray(day && day.sched);
+  };
+  const rewriteActivity = (item, pick, oldCode) => {
+    let act = String(item.activity || '');
+    if (oldCode) act = act.replace(new RegExp(escapeRegExp(oldCode), 'i'), pick.code);
+    if (/^\s*\d{1,2}:\d{2}/.test(act)) act = act.replace(/^\s*\d{1,2}:\d{2}/, pick.s);
+    if (!act.includes(pick.code)) act = `乘 ${pick.code} 次列车从${pick.from}前往${pick.to}`;
+    return act;
+  };
   days.forEach((day, di) => {
-    const list = asArray(day && day.sched);
-    if (!list.length) return;
-    const codes = new Set(list.map((c) => String(c.code || '').toUpperCase()));
     out.forEach((it) => {
       if (Number(it.dayIndex || 0) !== di) return;
       if (String(it.category || '') !== 'transport') return;
+      const list = listForItem(day, it);
+      if (!list.length) return;
       const code = transportCodeOf(it);
-      if (!code || codes.has(code)) {
-        if (code && codes.has(code)) it.schedSource = 'search';
-        return;
-      }
-      // 模型自创了一个候选里没有的车次 → 换成时刻最接近的那一班
-      const pick = pickSchedule(list, it.startTime);
+      // 有真实候选时，即使模型挑中了正确车次，也要把发到时刻按候选纠正。
+      const exact = code && list.find((c) => String(c.code || '').toUpperCase() === code);
+      const pick = exact || pickSchedule(list, it.startTime);
       if (!pick) return;
       const old = code;
-      it.activity = String(it.activity || '').replace(new RegExp(`\\b${old}\\b`, 'i'), pick.code);
-      if (toMin(it.startTime) != null) it.startTime = pick.s;
-      if (toMin(it.endTime) != null) it.endTime = pick.e;
+      if (!exact || code !== pick.code || it.startTime !== pick.s || it.endTime !== pick.e) {
+        it.activity = rewriteActivity(it, pick, old);
+        it.startTime = pick.s;
+        it.endTime = pick.e;
+      } else if (!String(it.activity || '').includes(pick.code)) {
+        it.activity = rewriteActivity(it, pick, old);
+      }
+      it.startLocation = pick.from;
+      it.endLocation = pick.to;
       it.schedSource = 'search';
-      console.warn('[generatePlan] 第%d天车次 %s 不在联网检索结果里，拽回真实班次 %s', di + 1, old, pick.code);
+      if (!exact) {
+        console.warn('[generatePlan] 第%d天车次 %s 不在联网检索结果里，拽回真实班次 %s', di + 1, old || '(缺失)', pick.code);
+      }
     });
   });
   return out;
