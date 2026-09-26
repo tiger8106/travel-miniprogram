@@ -48,6 +48,9 @@ const MP_SECRET = String(process.env.MP_APPSECRET || '');
 
 function paySig(uri, body) { return S.paySig(APP_KEY, uri, body); }
 function userSig(sessionKey, body) { return S.userSig(sessionKey, body); }
+// 带显式 key 的版本：iOS 自动切现网时用（全局 APP_KEY 还是沙箱的）
+function paySigWith(key, uri, body) { return S.paySig(key, uri, body); }
+function userSigWith(sessionKey, body) { return S.userSig(sessionKey, body); }
 function genOutTradeNo() { return S.genOutTradeNo(); }
 
 // ============================================================
@@ -252,7 +255,22 @@ async function actionCreateOrder(openid, event) {
   const g = R.goodsById(goodsId);
   if (!g) return { code: -1, msg: `未知商品：${goodsId}` };
   if (!OFFER_ID) return { code: -2, msg: '未配置 XPAY_OFFER_ID（云函数环境变量）' };
-  if (!APP_KEY) return { code: -2, msg: ENV === 1 ? '未配置沙箱 AppKey（XPAY_APP_KEY_SANDBOX）' : '未配置现网 AppKey（XPAY_APP_KEY）' };
+
+  // iOS 没有沙箱（沙箱支付只给安卓自测用，iOS 调了必报 PAYMENT_ILLEGAL_IN_SANDBOX）。
+  // 所以云端配了 XPAY_ENV=1（安卓沙箱自测）时，iOS/开发者工具的订单自动切**现网**签名；
+  // 现网 AppKey 没配就明确报错，别让用户对着"支付没走成"猜。
+  let env = ENV;
+  let appKey = APP_KEY;
+  const platform = String(event.platform || '').toLowerCase();
+  if (env === 1 && (platform === 'ios' || platform === 'devtools')) {
+    env = 0;
+    appKey = String(process.env.XPAY_APP_KEY || '');
+    if (!appKey) {
+      return { code: -2, msg: 'iOS 不支持沙箱支付：请在云函数 virtualPay 配置现网 AppKey（XPAY_APP_KEY），或把 XPAY_ENV 改回 0' };
+    }
+    console.log('[virtualPay] %s 设备下单自动切现网（沙箱仅安卓可测）', platform);
+  }
+  if (!appKey) return { code: -2, msg: env === 1 ? '未配置沙箱 AppKey（XPAY_APP_KEY_SANDBOX）' : '未配置现网 AppKey（XPAY_APP_KEY）' };
 
   // session_key：用前端传来的 code 换（wx.login），存 users 表供后续下单复用
   let sessionKey = '';
@@ -296,7 +314,7 @@ async function actionCreateOrder(openid, event) {
   const outTradeNo = genOutTradeNo();
   // 字段顺序固定：签名按这个串算，前端必须原样传
   const signData = S.buildSignData({
-    offerId: OFFER_ID, buyQuantity: 1, env: ENV,
+    offerId: OFFER_ID, buyQuantity: 1, env,
     productId: g.id, goodsPrice: g.price, outTradeNo, attach: openid,
   });
 
@@ -307,7 +325,8 @@ async function actionCreateOrder(openid, event) {
       outTradeNo,
       goodsId: g.id,
       price: g.price,
-      env: ENV,
+      env,
+      platform: platform || '',
       status: 'created',
       createdAt: Date.now(),
     },
@@ -317,10 +336,10 @@ async function actionCreateOrder(openid, event) {
     code: 0,
     data: {
       signData,
-      paySig: paySig('requestVirtualPayment', signData),
-      signature: userSig(sessionKey, signData),
+      paySig: paySigWith(appKey, 'requestVirtualPayment', signData),
+      signature: userSigWith(sessionKey, signData),
       mode: 'short_series_goods',
-      env: ENV,
+      env,
       outTradeNo,
     },
   };

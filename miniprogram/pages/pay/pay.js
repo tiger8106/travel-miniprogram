@@ -8,6 +8,7 @@
 
 const quota = require('../../utils/quota');
 const auth = require('../../utils/auth');
+const env = require('../../utils/env');
 
 Page({
   data: {
@@ -18,6 +19,7 @@ Page({
     inputCode: '',
     loading: true,
     loggedIn: false,
+    devMode: false,     // 开发者功能解锁时显示"补测试额度"（连点关于 5 次解锁）
   },
 
   async onLoad() {
@@ -31,7 +33,7 @@ Page({
 
   async refresh() {
     const logged = auth.isLoggedIn();
-    this.setData({ loggedIn: logged, loading: true });
+    this.setData({ loggedIn: logged, loading: true, devMode: env.isDevToolsUnlocked() });
     if (!logged) {
       this.setData({ loading: false });
       return;
@@ -124,6 +126,24 @@ Page({
       wx.showToast({ title: '同步失败，请稍后再试', icon: 'none' });
     }
     this.refresh();
+  },
+
+  /** 开发者补测试额度：云端 QUOTA_DEV_GRANT=1 才生效，正式环境点了只会收到明确提示 */
+  async onDevGrant() {
+    wx.showLoading({ title: '补额度中…', mask: true });
+    try {
+      const r = await quota.devGrant();
+      wx.hideLoading();
+      if (r && r.code === 0) {
+        wx.showToast({ title: '已补 3 次', icon: 'success' });
+        this.refresh();
+      } else {
+        wx.showToast({ title: ((r && r.msg) || '没补上').slice(0, 30), icon: 'none' });
+      }
+    } catch (e) {
+      wx.hideLoading();
+      wx.showToast({ title: (e && e.message || '补额度失败').slice(0, 30), icon: 'none' });
+    }
   },
 
   // ---------- 邀请 ----------

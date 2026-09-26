@@ -2338,10 +2338,21 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
   // 提醒全靠代码补。现在跟细化同时发起，它们能用满整轮的时间预算。
   // 中途返回 partial 时这些 Promise 会被放弃（云函数进程随即回收），不影响结果。
   const sideDeadline = hardDeadline - 4 * 1000;
-  const alarmsPromise = genAlarms(p, outline, sideDeadline)
-    .catch((e) => { console.error('[generatePlan] 闹钟生成失败:', e.message); return null; });
-  const suggPromise = genSuggestions(p, outline, sideDeadline)
-    .catch((e) => { console.error('[generatePlan] 建议生成失败:', e.message); return {}; });
+  // 闹钟/建议**只在「大概率是最后一轮」时才发起**：它们的结果只有最后一轮会落库，
+  // 中间轮次提前跑纯属白烧（还跟细化抢模型的并发名额，让每轮能细化的天数变少 →
+  // 轮数变多 → 整体更慢，8 天行程实测慢了一大截）。判据是通用的：剩余 ≤3 天
+  // 就当最后一轮；预判失误（这轮提前跑完）就在收尾时用剩余时间补排一次。
+  const totalDays = asArray(outline.days).length;
+  const doneBefore = (opts.doneDayIndexes || []).length;
+  const likelyFinal = totalDays - doneBefore <= 3;
+  const alarmsPromise = likelyFinal
+    ? genAlarms(p, outline, sideDeadline)
+        .catch((e) => { console.error('[generatePlan] 闹钟生成失败:', e.message); return null; })
+    : null;
+  const suggPromise = likelyFinal
+    ? genSuggestions(p, outline, sideDeadline)
+        .catch((e) => { console.error('[generatePlan] 建议生成失败:', e.message); return {}; })
+    : Promise.resolve({});
 
   const detail = await genDayItems(p, outline, {
     doneDayIndexes: opts.doneDayIndexes,
@@ -2429,10 +2440,16 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
   // 等闹钟/建议收尾（它们是和细化并行跑的，一般细化结束时也差不多了）。
   // 仍然留 5s 给写库；真没回来就降级走规则兜底 —— 总比整个调用超时失败强。
   const remain = hardDeadline - Date.now() - 5 * 1000; // 再留 5s 给写库
-  const [a, s] = await Promise.all([
-    withTimeout(alarmsPromise, Math.max(1000, remain), null),
+  let [a, s] = await Promise.all([
+    alarmsPromise ? withTimeout(alarmsPromise, Math.max(1000, remain), null) : Promise.resolve(null),
     withTimeout(suggPromise, Math.max(1000, remain), null),
   ]);
+  // 预判失误（这轮提前把剩余天跑完了、但之前没排闹钟）：用剩余时间补排一次，
+  // 补不上再走规则兜底 —— 硬底线提醒（去程/返程票）都在，只是少了体验类提醒
+  if (!a && hardDeadline - Date.now() > 9 * 1000) {
+    a = await genAlarms(p, outline, hardDeadline - 5 * 1000)
+      .catch((e) => { console.warn('[generatePlan] 补排闹钟失败，走规则兜底:', e.message); return null; });
+  }
   // 规则兜底 = 硬底线（去程/返程票、行前准备）+ 查漏补齐（每段城际、每晚住宿）
   const alarms = a || fallbackAlarms(p, outline);
   const suggestions = s || {};

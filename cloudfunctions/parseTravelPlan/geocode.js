@@ -466,7 +466,7 @@ async function geoRaw(address, city) {
  * @param {string} [city]  大地名（可以是「广西 桂林 阳朔 南宁 崇左」整串，
  *                          内部拆成候选城市逐个试）
  */
-async function geocodeOne(address, city) {
+async function geocodeOne(address, city, deadlineAt) {
   if (!AMAP_KEY || !address) return null;
   const raw = String(address).trim();
   // 括号补注（「锦江都城酒店（桂林两江四湖象山景区店）」）常拖垮 POI 搜索，
@@ -580,6 +580,12 @@ async function geocodeOne(address, city) {
 
   let fallback = null;
   for (let i = 0; i < steps.length; i++) {
+    // 时间预算用完就收手：地理编码只影响导航坐标（前端有"复制地名/实时定位"兜底），
+    // 绝不能让它把整轮云函数拖到 60s 被杀 —— 那损失的可是整轮已生成的行程
+    if (deadlineAt && Date.now() > deadlineAt) {
+      console.warn('[geocode] 时间预算用完，放弃「%s」剩余 %d 个策略', raw, steps.length - i);
+      break;
+    }
     const tag = steps[i][0];
     const list = await steps[i][1]();
     // 同一步可能回来多条城市也对的候选：按名称匹配强度择优，不取第一条
@@ -605,8 +611,13 @@ async function geocodeOne(address, city) {
  * 批量地理编码（并发），返回 Map: address -> {lon, lat, matchedName}
  * @param {Array} addresses 地点名列表
  * @param {Function} [cityOf] address -> 大地名（省/市/县），可为空
+ * @param {object} [opts] { deadlineAt: number } 时间硬预算（时间戳）。
+ *   为什么必须有：细化轮 38s + 写库本来就贴着云函数 60s 上限，
+ *   几十个地址逐个十几次高德请求不受管束，直接把整轮顶穿被系统杀掉
+ *   （8 天 98 项行程"本轮执行超时"反复出现的元凶）。超时的地址放弃编码，
+ *   前端导航时会走"复制地名/实时定位"兜底，功能不缺。
  */
-async function geocodeBatch(addresses, cityOf) {
+async function geocodeBatch(addresses, cityOf, opts) {
   const result = new Map();
   if (!AMAP_KEY) {
     console.log('[geocode] 未配置 AMAP_KEY，跳过地理编码');
@@ -614,13 +625,19 @@ async function geocodeBatch(addresses, cityOf) {
   }
   const unique = [...new Set((addresses || []).filter(Boolean))];
   if (!unique.length) return result;
+  const deadlineAt = opts && opts.deadlineAt;
 
-  console.log('[geocode] 开始编码 %d 个地点', unique.length);
+  console.log('[geocode] 开始编码 %d 个地点%s', unique.length,
+    deadlineAt ? `（预算 ${Math.max(0, deadlineAt - Date.now())}ms）` : '');
   // 分批并发：每批 5 个。请求层有 MIN_GAP 限速，批太大也只会在队列里排队。
   const BATCH = 5;
   for (let i = 0; i < unique.length; i += BATCH) {
+    if (deadlineAt && Date.now() > deadlineAt) {
+      console.warn('[geocode] 时间预算用完，剩余 %d 个地点跳过编码', unique.length - i);
+      break;
+    }
     const batch = unique.slice(i, i + BATCH);
-    const coords = await Promise.all(batch.map((addr) => geocodeOne(addr, cityOf ? cityOf(addr) : '')));
+    const coords = await Promise.all(batch.map((addr) => geocodeOne(addr, cityOf ? cityOf(addr) : '', deadlineAt)));
     batch.forEach((addr, j) => {
       if (coords[j]) result.set(addr, coords[j]);
     });

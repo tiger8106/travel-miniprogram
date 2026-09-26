@@ -71,14 +71,14 @@ async function quotaCall(openid, data) {
  *  全国同名地点太多，不带城市可能把"象鼻山"定位到南昌去。
  *  显示名称不受影响：经纬度只用于打开地图，用户看到的还是短地名。
  */
-async function geocodeItems(items, cityOf) {
+async function geocodeItems(items, cityOf, opts) {
   try {
     const addrSet = new Set();
     items.forEach((it) => {
       if (it.startLocation) addrSet.add(it.startLocation);
       if (it.endLocation) addrSet.add(it.endLocation);
     });
-    const coordMap = await geocodeBatch([...addrSet], cityOf);
+    const coordMap = await geocodeBatch([...addrSet], cityOf, opts);
     if (coordMap.size) {
       items.forEach((it) => {
         const s = coordMap.get(it.startLocation);
@@ -145,9 +145,11 @@ async function savePlan(openid, plan, tripId, jobId) {
     // 直接塞给高德 city 参数只会被忽略，不能拿它兜底
     return cityInAddr(addr) || c || firstCity;
   };
-  await geocodeItems(plan.items, cityOf);
-
-  // 首轮颗粒无收（天天都失败）但还要续跑：别先建一个空行程，
+  // 地理编码的时间硬预算：细化轮本来就在云函数 60s 上限边缘跑，
+  // 几十个地址逐个十几次高德请求不设防，整轮就被杀掉重来（反而更慢）。
+  // 没编码上的地点前端导航时会走"复制地名/实时定位"兜底，功能不缺。
+  const geoBudgetMs = Math.max(5000, Math.min(20000, parseInt(process.env.GEOCODE_BUDGET_MS || '', 10) || 12000));
+  await geocodeItems(plan.items, cityOf, { deadlineAt: Date.now() + geoBudgetMs });
   // 等哪一轮真有内容了再建，否则中途放弃会在「我的行程」里留下一条 0 条的空攻略。
   if (!tripId && !plan.items.length && plan.partial) {
     console.log('[generatePlan] 本轮没有新条目，暂不建库，等下一轮续跑');
@@ -606,6 +608,23 @@ exports.main = async (event, context) => {
     if (!jobId) return { code: -1, msg: '缺少 jobId' };
     const job = await loadJob(jobId);
     if (!job || job._openid !== openid) return { code: -1, msg: '任务不存在' };
+    const now0 = Date.now();
+    // 失败任务允许复活：用户在「我的行程」点「继续生成」时再给一次机会。
+    // 已生成的天都在库里，复活接着跑就行；最多复活 2 次、超过 25 分钟不救，
+    // 防止一个死任务被无限重试烧 token。
+    if (job.status === 'failed') {
+      const revivals = Number(job.revivals || 0);
+      const tooOld = job.createdAt && (now0 - job.createdAt > JOB_MAX_AGE_MS);
+      if (revivals >= 2 || tooOld) return { code: 0, data: jobPublic(job, now0) };
+      await cloud.database().collection(COL_JOB).doc(jobId).update({
+        data: {
+          status: 'running', revivals: revivals + 1, error: '',
+          leaseUntil: now0 + JOB_LEASE_MS, updatedAt: now0,
+        },
+      }).catch(() => {});
+      job.status = 'running';
+      console.log('[generatePlan] 任务 %s 复活（第 %d 次）', jobId, revivals + 1);
+    }
     if (job.status !== 'running') return { code: 0, data: jobPublic(job, Date.now()) };
     const now = Date.now();
     // 乐观锁：带 expectRound 说明是"我刚跑完第 n 轮，我要接着跑" ——

@@ -17,6 +17,7 @@ const api = require('../services/api');
 
 const STORE_KEY = 'gen_running_job';
 const MAX_RUN_MS = 12 * 60 * 1000;   // 本客户端最多驱动 12 分钟（防死循环）
+const TIMEOUT_RE = /-504003|-601002|ESOCKETTIMEDOUT|timed out|TIME_LIMIT|执行超时/i;
 
 let state = {
   status: 'idle',      // idle | running | done | failed
@@ -72,13 +73,22 @@ function readJobId() {
 async function pump(jobId, round) {
   let r = { jobId, round, partial: true, status: 'running' };
   const t0 = Date.now();
+  let timeouts = 0;   // 连续超时次数：偶尔一轮被 60s 上限杀掉很正常，歇口气接着跑，
+                      // 任务还在库里（进度已落库），绝不是"失败"——别把用户吓跑
   while (r.status === 'running' && r.partial && Date.now() - t0 < MAX_RUN_MS) {
     let next = null;
     try {
       // expectRound = 乐观锁：这一轮要是被云端 genWorker 抢先跑了，
       // 这里会拿到 busy，本客户端就让路，别两边同时跑同一份行程
       next = await api.resumeGen(jobId, r.round);
+      timeouts = 0;
     } catch (e) {
+      if (TIMEOUT_RE.test((e && e.message) || '') && timeouts < 3) {
+        timeouts += 1;
+        set({ jobId, status: 'running', error: '' });
+        await sleep(6000);
+        continue;
+      }
       set({ status: 'failed', error: e.message || '续跑失败' });
       return r;
     }

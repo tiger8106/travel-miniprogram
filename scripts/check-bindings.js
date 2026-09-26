@@ -608,5 +608,21 @@ ok('gen_jobs / schedule_cache 集合不存在时自动创建（-502005 兜底）
 ok('模拟器不支持虚拟支付有明确提示（不再让用户以为支付坏了）',
   /isDevtools/.test(quotaUtil) && /模拟器不支持虚拟支付/.test(quotaUtil));
 
+ok('iOS 没有沙箱：下单按设备自动切现网（修复 PAYMENT_ILLEGAL_IN_SANDBOX）',
+  /platform === 'ios'/.test(payIdx) && /paySigWith/.test(payIdx)
+    && /SANDBOX/.test(quotaUtil) && /platform: devicePlatform\(\)/.test(quotaUtil));
+
+ok('细化轮时间纪律：地理编码有硬预算（不再顶穿 60s）+ 闹钟/建议只在最后一轮生成',
+  /deadlineAt/.test(genGeoJs) && /GEOCODE_BUDGET_MS/.test(gpIdx)
+    && /likelyFinal/.test(planJs));
+
+ok('生成失败可续：前端超时自动重试（不吓用户）+ 云端 failed 任务可复活',
+  /TIMEOUT_RE/.test(genrunnerJs) && /timeouts/.test(genrunnerJs)
+    && /revivals/.test(gpIdx));
+
+ok('开发者补测试额度有云端开关（QUOTA_DEV_GRANT，默认关死）',
+  /QUOTA_DEV_GRANT/.test(fs.readFileSync(path.join(CF, 'quota/index.js'), 'utf8'))
+    && /devGrant/.test(quotaUtil));
+
 console.log(failed ? `\n${failed} 项失败 ✗` : '\n全部通过 ✓');
 process.exit(failed ? 1 : 0);

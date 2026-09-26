@@ -287,6 +287,26 @@ async function actionBindInvite(openid, event, trusted) {
   };
 }
 
+/**
+ * 开发者补测试额度（开发版/体验版自测用，每次 +3 次）。
+ * 云端开关控制：quota 环境变量 QUOTA_DEV_GRANT=1 才生效 —— 上线自测完把变量删掉
+ * 或改成 0 就彻底关死，不怕前端按钮被人翻出来薅羊毛。
+ */
+async function actionDevGrant(openid) {
+  if (process.env.QUOTA_DEV_GRANT !== '1') {
+    return { code: -1, msg: '未开启开发补额度（需在 quota 云函数环境变量设 QUOTA_DEV_GRANT=1）' };
+  }
+  const u = await ensureUser(openid);
+  const x = R.normalizeUser(u);
+  const patch = { quota: (x.quota || 0) + 3 };
+  await patchUser(u._id, patch);
+  await addLog(openid, `devGrant:${Date.now()}`, 'devGrant', {});
+  return {
+    code: 0,
+    data: Object.assign(publicInfo(Object.assign({}, u, patch), Date.now()), { add: 3 }),
+  };
+}
+
 /** 自检：配额配置、当前用户额度、商品表 */
 async function actionDiag(openid) {
   const u = await ensureUser(openid);
@@ -330,6 +350,7 @@ exports.main = async (event, context) => {
       case 'deliver': return await actionDeliver(openid, event, trusted);
       case 'inviteInfo': return await actionInviteInfo(openid);
       case 'bindInvite': return await actionBindInvite(openid, event, trusted);
+      case 'devGrant': return await actionDevGrant(openid);
       case 'diag': return await actionDiag(openid);
       default: return { code: -1, msg: `未知 action：${action}` };
     }

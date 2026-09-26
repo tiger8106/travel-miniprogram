@@ -92,11 +92,15 @@ function loginCode() {
 }
 
 /** 当前是不是开发者工具/模拟器（虚拟支付只支持真机，模拟器必报 no permission） */
-function isDevtools() {
+function devicePlatform() {
   try {
     const d = wx.getDeviceInfo ? wx.getDeviceInfo() : {};
-    return d.platform === 'devtools';
-  } catch (e) { return false; }
+    return d.platform || '';
+  } catch (e) { return ''; }
+}
+
+function isDevtools() {
+  return devicePlatform() === 'devtools';
 }
 
 /**
@@ -116,13 +120,13 @@ async function pay(goodsId) {
   try {
     const code = await loginCode().catch(() => '');
     try {
-      order = await callFn('virtualPay', { action: 'createOrder', goodsId, code });
+      order = await callFn('virtualPay', { action: 'createOrder', goodsId, code, platform: devicePlatform() });
     } catch (e) {
       // code 是一次性的：偶发失效（并行登录/时钟差）会报"登录态"，换个新 code 重试一次
       if (!/登录态/.test(e.message)) throw e;
       const code2 = await loginCode().catch(() => '');
       if (!code2) throw e;
-      order = await callFn('virtualPay', { action: 'createOrder', goodsId, code: code2 });
+      order = await callFn('virtualPay', { action: 'createOrder', goodsId, code: code2, platform: devicePlatform() });
     }
   } finally {
     wx.hideLoading();
@@ -139,13 +143,17 @@ async function pay(goodsId) {
       success: resolve,
       fail: (err) => {
         const code = err && err.errCode;
+        const raw = (err && err.errMsg) || '';
         if (code === -2) reject(new Error('已取消支付'));
         else if (code === -15007) reject(new Error('登录态过期，请重新进入小程序后重试'));
         else if (code === -15010 || code === -15014) reject(new Error('商品还没发布生效，请稍等 10 分钟再试'));
-        else if (/no permission/i.test((err && err.errMsg) || '')) {
+        else if (/no permission/i.test(raw)) {
           reject(new Error('虚拟支付在当前环境不可用：模拟器不支持支付，请用真机重试；真机仍报错请到小程序后台确认「虚拟支付」权限已开通'));
         }
-        else reject(new Error((err && err.errMsg) || '支付失败'));
+        else if (/SANDBOX|PAYMENT_ILLEGAL/i.test(raw)) {
+          reject(new Error('iOS 不支持沙箱支付：请到云函数 virtualPay 环境变量把 XPAY_ENV 改回 0（新版下单会自动给 iOS 切现网）'));
+        }
+        else reject(new Error(raw || '支付失败'));
       },
     });
   });
@@ -168,6 +176,13 @@ async function syncOrders() {
   return (r.code === 0 && r.data) || { delivered: 0, pending: 0 };
 }
 
+/** 开发者补测试额度（云端 QUOTA_DEV_GRANT=1 才生效；开发/体验自测用） */
+async function devGrant() {
+  const r = await callFn('quota', { action: 'devGrant' });
+  clear();
+  return r;
+}
+
 // ============================================================
 // 邀请
 // ============================================================
@@ -188,5 +203,5 @@ async function bindInvite(code) {
 
 module.exports = {
   info, ensure, ensureOrPay, guideToPay, clear,
-  pay, syncOrders, inviteInfo, bindInvite,
+  pay, syncOrders, inviteInfo, bindInvite, devGrant,
 };
