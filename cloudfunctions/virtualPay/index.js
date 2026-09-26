@@ -148,6 +148,35 @@ function httpsPostJson(url, bodyObj) {
   });
 }
 
+/** GET 一个 JSON 接口（jscode2session 用；失败时 resolve 错误对象，不 reject） */
+function httpsGetJson(url) {
+  return new Promise((resolve) => {
+    https.get(url, (res) => {
+      let buf = '';
+      res.on('data', (c) => { buf += c; });
+      res.on('end', () => {
+        try { resolve(JSON.parse(buf)); } catch (e) { resolve({ errcode: -1, errmsg: `响应不是 JSON：${buf.slice(0, 80)}` }); }
+      });
+    }).on('error', (e) => resolve({ errcode: -1, errmsg: e.message }));
+  });
+}
+
+/**
+ * code 换 session_key。
+ * ⚠️ 不能用 cloud.openapi.auth.code2Session：云调用里没有这个 API（报 -604100 API not found），
+ * 只能拿 MP_APPID/MP_APPSECRET 走 HTTP 直调 sns/jscode2session。
+ */
+async function code2SessionHttp(code) {
+  if (!MP_APPID || !MP_SECRET) {
+    return { errcode: -1, errmsg: '未配置 MP_APPID/MP_APPSECRET（code 换 session_key 只能走 HTTP，云调用没有 code2Session）' };
+  }
+  const url = `https://api.weixin.qq.com/sns/jscode2session?appid=${encodeURIComponent(MP_APPID)}`
+    + `&secret=${encodeURIComponent(MP_SECRET)}&js_code=${encodeURIComponent(code)}&grant_type=authorization_code`;
+  const r = await httpsGetJson(url);
+  if (r && r.session_key) return r;
+  return { errcode: (r && r.errcode) || -1, errmsg: `jscode2session ${JSON.stringify(r).slice(0, 120)}` };
+}
+
 /** 小程序全局 access_token（cgi-bin/token 用 GET） */
 function getAccessToken() {
   if (!MP_APPID || !MP_SECRET) return Promise.resolve('');
@@ -232,20 +261,27 @@ async function actionCreateOrder(openid, event) {
   let code = String(event.code || '');
   let codeErr = '';
   if (code) {
-    try {
-      const r = await cloud.openapi.auth.code2Session({ js_code: code });
-      if (r && r.session_key) {
-        sessionKey = r.session_key;
-        if (me && me._id) {
-          await db.collection('users').doc(me._id)
-            .update({ data: { sessionKey, sessionKeyAt: Date.now() } }).catch(() => {});
-        }
-      } else {
-        codeErr = `code2Session 没返回 session_key（errMsg=${String((r && r.errMsg) || JSON.stringify(r)).slice(0, 120)}）`;
+    // 主通道：HTTP 直调 jscode2session（云调用没有 code2Session，见 code2SessionHttp 注释）
+    let r = await code2SessionHttp(code);
+    if (!r.session_key) {
+      codeErr = r.errmsg || 'code2session 失败';
+      // 备用通道：万一个别环境 openapi 能用（正常会报 -604100，无害）
+      try {
+        const r2 = await cloud.openapi.auth.code2Session({ js_code: code });
+        if (r2 && r2.session_key) r = r2;
+      } catch (e2) {
+        codeErr += `；openapi 也不行（${String(e2.errMsg || e2.errCode || e2.message || e2).slice(0, 60)}）`;
       }
-    } catch (e) {
-      codeErr = String(e.errMsg || e.errCode || e.message || e).slice(0, 120);
-      console.warn('[virtualPay] code2Session 失败:', codeErr);
+    }
+    if (r && r.session_key) {
+      sessionKey = r.session_key;
+      codeErr = '';
+      if (me && me._id) {
+        await db.collection('users').doc(me._id)
+          .update({ data: { sessionKey, sessionKeyAt: Date.now() } }).catch(() => {});
+      }
+    } else {
+      console.warn('[virtualPay] code 换 session_key 失败:', codeErr);
     }
   } else {
     codeErr = '前端没有传 wx.login code';
@@ -369,6 +405,8 @@ function actionDiag() {
   const miss = [];
   if (!OFFER_ID) miss.push('XPAY_OFFER_ID');
   if (!APP_KEY) miss.push(ENV === 1 ? 'XPAY_APP_KEY_SANDBOX' : 'XPAY_APP_KEY');
+  // MP_APPID/SECRET 不只是查单用：下单换 session_key 也靠它（云调用没有 code2Session）
+  if (!MP_APPID || !MP_SECRET) miss.push('MP_APPID / MP_APPSECRET');
   return {
     code: 0,
     data: {
