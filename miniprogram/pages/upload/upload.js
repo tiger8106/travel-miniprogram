@@ -3,6 +3,7 @@ const api = require('../../services/api');
 const auth = require('../../utils/auth');
 const homeCache = require('../../utils/homecache');
 const privacy = require('../../utils/privacy');
+const quota = require('../../utils/quota');
 
 const app = getApp();
 
@@ -185,6 +186,9 @@ Page({
     // 未登录先提醒登录，登录成功后再继续
     const ok = await auth.ensureLogin('上传攻略');
     if (!ok) return;
+    // 解析要跑好几个 LLM，开跑前先确认额度（云端 init 步也会拦一次）
+    const can = await quota.ensureOrPay('parse');
+    if (!can) return;
     this.setData({ uploading: true, progress: 5, errorMsg: '', result: null });
     this._taskState = null; // 新任务从头开始
     try {
@@ -202,6 +206,12 @@ Page({
       const msg = rawMsg.includes('pako') || rawMsg.includes('inflate')
         ? '当前为 mock 模式，docx 解析需要部署云函数才能使用。'
         : rawMsg;
+      // 次数用完/撞限额不是故障，给购买引导而不是丢一句红字
+      if (/次数|额度|上限/.test(msg)) {
+        this.setData({ errorMsg: '' });
+        quota.guideToPay(msg);
+        return;
+      }
       this.setData({ errorMsg: msg });
     } finally {
       this.setData({ uploading: false, parsing: false, progress: 0, stageText: '' });
@@ -293,6 +303,7 @@ Page({
     wx.showToast({ title: '导入成功', icon: 'success' });
     app.globalData.currentTripId = result.tripId;
     homeCache.clear();
+    quota.clear();     // 入库成功云端已扣 1 次，本地额度缓存作废
     setTimeout(() => {
       wx.switchTab({ url: '/pages/index/index' });
     }, 800);

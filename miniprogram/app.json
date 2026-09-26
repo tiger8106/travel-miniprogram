@@ -8,7 +8,8 @@
     "pages/alarm-group/alarm-group",
     "pages/suggestions/suggestions",
     "pages/mine/mine",
-    "pages/mytrips/mytrips"
+    "pages/mytrips/mytrips",
+    "pages/pay/pay"
   ],
   "window": {
     "backgroundTextStyle": "light",

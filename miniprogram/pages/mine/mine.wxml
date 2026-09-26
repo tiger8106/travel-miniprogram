@@ -53,6 +53,13 @@
       </view>
       <text class="text-placeholder">›</text>
     </view>
+    <view class="menu-item" bindtap="onTapPay">
+      <view class="menu-item-left">
+        <text>💳 我的额度</text>
+        <text class="menu-item-sub">{{quotaText}}</text>
+      </view>
+      <text class="text-placeholder">›</text>
+    </view>
   </view>
 
   <view class="card">

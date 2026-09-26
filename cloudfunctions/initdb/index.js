@@ -13,6 +13,9 @@ const COLLECTIONS = [
   { name: 'trips',         desc: '行程主表' },
   { name: 'ticket_alarms', desc: '抢票闹钟' },
   { name: 'suggestions',   desc: '旅行建议' },
+  { name: 'parse_tasks',   desc: '分步解析任务态' },
+  { name: 'orders',        desc: '虚拟支付订单' },
+  { name: 'quota_logs',    desc: '额度流水（扣费幂等用）' },
 ];
 
 exports.main = async (event, context) => {

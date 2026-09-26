@@ -25,7 +25,25 @@ const COL_ALARM = 'ticket_alarms';
 const COL_SUG = 'suggestions';
 
 // 生成引擎版本（用于确认线上跑的是哪一版）
-const GEN_VERSION = 'v1.1-gen';
+const GEN_VERSION = 'v1.2-quota';
+
+/**
+ * 调额度中心（quota 云函数）。
+ * 关键约定：**额度服务不可用时一律放行** —— 它挂了最多少收一次钱，
+ * 绝不能让用户连行程都生成不了（宁可漏收，不可误伤）。
+ */
+async function quotaCall(openid, data) {
+  try {
+    const res = await cloud.callFunction({
+      name: 'quota',
+      data: Object.assign({ openid }, data),
+    });
+    return (res && res.result) || {};
+  } catch (e) {
+    console.warn('[generatePlan] 额度服务不可用，本次不计费:', e.message);
+    return {};
+  }
+}
 
 /** 给一批条目补经纬度（供 wx.openLocation 打开微信原生地图）
  *  cityOf(address)：返回该地点所属的城市，帮高德消歧——
@@ -305,6 +323,10 @@ exports.main = async (event, context) => {
 
   // ② 阶段一：生成路线大纲（~20s）。先给前端展示，用户不满意可以换一版。
   if (action === 'outline') {
+    // 「换个方案」不扣额度（同一趟行程只收一次钱），但要限次数——
+    // 不限的话一次大纲 2 分钱，脚本刷起来照样烧钱。
+    const hit = await quotaCall(openid, { action: 'hit', scene: 'outline' });
+    if (hit.code === -3) return { code: -3, msg: hit.msg || '今天换方案的次数用完了' };
     try {
       const res = await generateOutline(event);
       return {
@@ -331,6 +353,12 @@ exports.main = async (event, context) => {
   //          直到 partial=false（用户全程只看到"正在细化…"）
   try {
     if (!event.dest && !event.destCity) return { code: -1, msg: '缺少目的地' };
+    // 只在首次生成前查额度（带 tripId 的是续跑，那一次的钱已经扣过了，放行让它跑完）
+    if (!event.tripId) {
+      const chk = await quotaCall(openid, { action: 'check', scene: 'plan' });
+      if (chk.code === -2) return { code: -2, msg: chk.msg || '次数用完了，买个套餐继续吧', needPay: true };
+      if (chk.code === -3) return { code: -3, msg: chk.msg || '今天的生成次数到上限了' };
+    }
     const budget = event.budgetMs ? Number(event.budgetMs) : undefined;
     const plan = await buildPlan(event, event, {
       doneDayIndexes: event.doneDayIndexes,
@@ -342,7 +370,15 @@ exports.main = async (event, context) => {
     if (!plan || (!plan.items.length && !plan.partial && !event.tripId)) {
       return { code: -1, msg: 'AI 没有生成出有效行程，请调整需求后重试' };
     }
-    return { code: 0, data: await savePlan(openid, plan, event.tripId) };
+    const data = await savePlan(openid, plan, event.tripId);
+    // 落库成功才扣费：大纲阶段没生成出来不收钱（避免"失败也扣费"的投诉）。
+    // bizKey 用 tripId，续跑多轮也只扣一次（quota 侧按 bizKey 幂等）。
+    if (data && data.tripId) {
+      await quotaCall(openid, {
+        action: 'consume', scene: 'plan', bizKey: `plan:${data.tripId}`, tripId: data.tripId,
+      });
+    }
+    return { code: 0, data };
   } catch (err) {
     console.error('[generatePlan] build error:', err);
     return { code: -1, msg: err.message || '生成失败' };

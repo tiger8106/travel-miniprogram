@@ -1,0 +1,128 @@
+.container {
+  padding: 24rpx 24rpx 60rpx;
+  background: #f5f7fa;
+  min-height: 100vh;
+}
+
+.card {
+  background: #fff;
+  border-radius: 20rpx;
+  padding: 28rpx;
+  margin-bottom: 24rpx;
+  box-shadow: 0 4rpx 20rpx rgba(0, 0, 0, 0.04);
+}
+
+.card-title {
+  font-size: 30rpx;
+  font-weight: 600;
+  color: #222;
+  margin-bottom: 20rpx;
+}
+
+/* ---------- 额度卡 ---------- */
+.quota-card {
+  background: linear-gradient(135deg, #2b7bfa 0%, #1a5fd0 100%);
+  color: #fff;
+}
+.quota-empty { text-align: center; padding: 20rpx 0; }
+.quota-empty-title { font-size: 32rpx; font-weight: 600; }
+.quota-empty-sub { font-size: 24rpx; opacity: 0.85; margin: 12rpx 0 24rpx; }
+.btn-primary {
+  display: inline-block;
+  background: #fff;
+  color: #2b7bfa;
+  font-size: 28rpx;
+  font-weight: 600;
+  padding: 14rpx 48rpx;
+  border-radius: 40rpx;
+}
+.btn-block { display: block; text-align: center; margin-top: 16rpx; color: #2b7bfa; }
+
+.quota-head { display: flex; align-items: baseline; }
+.quota-num { font-size: 76rpx; font-weight: 700; line-height: 1; }
+.quota-unit { font-size: 26rpx; margin-left: 12rpx; opacity: 0.9; }
+
+.quota-rows { margin-top: 24rpx; }
+.quota-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 26rpx;
+  padding: 10rpx 0;
+  opacity: 0.95;
+}
+.quota-row-val { font-weight: 600; }
+.quota-row-val.vip { color: #ffe08a; }
+
+/* ---------- 套餐 ---------- */
+.goods-list { display: flex; flex-direction: column; gap: 20rpx; }
+.goods {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border: 2rpx solid #e6e9ef;
+  border-radius: 16rpx;
+  padding: 24rpx;
+}
+.goods-hot { border-color: #ffb400; background: #fffaf0; }
+.goods-paying { opacity: 0.6; }
+.goods-badge {
+  position: absolute;
+  top: -14rpx;
+  left: 20rpx;
+  background: #ff6b35;
+  color: #fff;
+  font-size: 20rpx;
+  padding: 4rpx 14rpx;
+  border-radius: 20rpx;
+}
+.goods-main { flex: 1; }
+.goods-name { font-size: 30rpx; font-weight: 600; color: #222; }
+.goods-desc { font-size: 24rpx; color: #666; margin-top: 6rpx; }
+.goods-tip { font-size: 22rpx; color: #ff6b35; margin-top: 4rpx; }
+.goods-price { text-align: right; margin-left: 20rpx; }
+.price-num { font-size: 34rpx; font-weight: 700; color: #e64340; }
+.goods-buy {
+  margin-top: 10rpx;
+  background: #2b7bfa;
+  color: #fff;
+  font-size: 24rpx;
+  padding: 8rpx 28rpx;
+  border-radius: 30rpx;
+}
+
+.sync-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 20rpx;
+  padding-top: 20rpx;
+  border-top: 1rpx solid #f0f0f0;
+}
+.sync-text { font-size: 24rpx; color: #888; }
+.sync-btn { font-size: 24rpx; color: #2b7bfa; font-weight: 600; }
+
+/* ---------- 邀请 ---------- */
+.invite-code-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #f7f9fc;
+  border-radius: 14rpx;
+  padding: 20rpx;
+}
+.invite-code { font-size: 40rpx; font-weight: 700; letter-spacing: 6rpx; color: #2b7bfa; }
+.invite-sub { font-size: 22rpx; color: #888; margin-top: 6rpx; }
+.invite-input {
+  margin-top: 20rpx;
+  background: #f7f9fc;
+  border-radius: 12rpx;
+  padding: 20rpx;
+  font-size: 28rpx;
+}
+.invite-used { margin-top: 18rpx; font-size: 24rpx; color: #888; }
+
+/* ---------- 说明 ---------- */
+.rule-item { font-size: 24rpx; color: #666; line-height: 1.8; }
+
+.text-placeholder { color: #bbb; font-size: 26rpx; }

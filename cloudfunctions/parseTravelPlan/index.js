@@ -19,7 +19,25 @@ const COL_TASK = 'parse_tasks';
 const GEOCODE_DEADLINE_MS = 35 * 1000;
 
 // 解析引擎版本：返回给前端展示，用于确认线上跑的是不是最新代码
-const PARSE_VERSION = 'v3.6-alarm-fix';
+const PARSE_VERSION = 'v3.7-quota';
+
+/**
+ * 调额度中心（quota 云函数）。
+ * 约定同 generatePlan：**额度服务不可用时一律放行**，
+ * 它挂了最多少收一次钱，不能让用户连攻略都传不了。
+ */
+async function quotaCall(openid, data) {
+  try {
+    const res = await cloud.callFunction({
+      name: 'quota',
+      data: Object.assign({ openid }, data),
+    });
+    return (res && res.result) || {};
+  } catch (e) {
+    console.warn('[parseTravelPlan] 额度服务不可用，本次不计费:', e.message);
+    return {};
+  }
+}
 
 // 日期强校验：只接受合法的 YYYY-MM-DD
 // LLM 偶尔会输出 "null"、""、"2026/9/20"、"2026-13-40" 等脏值，一律拒绝
@@ -360,6 +378,10 @@ async function handleStep(event, ctx) {
     case 'init': {
       const { fileID } = event;
       if (!fileID) return { code: -1, msg: '缺少 fileID' };
+      // 开跑前先看额度：不够就别烧 token 了（前端也会拦一次，这里是防绕过的硬门槛）
+      const chk = await quotaCall(openid, { action: 'check', scene: 'parse' });
+      if (chk.code === -2) return { code: -2, msg: chk.msg || '次数用完了，买个套餐继续吧', needPay: true };
+      if (chk.code === -3) return { code: -3, msg: chk.msg || '今天的生成次数到上限了' };
       await ensureTaskCollection(db);
 
       const dlRes = await cloud.downloadFile({ fileID });
@@ -643,6 +665,10 @@ async function handleStep(event, ctx) {
       });
       console.log('[step/commit] 行程 %s 完成：%d 条行程，%d 条闹钟',
         tripId, resultInfo.itemCount, resultInfo.alarmCount);
+      // 入库成功才扣费（解析中途失败不收钱）；bizKey 带 tripId，重复 commit 只扣一次
+      await quotaCall(openid, {
+        action: 'consume', scene: 'parse', bizKey: `parse:${tripId}`, tripId,
+      });
       return Object.assign({ code: 0 }, resultInfo);
     }
 

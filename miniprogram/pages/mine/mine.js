@@ -4,6 +4,7 @@ const { uploadFile } = require('../../utils/request');
 const homeCache = require('../../utils/homecache');
 const env = require('../../utils/env');
 const privacy = require('../../utils/privacy');
+const quota = require('../../utils/quota');
 
 const app = getApp();
 
@@ -14,6 +15,7 @@ Page({
     profile: {},       // { nickname, avatarUrl }
     saving: false,
     showPrivacy: false, // 隐私保护授权弹窗（点头像/填昵称被微信拦截时触发）
+    quotaText: '查看剩余次数与套餐',
   },
 
   onShow() {
@@ -58,6 +60,7 @@ Page({
       loggedIn: !!auth.getOpenid(),
       profile,
     });
+    this.loadQuota();
   },
 
   // ---------- 登录 / 退出 ----------
@@ -172,6 +175,24 @@ Page({
 
   onTapUpload() {
     wx.navigateTo({ url: '/pages/upload/upload' });
+  },
+
+  onTapPay() {
+    wx.navigateTo({ url: '/pages/pay/pay' });
+  },
+
+  // 额度概览：只做展示，失败也不影响本页其它功能
+  async loadQuota() {
+    if (!auth.isLoggedIn()) {
+      this.setData({ quotaText: '查看剩余次数与套餐' });
+      return;
+    }
+    const info = await quota.info();
+    if (!info) return;
+    const txt = info.vip
+      ? `月卡会员 · 本月还剩 ${info.vipLeft} 次`
+      : `剩余 ${info.total} 次 · 今日 ${info.dayGen}/${info.dayGenLimit}`;
+    this.setData({ quotaText: txt });
   },
 
   onTapAbout() {

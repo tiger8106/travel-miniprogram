@@ -17,6 +17,23 @@ const http = require('http');
 const COL_SUG = 'suggestions';
 const COL_TRIP = 'trips';
 
+/**
+ * 建议刷新日限额（不扣额度，只计次）：
+ * 每次刷新都要调 LLM，放任点一天能刷几百次。额度服务挂了就放行，不拦用户。
+ */
+async function quotaHit(openid) {
+  try {
+    const res = await cloud.callFunction({
+      name: 'quota',
+      data: { openid, action: 'hit', scene: 'tips' },
+    });
+    return (res && res.result) || {};
+  } catch (e) {
+    console.warn('[suggestions] 额度服务不可用，本次不限次:', e.message);
+    return {};
+  }
+}
+
 exports.main = async (event, context) => {
   const wxContext = cloud.getWXContext();
   const userOpenid = wxContext.OPENID;
@@ -29,10 +46,19 @@ exports.main = async (event, context) => {
     switch (action) {
       case 'get':
         return await get(db, userOpenid, event.tripId);
-      case 'refresh':
+      case 'refresh': {
+        const hit = await quotaHit(userOpenid);
+        if (hit.code === -3) return { code: -3, msg: hit.msg || '今天刷新建议的次数用完了' };
         return await refresh(db, userOpenid, event.tripId);
-      case 'dayTips':
+      }
+      case 'dayTips': {
+        // force=true 才会重新生成（缓存命中不烧 token，也就不占次数）
+        if (event.force) {
+          const hit = await quotaHit(userOpenid);
+          if (hit.code === -3) return { code: -3, msg: hit.msg || '今天刷新建议的次数用完了' };
+        }
         return await dayTips(db, userOpenid, event.tripId, event.dayIndex, event.force);
+      }
       default:
         return { code: -1, msg: '未知 action: ' + action };
     }

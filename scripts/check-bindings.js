@@ -71,6 +71,8 @@ checkPair('pages/itinerary/itinerary.wxml', 'pages/itinerary/itinerary.js');
 checkPair('components/map-button/map-button.wxml', 'components/map-button/map-button.js');
 checkPair('components/ticket-alarm/ticket-alarm.wxml', 'components/ticket-alarm/ticket-alarm.js');
 checkPair('pages/tickets/tickets.wxml', 'pages/tickets/tickets.js');
+checkPair('pages/pay/pay.wxml', 'pages/pay/pay.js');
+checkPair('pages/mine/mine.wxml', 'pages/mine/mine.js');
 
 // ---------- ③ 残留 & 关键改动检查 ----------
 const actWxml = fs.readFileSync(path.join(MP, 'components/activity-item/activity-item.wxml'), 'utf8');
@@ -440,6 +442,95 @@ ok('行程页接入中间点编辑与 fallbackRegion',
   /bind:editwaypoint="onEditWaypoint"/.test(fs.readFileSync(path.join(MP, 'pages/itinerary/itinerary.wxml'), 'utf8'))
     && /onEditWaypoint\(e\)/.test(fs.readFileSync(path.join(MP, 'pages/itinerary/itinerary.js'), 'utf8'))
     && /fallbackRegion="\{\{trip\.region\}\}"/.test(fs.readFileSync(path.join(MP, 'pages/itinerary/itinerary.wxml'), 'utf8')));
+
+// ============================================================
+// 收费体系（额度 + 虚拟支付）
+//   钱相关的接线一旦断掉就是"白嫖"或"用户付不了款"，全钉死
+// ============================================================
+const quotaIdx = fs.readFileSync(path.join(CF, 'quota/index.js'), 'utf8');
+const quotaRules = fs.readFileSync(path.join(CF, 'quota/rules.js'), 'utf8');
+const payIdx = fs.readFileSync(path.join(CF, 'virtualPay/index.js'), 'utf8');
+const paySign = fs.readFileSync(path.join(CF, 'virtualPay/sign.js'), 'utf8');
+const payRules = fs.readFileSync(path.join(CF, 'virtualPay/quota-rules.js'), 'utf8');
+const genPlanIdx = fs.readFileSync(path.join(CF, 'generatePlan/index.js'), 'utf8');
+const ptpIdx = fs.readFileSync(path.join(CF, 'parseTravelPlan/index.js'), 'utf8');
+const sugIdx = fs.readFileSync(path.join(CF, 'suggestions/index.js'), 'utf8');
+const payPageJs = fs.readFileSync(path.join(MP, 'pages/pay/pay.js'), 'utf8');
+const payPageWxml = fs.readFileSync(path.join(MP, 'pages/pay/pay.wxml'), 'utf8');
+const plannerJs2 = fs.readFileSync(path.join(MP, 'pages/planner/planner.js'), 'utf8');
+const uploadJs2 = fs.readFileSync(path.join(MP, 'pages/upload/upload.js'), 'utf8');
+const quotaUtil = fs.readFileSync(path.join(MP, 'utils/quota.js'), 'utf8');
+const appJson2 = fs.readFileSync(path.join(MP, 'app.json'), 'utf8');
+
+ok('额度中心：三档套餐价格与限额写在 rules.js（¥3/次、¥10/5次、¥20/月卡50次）',
+  /id: 'plan_1', name: '单次攻略', price: 300/.test(quotaRules)
+    && /id: 'plan_5', name: '5 次卡', price: 1000/.test(quotaRules)
+    && /id: 'vip_month', name: '月卡', price: 2000/.test(quotaRules)
+    && /vipMonthQuota: 50/.test(quotaRules) && /gift: 3/.test(quotaRules));
+
+ok('新用户送 3 次、30 天有效（ensureUser 里发放，只发一次）',
+  /giftQuota: R\.LIMITS\.gift/.test(quotaIdx) && /giftExpireAt: now \+ R\.LIMITS\.giftDays/.test(quotaIdx)
+    && /gifted: true/.test(quotaIdx));
+
+ok('存量用户补发赠送额度（老账号升级后不会一上来就 0 次）',
+  /收费功能上线前就注册过的/.test(quotaIdx) && /gifted: true/.test(quotaIdx)
+    && /!u\.gifted && !x\.quota && !x\.giftQuota && !x\.vipUntil/.test(quotaIdx));
+
+ok('扣费顺序：会员 → 快过期的赠送 → 长期额度（不让用户白亏）',
+  /vipLeft\(x, now\) > 0/.test(quotaRules) && /giftLeft\(x, now\) > 0/.test(quotaRules)
+    && /patch\.quota = Math\.max\(0, x\.quota - 1\)/.test(quotaRules));
+
+ok('扣费幂等（bizKey 去重，续跑多轮只扣一次）',
+  /findLog\(openid, bizKey, 'consume'\)/.test(quotaIdx) && /duplicated: true/.test(quotaIdx));
+
+ok('加额度的操作只认微信上下文 openid（防止自己给自己加次数）',
+  /if \(!trusted\) return \{ code: -1, msg: '未登录，不能退额度' \}/.test(quotaIdx)
+    && /if \(!trusted\) return \{ code: -1, msg: '未登录，不能发货' \}/.test(quotaIdx)
+    && /const trusted = !!ctxOpenid \|\| internal/.test(quotaIdx));
+
+ok('生成入口落库成功后才扣费（大纲/中途失败不收钱）',
+  /action: 'consume', scene: 'plan', bizKey: `plan:\$\{data\.tripId\}`/.test(genPlanIdx)
+    && /action: 'consume', scene: 'parse', bizKey: `parse:\$\{tripId\}`/.test(ptpIdx));
+
+ok('额度服务不可用时放行（新功能不能把生成功能搞挂）',
+  /额度服务不可用，本次不计费/.test(genPlanIdx) && /额度服务不可用，本次不计费/.test(ptpIdx));
+
+ok('防刷：大纲换版本 / 建议刷新有日限额（不扣额度但计次）',
+  /action: 'hit', scene: 'outline'/.test(genPlanIdx)
+    && /action: 'hit', scene: 'tips'/.test(sugIdx) && /event\.force/.test(sugIdx));
+
+ok('支付签名：paySig=HMAC(AppKey, requestVirtualPayment&body)、signature 不解码 session_key',
+  /crypto\.createHmac\('sha256', String\(key \|\| ''\)\)/.test(paySign)
+    && /`\$\{uri\}&amp;\$\{body\}`/.test(paySign) === false
+    && paySign.includes('${uri}&${body}')
+    && /sessionKey 不做 base64 解码|不做 base64 解码/.test(paySign));
+
+ok('signData 字段顺序固定（前端透传，重新 stringify 会验签失败）',
+  /offerId: String\(o\.offerId/.test(paySign) && /outTradeNo: String\(o\.outTradeNo/.test(paySign)
+    && /前端不能再 JSON\.stringify|重新 stringify|重新序列化/.test(paySign));
+
+ok('发货不只信前端 success（confirm 查单 + 回调 notify 两条路）',
+  /action === 'confirm'/.test(payIdx) && /actionNotify/.test(payIdx)
+    && /status === 'delivered'/.test(payIdx));
+
+ok('虚拟支付与额度中心商品表同源（改一处必须同步）',
+  JSON.stringify(require('../cloudfunctions/quota/rules').GOODS)
+    === JSON.stringify(require('../cloudfunctions/virtualPay/quota-rules').GOODS));
+
+ok('前端：制定/上传攻略前先查额度，不够引导付费',
+  /quota\.ensureOrPay\('plan'\)/.test(plannerJs2) && /quota\.ensureOrPay\('parse'\)/.test(uploadJs2));
+
+ok('前端：支付走云函数下单（签名不出后端）',
+  /action: 'createOrder', goodsId/.test(quotaUtil)
+    && /wx\.requestVirtualPayment/.test(quotaUtil)
+    && /signData: order\.signData/.test(quotaUtil));
+
+ok('付费页已注册且展示计费说明（避免"为什么又扣钱"的投诉）',
+  /pages\/pay\/pay/.test(appJson2) && /计费说明/.test(payPageWxml)
+    && /一次完整攻略 = 1 次额度/.test(payPageWxml));
+
+ok('付了钱额度没到账有补救入口（sync 补发，幂等不重复加）',
+  /onSync\(\)/.test(payPageJs) && /action: 'sync'/.test(quotaUtil));
 
 console.log(failed ? `\n${failed} 项失败 ✗` : '\n全部通过 ✓');
 process.exit(failed ? 1 : 0);

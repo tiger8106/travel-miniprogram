@@ -8,6 +8,7 @@ const api = require('../../services/api');
 const auth = require('../../utils/auth');
 const homeCache = require('../../utils/homecache');
 const eta = require('../../utils/eta');
+const quota = require('../../utils/quota');
 
 const app = getApp();
 
@@ -434,6 +435,10 @@ Page({
     }
     const ok = await auth.ensureLogin('制定攻略');
     if (!ok) return;
+    // 先确认有额度再让 AI 跑：不然用户等 30 秒才发现次数不够。
+    // 云端还会再拦一次（防绕过），这里只是提前给个痛快话。
+    const can = await quota.ensureOrPay('plan');
+    if (!can) return;
     this._input = input;
     this.genOutline();
   },
@@ -486,6 +491,12 @@ Page({
     } catch (err) {
       this.stopTicker();
       this.setData({ generating: false, genTip: '' });
+      // 额度/限流类提示不是"云函数坏了"，别去弹体检报告——直接给购买引导
+      const msg = (err && err.message) || '';
+      if (/次数|额度|上限/.test(msg)) {
+        wx.showToast({ title: msg.slice(0, 30), icon: 'none' });
+        return;
+      }
       this.showDiag(err);
     }
   },
@@ -835,6 +846,7 @@ Page({
 
       app.globalData.currentTripId = result.tripId;
       homeCache.clear();
+      quota.clear();          // 云端已扣 1 次，本地缓存作废，下次进来看到的是最新余额
       this.gotoTrip(result);
     } catch (err) {
       this.stopTicker();

@@ -68,6 +68,33 @@ function callFn(name, data = {}) {
 }
 
 /**
+ * 调用云函数但**不把非 0 code 当异常抛掉**，原样返回 { code, msg, data }
+ * 场景：额度校验这类"业务性拒绝"要按 code 分支处理（-2 没额度 / -3 撞日限额），
+ * 用 callFn 的话全变成 reject，分不清是拒绝还是故障。
+ * 网络层失败返回 code = -999。
+ */
+function callFnKeepCode(name, data = {}) {
+  return new Promise((resolve) => {
+    if (!wx.cloud || typeof wx.cloud.callFunction !== 'function') {
+      resolve({ code: -999, msg: '当前微信版本不支持云开发' });
+      return;
+    }
+    wx.cloud.callFunction({
+      name,
+      data,
+      success: (res) => {
+        const r = res.result || {};
+        resolve({ code: typeof r.code === 'number' ? r.code : 0, msg: r.msg || '', data: r.data });
+      },
+      fail: (err) => {
+        if (!isTimeout(err)) console.error(`[cloud] ${name} fail:`, err);
+        resolve({ code: -999, msg: (err && (err.errMsg || err.message)) || '网络异常' });
+      },
+    });
+  });
+}
+
+/**
  * 上传文件到云存储
  */
 function uploadFile(cloudPath, filePath) {
@@ -140,6 +167,7 @@ function getAggregate() {
 
 module.exports = {
   callFn,
+  callFnKeepCode,
   uploadFile,
   downloadFile,
   deleteFile,

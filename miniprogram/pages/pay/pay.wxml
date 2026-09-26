@@ -1,0 +1,91 @@
+<view class="container">
+
+  <!-- 我的额度 -->
+  <view class="card quota-card">
+    <block wx:if="{{!loggedIn}}">
+      <view class="quota-empty">
+        <view class="quota-empty-title">登录后查看额度</view>
+        <view class="quota-empty-sub">新用户注册送 3 次</view>
+        <view class="btn-primary" bindtap="onLogin">微信登录</view>
+      </view>
+    </block>
+    <block wx:else>
+      <view class="quota-head">
+        <view class="quota-num">{{info.total || 0}}</view>
+        <view class="quota-unit">次可用</view>
+      </view>
+      <view class="quota-rows">
+        <view class="quota-row">
+          <text>长期额度</text>
+          <text class="quota-row-val">{{info.quota || 0}} 次</text>
+        </view>
+        <view class="quota-row" wx:if="{{info.gift}}">
+          <text>赠送额度</text>
+          <text class="quota-row-val">{{info.gift}} 次（限时）</text>
+        </view>
+        <view class="quota-row" wx:if="{{info.vip}}">
+          <text>月卡剩余</text>
+          <text class="quota-row-val vip">{{info.vipLeft}} 次</text>
+        </view>
+        <view class="quota-row">
+          <text>今日已生成</text>
+          <text class="quota-row-val">{{info.dayGen || 0}} / {{info.dayGenLimit || 3}}</text>
+        </view>
+      </view>
+    </block>
+  </view>
+
+  <!-- 套餐 -->
+  <view class="card">
+    <view class="card-title">💳 选择套餐</view>
+    <view class="goods-list">
+      <view class="goods {{item.badge ? 'goods-hot' : ''}} {{payingId === item.id ? 'goods-paying' : ''}}"
+            wx:for="{{goods}}" wx:key="id"
+            data-id="{{item.id}}" bindtap="onBuy">
+        <view class="goods-badge" wx:if="{{item.badge}}">{{item.badge}}</view>
+        <view class="goods-main">
+          <view class="goods-name">{{item.name}}</view>
+          <view class="goods-desc">{{item.desc}}</view>
+          <view class="goods-tip" wx:if="{{item.tip}}">{{item.tip}}</view>
+        </view>
+        <view class="goods-price">
+          <text class="price-num">{{item.priceText}}</text>
+          <view class="goods-buy">{{payingId === item.id ? '支付中…' : '购买'}}</view>
+        </view>
+      </view>
+    </view>
+    <view class="sync-row" wx:if="{{loggedIn}}">
+      <text class="sync-text">付了钱额度没到账？</text>
+      <text class="sync-btn" bindtap="onSync">刷新额度</text>
+    </view>
+  </view>
+
+  <!-- 邀请 -->
+  <view class="card" wx:if="{{loggedIn && invite}}">
+    <view class="card-title">🎁 邀请好友各得 1 次</view>
+    <view class="invite-code-row" bindtap="onCopyCode">
+      <view>
+        <view class="invite-code">{{invite.inviteCode}}</view>
+        <view class="invite-sub">点击复制 · 已邀请 {{invite.inviteCount}} 人（上限 {{invite.inviteCap}} 次）</view>
+      </view>
+      <text class="text-placeholder">复制</text>
+    </view>
+    <block wx:if="{{!invite.invitedBy}}">
+      <input class="invite-input" value="{{inputCode}}" placeholder="填写好友的邀请码"
+             maxlength="10" bindinput="onCodeInput" />
+      <view class="btn-primary btn-block" bindtap="onSubmitInvite">提交邀请码</view>
+    </block>
+    <view wx:else class="invite-used">已使用邀请码 {{invite.invitedBy}}</view>
+  </view>
+
+  <!-- 计费说明 -->
+  <view class="card">
+    <view class="card-title">📋 计费说明</view>
+    <view class="rule-item">· 一次完整攻略 = 1 次额度（大纲、逐天细化、建议、闹钟、地图定位全包）</view>
+    <view class="rule-item">· 大纲不满意可以换方案，不额外扣次数</view>
+    <view class="rule-item">· 行程没生成出来不扣次数</view>
+    <view class="rule-item">· 查看行程、编辑、导航、闹钟提醒永久免费</view>
+    <view class="rule-item">· 每天有生成次数上限，保护服务稳定</view>
+  </view>
+
+</view>
