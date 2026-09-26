@@ -6,16 +6,17 @@
 //   模型的预训练知识里存的是"它训练那会儿"的时刻表，早就过期了 —— 这就是
 //   "生成的车次和 12306 上对不上"的根因。让模型凭记忆写，再怎么改 prompt 都白搭。
 //
-//   所以这里让模型**先联网查、再生成**（DashScope 的 enable_search）：
-//   程序拿到真实候选班次 → 把候选列表塞进细化阶段的 prompt → 模型只负责"挑哪一班"，
-//   不再凭空编时刻。挑完还有确定性校验兜底（见 plan.js 的 enforceRealSchedule）。
+//   铁路先走 12306 官方按日期查询；航班等没有统一官方接口的交通，再使用已明确支持
+//   联网搜索的模型。程序拿到真实候选班次 → 把候选列表塞进细化阶段的 prompt → 模型只
+//   负责"挑哪一班"，不再凭空编时刻。挑完还有确定性校验兜底（见 plan.js）。
 //
 // 设计原则（通用，不认任何具体地名/线路）：
 //   · 只按"出发地 + 目的地 + 日期"去查，判据与具体城市无关；
-//   · 查不到 / 超时 / 报错 → 一律降级为"没查到"，沿用模型自己的编排，绝不硬塞；
+//   · 查不到 / 超时 / 报错 → 记为"没查到"并清除模型车次，绝不把臆造信息硬塞给用户；
 //   · 结果按 from|to|date 缓存短时（同一天反复生成不用重复烧检索，换日期不会串数据）。
 
 const { chat, parseJSONFromText } = require('./llm');
+const rail12306 = require('./rail12306');
 
 const SYS = '你是时刻表查询助手。只能根据联网检索到的真实信息作答，绝不凭记忆编造。';
 
@@ -146,28 +147,68 @@ function canSearch() {
  * @param {object} cache 可选 { get(key), set(key, list) }
  * @returns {Map<string, Array>} key = cacheKeyOf({ from, to, date })
  */
+function isRailSegment(seg) {
+  const mode = `${seg && seg.mode || ''}${seg && seg.code || ''}`.toLowerCase();
+  return /train|高铁|动车|火车/.test(mode) && !/plane|航班|飞机/.test(mode);
+}
+
+function officialEnabled() {
+  return process.env.RAIL12306_ENABLED !== '0';
+}
+
+function canLookupSchedules() {
+  return officialEnabled() || canSearch();
+}
+
+/**
+ * 批量查班次：铁路直接读 12306 官方结果，只有航班等非铁路段才走模型联网搜索。
+ * 铁路官方查询即使返回空数组也写入 Map，plan.js 会清除模型臆造的车次，不能静默
+ * 回退到“看起来像真实”的旧结果。
+ */
 async function lookupSchedules(segments, deadlineMs, cache) {
   const found = new Map();
-  if (!canSearch()) {
-    console.warn('[generatePlan.schedule] 当前 LLM 端点不确认支持联网搜索，跳过班次检索');
-    return found;
-  }
+  found.routeMeta = new Map();
   const uniq = new Map();
   (segments || []).forEach((s) => {
     if (!s || !norm(s.from) || !norm(s.to)) return;
-    // 同一线路不同日期算两段（开行方案可能不同），但返回给 applyRealSchedules
-    // 仍按「出发地→目的地」为键 —— 同一线路在一份大纲里通常只有一组日期
     const k = cacheKeyOf(s);
     if (!uniq.has(k)) uniq.set(k, s);
   });
   if (!uniq.size) return found;
 
+  const rail = [...uniq.values()].filter(isRailSegment);
+  const other = [...uniq.entries()].filter(([, seg]) => !isRailSegment(seg));
+  const budget = Math.max(5000, Number(deadlineMs) || 20000);
+
+  if (rail.length && officialEnabled()) {
+    try {
+      const official = await rail12306.lookupOfficial(rail, budget);
+      rail.forEach((seg) => {
+        const k = cacheKeyOf(seg);
+        found.set(k, official.get(k) || []);
+        const meta = official.routeMeta && official.routeMeta.get(k);
+        if (meta) found.routeMeta.set(k, meta);
+      });
+    } catch (e) {
+      console.warn('[generatePlan.schedule] 12306 查询整体失败：%s', e.message);
+      rail.forEach((seg) => {
+        const k = cacheKeyOf(seg);
+        found.set(k, []);
+        found.routeMeta.set(k, { attempted: true, official: true, reason: e.message });
+      });
+    }
+  }
+
+  if (!other.length) return found;
+  if (!canSearch()) {
+    console.warn('[generatePlan.schedule] 非铁路段没有确认支持联网搜索的端点，跳过检索');
+    return found;
+  }
+
   const getter = cache && typeof cache.get === 'function' ? cache.get : null;
   const setter = cache && typeof cache.set === 'function' ? cache.set : null;
-
   const todo = [];
-  // 缓存读取也并发：同一轮有多段跨城交通时，不让数据库查询逐段排队。
-  const cacheResults = await Promise.all([...uniq.entries()].map(async ([k, seg]) => {
+  const cacheResults = await Promise.all(other.map(async ([k, seg]) => {
     if (getter) {
       const hit = await getter(k).catch(() => null);
       const cleanHit = normalizeList(hit, seg);
@@ -181,11 +222,8 @@ async function lookupSchedules(segments, deadlineMs, cache) {
   cacheResults.forEach((x) => { if (x) todo.push(x); });
   if (!todo.length) return found;
 
-  // 时间不够就少查几段：查 1 段真实信息，好过 4 段都超时拿不到
-  // 这些请求是并发的，单次预算不应再按段数相加；旧算法在 4 段线路时
-  // 把每次请求压到约 6 秒，联网搜索几乎必然超时，随后整份攻略又退回模型记忆。
   const each = Math.max(9000, Math.min(18000,
-    Math.floor((deadlineMs - 1500) / Math.max(1, Math.min(todo.length, 2)))));
+    Math.floor((budget - 1500) / Math.max(1, Math.min(todo.length, 2)))));
   await Promise.all(todo.map(async ([k, seg]) => {
     try {
       const list = await lookupOne(seg, each);
@@ -194,12 +232,21 @@ async function lookupSchedules(segments, deadlineMs, cache) {
         if (setter) setter(k, list).catch(() => {});
       }
     } catch (e) {
-      // 检索失败是常态（模型不带联网能力 / 超时 / 端点不认参数）：
-      // 安静降级，代码会退回"让模型自己编排 + 前端标注仅供参考"
-      console.warn('[generatePlan.schedule] %s 检索失败，本次沿用模型编排:', k, e.message);
+      console.warn('[generatePlan.schedule] %s 检索失败，本次不填未核实班次:', k, e.message);
     }
   }));
   return found;
 }
 
-module.exports = { lookupSchedules, normalizeList, segKey, cacheKeyOf, padTime, stationKey, sameStation, canSearch };
+module.exports = {
+  lookupSchedules,
+  normalizeList,
+  segKey,
+  cacheKeyOf,
+  padTime,
+  stationKey,
+  sameStation,
+  canSearch,
+  canLookupSchedules,
+  isRailSegment,
+};

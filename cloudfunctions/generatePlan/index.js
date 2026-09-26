@@ -20,7 +20,7 @@ const crypto = require('crypto');
 
 const { generateOutline, buildPlan, dayDiff, collectSegments, applyRealSchedules } = require('./plan');
 const { geocodeBatch } = require('./geocode');
-const { lookupSchedules, canSearch } = require('./schedule');
+const { lookupSchedules, canLookupSchedules, canSearch } = require('./schedule');
 
 const COL_TRIP = 'trips';
 const COL_ALARM = 'ticket_alarms';
@@ -32,7 +32,7 @@ const COL_SCHED = 'schedule_cache';
 const SCHED_TTL_MS = 36 * 3600 * 1000;
 
 // 生成引擎版本（用于确认线上跑的是哪一版）
-const GEN_VERSION = 'v1.4-schedule-geo';
+const GEN_VERSION = 'v1.5-12306-timeline';
 
 // ---------------------------------------------------------------
 // 后台续跑（用户中途离开小程序也能跑完）
@@ -420,10 +420,11 @@ async function runJobRound(openid, job) {
   // ★ 班次专轮：大纲已就绪但还没联网核对过班次 → 本轮只做检索。
   //   给检索一整个独立预算（不再和大纲/细化抢 60s），查到的真实班次
   //   写回大纲（day.sched + moves 时刻），细化阶段照着挑、enforceRealSchedule 兜底。
-  //   查询失败/超时都静默降级（沿用模型编排），绝不卡住任务。
-  const wantSearch = canSearch();
+  //   12306 查询失败/超时仍允许行程继续，但会清除模型臆造车次并标记待核实，
+  //   绝不把未核对的铁路信息当成事实写给用户。
+  const wantSearch = canLookupSchedules();
   if (!job.schedDone && wantSearch) {
-    const segs = collectSegments(input.outline);
+    const segs = collectSegments(input.outline, { origin: input.origin });
     // 没有城际铁路/航班时直接进入细化，避免为纯市内行程白占一轮后台任务。
     if (!segs.length) {
       await db.collection(COL_JOB).doc(job._id).update({
@@ -626,6 +627,8 @@ async function runDiag(withPing) {
     model: cfg ? cfg.model : null,
     baseURL: cfg ? cfg.baseURL : null,
     searchEnabled: canSearch(),
+    officialRailEnabled: process.env.RAIL12306_ENABLED !== '0',
+    scheduleEnabled: canLookupSchedules(),
     cfgError,
     ping: '未探测',
   };

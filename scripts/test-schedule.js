@@ -184,6 +184,20 @@ console.log('== 4. 真实班次（联网检索） ==');
       && !o2.days[0].moves[0].schedSource,
     JSON.stringify(o2.days[0].moves[0]));
 
+  const unavailable = {
+    days: [{ date: '2027-01-01', moves: [{ from: '甲站', to: '乙站', mode: 'train', code: 'G9999', startTime: '08:00', endTime: '10:00' }] }],
+  };
+  const noOfficial = new Map([[S.cacheKeyOf({ from: '甲站', to: '乙站', date: '2027-01-01' }), []]]);
+  noOfficial.routeMeta = new Map([[S.cacheKeyOf({ from: '甲站', to: '乙站', date: '2027-01-01' }), {
+    attempted: true, official: true,
+  }]]);
+  P.applyRealSchedules(unavailable, noOfficial);
+  ok('12306 没有当天候选时清空模型车次和精确时刻',
+    unavailable.days[0].moves[0].code === ''
+      && unavailable.days[0].moves[0].startTime === ''
+      && unavailable.days[0].moves[0].schedSource === 'official-unavailable',
+    JSON.stringify(unavailable.days[0].moves[0]));
+
   // 4.5 细化兜底：模型自创了候选里没有的车次 → 拽回真实班次
   const o3 = { days: [{ sched: [
     { code: 'G2249', from: 'A站', to: 'B站', s: '08:30', e: '13:20' },
