@@ -36,6 +36,16 @@
       </view>
       <view class="text-secondary">{{dateText}}</view>
       <view wx:if="{{trip.summary}}" class="trip-summary">{{trip.summary}}</view>
+      <view wx:if="{{trip.genStatus === 'generating'}}" class="trip-generation trip-generation-running">
+        <view class="trip-generation-title">⏳ 正在生成详细行程</view>
+        <view class="trip-generation-sub">
+          已完成 {{trip.genProgress.done || 0}}/{{trip.genProgress.total || 0}} 天，已生成内容会实时显示，后台会继续补全
+        </view>
+      </view>
+      <view wx:elif="{{trip.genStatus === 'failed'}}" class="trip-generation trip-generation-fail">
+        <view class="trip-generation-title">⚠️ 行程生成暂未完成</view>
+        <view class="trip-generation-sub">{{trip.genError || '可到「我的行程」继续生成'}}</view>
+      </view>
       <picker wx:if="{{homeTrips.length > 1}}"
               mode="selector"
               range="{{homeTripLabels}}"

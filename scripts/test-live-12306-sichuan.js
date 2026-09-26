@@ -41,6 +41,11 @@ function codeOf(item) {
   return P.transportCodeOf(item);
 }
 
+function minuteOf(value) {
+  const m = String(value || '').match(/^(\d{1,2}):(\d{2})$/);
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+}
+
 (async () => {
   const t0 = Date.now();
   const generated = await P.generateOutline(input);
@@ -103,6 +108,18 @@ function codeOf(item) {
     const covered = railItems.some((it) => Number(it.dayIndex || 0) === outline.days.indexOf(day)
       && (move.sched || []).some((c) => c.code === codeOf(it) && c.s === it.startTime && c.e === it.endTime));
     assert(covered, `第${outline.days.indexOf(day) + 1}天官方段没有落入最终细化：${move.from}→${move.to}`);
+  });
+  outline.days.forEach((day, di) => {
+    const dayRail = railItems
+      .filter((it) => Number(it.dayIndex || 0) === di && codeOf(it))
+      .sort((a, b) => (minuteOf(a.startTime) || 1440) - (minuteOf(b.startTime) || 1440));
+    for (let i = 1; i < dayRail.length; i++) {
+      const previous = dayRail[i - 1];
+      const current = dayRail[i];
+      assert(minuteOf(current.startTime) >= minuteOf(previous.endTime),
+        `第${di + 1}天官方铁路重叠：${codeOf(previous)} ${previous.startTime}-${previous.endTime}`
+          + ` 与 ${codeOf(current)} ${current.startTime}-${current.endTime}`);
+    }
   });
   assert(checked.length > 0, '细化结果没有可核验铁路车次');
   console.log(`细化完成 ${allItems.length} 条；已核验：${checked.join('、')}`);

@@ -184,6 +184,44 @@ console.log('== 4. 真实班次（联网检索） ==');
       && !o2.days[0].moves[0].schedSource,
     JSON.stringify(o2.days[0].moves[0]));
 
+  // 4.4.1 同一天多段官方铁路移动必须按顺序衔接，不能各自挑最近班次
+  const timelineOutline = {
+    days: [{ date: '2027-01-02', moves: [
+      { from: '甲站', to: '乙站', mode: 'train', code: 'C100', startTime: '14:24', endTime: '15:32' },
+      { from: '乙站', to: '丙站', mode: 'train', code: 'G200', startTime: '14:23', endTime: '15:46' },
+    ] }],
+  };
+  const timelineFound = new Map([
+    ['甲站→乙站', [
+      { code: 'C100', from: '甲站', to: '乙站', s: '14:24', e: '15:32' },
+    ]],
+    ['乙站→丙站', [
+      { code: 'G200', from: '乙站', to: '丙站', s: '14:23', e: '15:46' },
+      { code: 'G201', from: '乙站', to: '丙站', s: '16:05', e: '17:30' },
+    ]],
+  ]);
+  timelineFound.routeMeta = new Map([
+    ['甲站→乙站', { attempted: true, official: true, from: '甲站', to: '乙站' }],
+    ['乙站→丙站', { attempted: true, official: true, from: '乙站', to: '丙站' }],
+  ]);
+  const timelineStat = P.applyRealSchedules(timelineOutline, timelineFound);
+  const timelineMoves = timelineOutline.days[0].moves;
+  ok('同日多段官方铁路按顺序重新选班',
+    timelineStat.timelineAdjusted === 1 && timelineMoves[1].code === 'G201',
+    JSON.stringify(timelineMoves));
+  ok('官方铁路班次不会互相重叠',
+    Number(timelineMoves[1].startTime.replace(':', '')) >= Number(timelineMoves[0].endTime.replace(':', '')),
+    JSON.stringify(timelineMoves));
+  const fixedOfficial = P.enforceOfficialRailItems([
+    { dayIndex: 0, category: 'transport', transportType: 'train', activity: '乘 C100 次列车',
+      startTime: '14:24', endTime: '15:32', startLocation: '甲站', endLocation: '乙站' },
+    { dayIndex: 0, category: 'transport', transportType: 'train', activity: '乘 G200 次列车',
+      startTime: '14:23', endTime: '15:46', startLocation: '乙站', endLocation: '丙站' },
+  ], timelineOutline);
+  ok('细化结果也跟随统一选出的官方班次',
+    /G201/.test(fixedOfficial[1].activity) && fixedOfficial[1].startTime === '16:05',
+    JSON.stringify(fixedOfficial[1]));
+
   const unavailable = {
     days: [{ date: '2027-01-01', moves: [{ from: '甲站', to: '乙站', mode: 'train', code: 'G9999', startTime: '08:00', endTime: '10:00' }] }],
   };

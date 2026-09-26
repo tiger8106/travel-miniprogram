@@ -90,6 +90,7 @@ function silentLogin(force) {
           const prev = wx.getStorageSync(KEY_OPENID);
           if (prev && prev !== openid) {
             try { require('./homecache').clearAll(); } catch (e) {}
+            try { require('./genrunner').reset(); } catch (e) {}
           }
           wx.setStorageSync(KEY_OPENID, openid);
           // 只要用户主动登录过，就撤掉"已退出"标记，后续可以自动静默登录
@@ -186,6 +187,9 @@ async function updateProfile(patch) {
 function logout() {
   wx.removeStorageSync(KEY_OPENID);
   wx.removeStorageSync(KEY_PROFILE);
+  // 退出后立即清掉首页/闹钟/建议快照，避免下一个账号在网络刷新前看到上一个账号的内容。
+  try { require('./homecache').clearAll(); } catch (e) {}
+  try { require('./genrunner').reset(); } catch (e) {}
   // 标记"已主动退出"，避免下次进页面又被自动静默登录复活
   wx.setStorageSync(KEY_LOGGED_OUT, 1);
   _emit();   // 广播：其它页面立刻清空，不再显示任何行程数据

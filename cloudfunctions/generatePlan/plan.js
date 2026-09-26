@@ -480,7 +480,10 @@ function enforceMovesAlignment(items, outline, activeDays) {
 
       // 时刻漂移超 60 分钟 → 拽回大纲时刻（中间天模型按真实班次微调的半小时内不动）
       const drift = driftOf(it);
-      if (drift > 60) {
+      // 12306 没查到当天候选时，applyRealSchedules 会把大纲的精确时刻清空。
+      // 此时不能把 null 交给 fmtMin（会被当成 00:00），否则第一天的顺序会被
+      // 凭空改乱；保留模型给出的占位时刻，并由 stripUnverifiedSchedules 标注待核实。
+      if (drift > 60 && wantS != null) {
         it.startTime = fmtMin(wantS);
         const wantE = toMin(m.endTime);
         if (wantE != null) it.endTime = fmtMin(wantE);
@@ -2199,6 +2202,112 @@ function pickSchedule(list, wantTime) {
   return best;
 }
 
+/** 当前 move 已锁定的官方班次；时间线调整后不能再从候选里按旧车次随便挑回去。 */
+function selectedOfficialSchedule(move) {
+  const list = asArray(move && move.sched);
+  if (!list.length) return null;
+  const code = String(move.code || '').trim().toUpperCase();
+  const found = list.find((c) => String(c.code || '').trim().toUpperCase() === code
+    && String(c.s || '') === String(move.startTime || '')
+    && String(c.e || '') === String(move.endTime || ''));
+  return found || pickSchedule(list, move.startTime);
+}
+
+/** 两段官方铁路移动之间的最小衔接时间。站名相同才要求站内换乘缓冲。 */
+function railTransferBuffer(previous, current) {
+  return sameStation(previous && previous.to, current && current.from) ? 20 : 0;
+}
+
+/**
+ * 同一天有多段铁路移动时，不能逐段独立挑“最接近模型时间”的车。
+ * 逐段挑会出现后一趟在前一趟到站之前发车（例如 14:24→15:32 后又选 14:23→15:46）。
+ * 这里用一个很小的动态规划，在官方候选里选择与模型意图最接近、且能按行程顺序衔接的组合。
+ * 候选来自 12306，算法只负责选班次，不生成或改写任何车次时刻。
+ */
+function resolveOfficialRailTimeline(outline) {
+  let changed = 0;
+  let conflicts = 0;
+  const days = asArray(outline && outline.days);
+  days.forEach((day, dayIndex) => {
+    const moves = asArray(day && day.moves).filter((m) =>
+      m && m.schedSource === '12306' && asArray(m.sched).some((c) =>
+        toMin(c && c.s) !== null && toMin(c && c.e) !== null && toMin(c.e) > toMin(c.s)));
+    if (moves.length < 2) return;
+
+    const options = moves.map((move) => asArray(move.sched).filter((c) =>
+      c && toMin(c.s) !== null && toMin(c.e) !== null && toMin(c.e) > toMin(c.s)));
+    if (options.some((list) => !list.length)) return;
+
+    const distance = (candidate, move) => {
+      const want = toMin(move.startTime);
+      return want === null ? 0 : Math.abs(toMin(candidate.s) - want);
+    };
+    const solve = (withBuffer) => {
+      const layers = [];
+      layers[0] = options[0].map((candidate) => ({
+        cost: distance(candidate, moves[0]),
+        prev: -1,
+      }));
+      for (let i = 1; i < options.length; i++) {
+        const layer = options[i].map(() => null);
+        options[i].forEach((candidate, currentIndex) => {
+          const currentStart = toMin(candidate.s);
+          options[i - 1].forEach((previous, previousIndex) => {
+            const state = layers[i - 1][previousIndex];
+            if (!state) return;
+            const previousEnd = toMin(previous.e);
+            const requiredStart = previousEnd + (withBuffer
+              ? railTransferBuffer(moves[i - 1], moves[i]) : 0);
+            if (currentStart < requiredStart) return;
+            const next = {
+              cost: state.cost + distance(candidate, moves[i]),
+              prev: previousIndex,
+            };
+            if (!layer[currentIndex] || next.cost < layer[currentIndex].cost) {
+              layer[currentIndex] = next;
+            }
+          });
+        });
+        if (!layer.some(Boolean)) return null;
+        layers[i] = layer;
+      }
+      const last = layers[layers.length - 1];
+      let index = -1;
+      last.forEach((state, i) => {
+        if (state && (index < 0 || state.cost < last[index].cost)) index = i;
+      });
+      if (index < 0) return null;
+      const picked = new Array(options.length);
+      for (let i = options.length - 1; i >= 0; i--) {
+        picked[i] = options[i][index];
+        index = layers[i][index].prev;
+      }
+      return picked;
+    };
+
+    // 先要求同站至少留出 20 分钟；极少数官方结果没有满足站内换乘的组合时，
+    // 再退到“至少不重叠”，保证展示的车次先后顺序仍然可执行。
+    const picked = solve(true) || solve(false);
+    if (!picked) {
+      conflicts += 1;
+      console.warn('[generatePlan] 第%d天官方班次没有可衔接组合，保留候选中最接近的选择', dayIndex + 1);
+      return;
+    }
+    picked.forEach((candidate, i) => {
+      const move = moves[i];
+      const before = `${move.code || ''}/${move.startTime || ''}/${move.endTime || ''}`;
+      const after = `${candidate.code || ''}/${candidate.s || ''}/${candidate.e || ''}`;
+      if (before !== after) changed += 1;
+      move.code = candidate.code;
+      move.startTime = candidate.s;
+      move.endTime = candidate.e;
+      move.from = candidate.from;
+      move.to = candidate.to;
+    });
+  });
+  return { changed, conflicts };
+}
+
 /**
  * 把检索到的真实班次写回大纲。
  * 只认"同一段"的候选：出发站和到达站都要经过 sameStation 校验，
@@ -2278,8 +2387,19 @@ function applyRealSchedules(outline, found) {
       m.scheduleRequired = false;
     });
   });
-  console.log('[generatePlan] 联网班次：命中 %d 段，其中 %d 段换成了检索到的真实车次', hit, replaced);
-  return { segments: hit, replaced };
+  const timeline = resolveOfficialRailTimeline(outline);
+  if (timeline.changed || timeline.conflicts) {
+    console.log('[generatePlan] 官方班次按日衔接：调整 %d 段，无法完全衔接 %d 天',
+      timeline.changed, timeline.conflicts);
+  }
+  console.log('[generatePlan] 联网班次：命中 %d 段，其中 %d 段换成了检索到的真实车次',
+    hit, replaced + timeline.changed);
+  return {
+    segments: hit,
+    replaced: replaced + timeline.changed,
+    timelineAdjusted: timeline.changed,
+    timelineConflicts: timeline.conflicts,
+  };
 }
 
 /**
@@ -2361,10 +2481,12 @@ function enforceOfficialRailItems(items, outline) {
       const code = transportCodeOf(it);
       const byRoute = moves.find((m) => it.startLocation && it.endLocation
         && sameStation(m.from, it.startLocation) && sameStation(m.to, it.endLocation));
-      const byCode = code && moves.find((m) => asArray(m.sched).some((c) =>
-        String(c.code || '').toUpperCase() === code
-        && (!it.startTime || c.s === it.startTime)
-        && (!it.endTime || c.e === it.endTime)));
+      const byCode = code && moves.find((m) => {
+        const selected = selectedOfficialSchedule(m);
+        return selected && String(selected.code || '').toUpperCase() === code
+          && (!it.startTime || selected.s === it.startTime)
+          && (!it.endTime || selected.e === it.endTime);
+      });
       const move = byRoute || byCode || (moves.length === 1 ? moves[0] : null);
       if (!move) {
         if (code) {
@@ -2377,12 +2499,12 @@ function enforceOfficialRailItems(items, outline) {
         return;
       }
       const list = asArray(move.sched);
-      const exact = code && list.find((c) => String(c.code || '').toUpperCase() === code
-        && (!it.startTime || c.s === it.startTime)
-        && (!it.endTime || c.e === it.endTime));
-      const pick = exact || pickSchedule(list, it.startTime);
+      const pick = selectedOfficialSchedule(move) || pickSchedule(list, it.startTime);
       if (!pick) return;
       const oldCode = code;
+      const exact = code && oldCode === String(pick.code || '').toUpperCase()
+        && (!it.startTime || it.startTime === pick.s)
+        && (!it.endTime || it.endTime === pick.e);
       if (!exact || oldCode !== pick.code || it.startTime !== pick.s || it.endTime !== pick.e
         || !String(it.activity || '').includes(pick.code)) {
         it.activity = `乘 ${pick.code} 次列车从${pick.from}前往${pick.to}`;
@@ -2750,5 +2872,7 @@ module.exports = {
   dedupeTransports, transportCodeOf,
   isRealCode, moveActivityText, isScheduledMove,
   fixDayTimeOverlaps, samePlace, toMin, fmtMin,
-  collectSegments, applyRealSchedules, enforceRealSchedule, pickSchedule, shareStem,
+  collectSegments, applyRealSchedules, resolveOfficialRailTimeline,
+  enforceRealSchedule, enforceOfficialRailItems, dedupeOfficialRailItems,
+  pickSchedule, shareStem,
 };

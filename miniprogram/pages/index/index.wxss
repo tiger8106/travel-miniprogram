@@ -22,6 +22,29 @@
   line-height: 1.6;
 }
 
+.trip-generation {
+  margin-top: 18rpx;
+  padding: 16rpx 18rpx;
+  border-radius: 14rpx;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.trip-generation-title {
+  font-size: 25rpx;
+  font-weight: 600;
+}
+
+.trip-generation-sub {
+  margin-top: 6rpx;
+  font-size: 22rpx;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.trip-generation-fail {
+  background: rgba(127, 29, 29, 0.24);
+}
+
 /* 攻略切换行 */
 .switch-row {
   display: flex;

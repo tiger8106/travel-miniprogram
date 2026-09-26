@@ -3,13 +3,14 @@
 基于微信云开发的旅游攻略小程序。上传 .docx 攻略文档，AI 自动解析生成每日行程、抢票闹钟和旅行建议；点击行程中的"从 A 到 B"按钮直接跳转高德地图；到点的抢票闹钟会自动震动提醒。
 
 > 出品：阿稳 🧰  
-> 最后更新：2026-09-18
+> 最后更新：2026-09-27
 
 ---
 
 ## ✨ 核心功能
 
 - 📤 **攻略解析**：上传 .docx 攻略 → AI 自动生成结构化每日行程
+- 🧭 **制定新攻略**：先生成路线大纲，再后台分轮细化；首页显示进度，完成后自动补齐闹钟和建议
 - 📅 **每日行程**：清晰展示每天的活动安排，支持编辑/新增/删除
 - ⏰ **抢票闹钟**：自动从攻略提取抢票时间，到点震动提醒
 - 💡 **旅行建议**：AI 生成天气、装备、必吃、注意事项等实用建议
@@ -41,17 +42,21 @@ travel-miniprogram/
 └── cloudfunctions/               # 云函数（多用户后端）
     ├── login/                    # 微信登录拿 openid
     ├── parseTravelPlan/          # 解析 docx + LLM 生成结构化行程
+    ├── generatePlan/             # 制定新攻略、后台续跑、12306 班次核对
+    ├── genWorker/                # 定时接力后台生成任务
     ├── itinerary/                # 行程 CRUD
     ├── ticketAlarm/              # 闹钟 CRUD
     ├── suggestions/              # 旅行建议 get / refresh
+    ├── initdb/                   # 初始化 trips、gen_jobs、schedule_cache 等集合
     └── sendAlarm/                # 定时触发器（每分钟检查推送）
 ```
 
 ### 数据流
 
 1. **上传流程**：用户选择 .docx → `uploadDoc` 上传到云存储 → `parseTravelPlan` 云函数下载 → mammoth 解析 → LLM 生成 JSON → 入库
-2. **行程展示**：前端 `getItinerary` 拉数据 → 渲染每日行程卡片 → 可编辑/导航/删除
-3. **闹钟触发**：
+2. **制定攻略**：前端生成大纲 → `generatePlan` 创建生成中占位行程 → `genWorker` 与前端共同续跑 → 每轮写回进度 → 完成后写入闹钟和建议；12306 官方候选用于校准车次和时间
+3. **行程展示**：前端先拉摘要列表，只拉当前攻略的完整条目 → 渲染每日行程卡片 → 可编辑/导航/删除；生成中的条目只读
+4. **闹钟触发**：
    - **前台**：`utils/alarm.js` 每 30 秒轮询，到点 `wx.vibrateLong` 震动 + 弹窗
    - **后台**：`sendAlarm` 云函数每分钟跑一次，到点推送通知
 
@@ -108,16 +113,24 @@ LLM_BASE_URL=https://api.minimaxi.com/v1   ← 默认值，若不通改这里
 | `LLM_API_KEY` | ✅ | 你的 API Key |
 | `LLM_BASE_URL` | ⛔ | 自定义时填，否则按 provider 推断 |
 | `LLM_MODEL` | ⛔ | 自定义模型名（如 `qwen3.5-plus` / `MiniMax-M3`） |
+| `AMAP_KEY` | ✅ | 高德地图 Web 服务 Key（地理编码与导航定位） |
 | `SUBSCRIBE_TEMPLATE_ID` | ⛔ | 订阅消息模板 ID（闹钟后台推送用） |
 
 ### 4. 上传云函数
 
 右键 `cloudfunctions/login` → 上传并部署：云端安装依赖  
 右键 `cloudfunctions/parseTravelPlan` → 上传并部署：云端安装依赖（mammoth）  
+右键 `cloudfunctions/generatePlan` → 上传并部署：云端安装依赖
+右键 `cloudfunctions/genWorker` → 上传并部署：云端安装依赖
 右键 `cloudfunctions/itinerary` → 上传并部署  
 右键 `cloudfunctions/ticketAlarm` → 上传并部署  
 右键 `cloudfunctions/suggestions` → 上传并部署  
+右键 `cloudfunctions/initdb` → 上传并部署
 右键 `cloudfunctions/sendAlarm` → 上传并部署
+
+云函数请逐个上传，等开发者工具中上一个函数离开 `Updating` 状态后再上传下一个；并发上传会触发腾讯云 `FailedOperation.UpdateFunctionCode`。改完 `generatePlan` 后检查日志版本 `v1.7-stateful-lease`，改完 `itinerary`、`ticketAlarm`、`initdb` 也应看对应日志或返回版本确认线上代码已更新。
+
+首次部署或更换云环境后，在开发者工具控制台调用一次 `initdb`。它会创建 `trips`、`gen_jobs`、`schedule_cache` 等集合；生成函数也会在缺集合时自动兜底创建，但初始化一次更容易检查权限和环境是否正确。
 
 ### 5. 配置定时触发器（闹钟推送）
 

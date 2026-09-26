@@ -43,13 +43,14 @@ exports.main = async (event) => {
   if (!jobs.length) return { code: 0, picked: 0, results: [] };
 
   const results = [];
+  const runnerId = `worker-${now}-${Math.floor(Math.random() * 1000000000)}`;
   for (const job of jobs) {
     try {
       // 云函数间调用拿不到微信上下文，所以把任务归属的 openid 显式带过去；
       // generatePlan 侧还会校验 job._openid 是否一致，冒充不了别人的任务。
       const r = await cloud.callFunction({
         name: 'generatePlan',
-        data: { action: 'resume', jobId: job._id, openid: job._openid },
+        data: { action: 'resume', jobId: job._id, openid: job._openid, runnerId },
       });
       const out = (r && r.result) || {};
       results.push({

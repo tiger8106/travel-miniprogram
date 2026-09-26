@@ -15,6 +15,7 @@ Page({
     dayLabel: '',
     isToday: false,         // 当前查看的是否是今天
     readonly: false,        // 只读模式（查看历史行程）
+    viewReadonly: false,    // 页面入口要求的只读；生成中行程会在此基础上临时只读
     items: [],              // 展示顺序：进行中/未开始（按时间升序）→ 已结束（沉底置灰）
     dayTips: null,          // { tips: [], notices: [] }
     tipsLoading: false,
@@ -27,11 +28,13 @@ Page({
   },
 
   onLoad(opts) {
+    const viewReadonly = opts.readonly === '1';
     this.setData({
       dayIdx: parseInt(opts.dayIdx || 0, 10),
       // 支持 ?tripId=xxx&readonly=1 直接查看指定攻略（历史行程入口），不改动全局当前行程
       viewTripId: opts.tripId || '',
-      readonly: opts.readonly === '1',
+      readonly: viewReadonly,
+      viewReadonly,
       // all=1：整份攻略按时间顺序全部展开（只读浏览用）
       viewAll: opts.all === '1',
     });
@@ -252,6 +255,11 @@ Page({
     // 补齐每条行程的稳定 key（否则编辑/删除拿不到标识）
     trip.items = this.withItemKeys(trip.items);
     this.baseDate = this.parseTripStart(trip.startDate);
+    // 生成中的条目会在后续轮次被覆盖，先只读，避免用户修改被静默冲掉。
+    // 生成完成后重新拉取时自动恢复编辑能力；历史入口仍始终只读。
+    const generating = trip && trip.sourceType === 'ai'
+      && trip.genStatus && trip.genStatus !== 'done';
+    const effectiveReadonly = !!this.data.viewReadonly || !!generating;
 
     // 全行程展开模式：直接按天顺序铺开，不再按单天查看
     if (this.data.viewAll) {
@@ -262,6 +270,7 @@ Page({
       this.setData({
         tripId,
         trip,
+        readonly: effectiveReadonly,
         dayGroups,
         totalCount: (trip.items || []).length,
         dayLabel: (s || e) ? `${s || '?'} → ${e || '?'}` : '日期未设置',
@@ -294,9 +303,14 @@ Page({
 
     const dayLabel = `${this.formatYMD(cur)} ${weekdays[cur.getDay()]} · 第${this.data.dayIdx + 1}天`;
 
-    this.setData({ tripId, trip, dayLabel, isToday });
+    this.setData({ tripId, trip, readonly: effectiveReadonly, dayLabel, isToday });
     this.applyTimeFlags();
-    this.loadDayTips();
+    if (generating) {
+      this._tipsKey = null;
+      this.setData({ tipsLoading: false, dayTips: null });
+    } else {
+      this.loadDayTips();
+    }
   },
 
   formatYMD(d) {
@@ -636,6 +650,7 @@ Page({
 
   // 重新生成当天建议
   async onRetryTips() {
+    if (this.data.readonly) return;
     const { tripId, dayIdx } = this.data;
     if (!tripId) return;
     this._tipsKey = null;   // 强制重拉（否则会被"同一天只拉一次"的守卫拦下）

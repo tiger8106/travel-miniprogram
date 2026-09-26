@@ -32,8 +32,13 @@ async function getItinerary(tripId) {
   return callFn('itinerary', { action: 'get', tripId });
 }
 
-async function listItineraries() {
-  return callFn('itinerary', { action: 'list' });
+async function listItineraries(options) {
+  options = options || {};
+  return callFn('itinerary', {
+    action: 'list',
+    compact: !!options.compact,
+    fullTripId: options.fullTripId || '',
+  });
 }
 
 async function updateItinerary(tripId, patch) {
@@ -113,9 +118,10 @@ async function startGen(input) {
 }
 
 // 续跑一轮。带 expectRound 做乐观锁：只有"没人替我跑过"时才真的跑
-async function resumeGen(jobId, expectRound) {
+async function resumeGen(jobId, expectRound, runnerId) {
   const data = { action: 'resume', jobId };
   if (expectRound != null) data.expectRound = expectRound;
+  if (runnerId) data.runnerId = runnerId;
   return callFn('generatePlan', data);
 }
 

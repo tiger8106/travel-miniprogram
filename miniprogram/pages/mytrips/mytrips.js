@@ -55,7 +55,7 @@ Page({
   // 后台生成卡住了（比如那一轮被系统杀掉）：手动点一下接着跑
   onResumeGen() {
     wx.showLoading({ title: '继续生成中' });
-    genrunner.sync().then((s) => {
+    genrunner.sync({ resumeFailed: true }).then((s) => {
       wx.hideLoading();
       const tip = s.status === 'done' ? '已生成完成'
         : s.status === 'running' ? '正在后台生成…' : (s.error || '暂时没法继续');
@@ -88,18 +88,20 @@ Page({
     if (this.data.needLogin) this.setData({ needLogin: false });
     this.setData({ loading: true });
     try {
-      const list = await api.listItineraries();
+      const list = await api.listItineraries({ compact: true });
       const pinned = tripUtil.getPinnedIds();
       const trips = (list || []).map((t) => ({
         _id: t._id,
         title: t.title || '未命名行程',
         startDate: t.startDate || '',
         dateRange: t.startDate ? `${t.startDate} → ${t.endDate || '?'}` : '日期未设置',
-        itemCount: (t.items || []).length,
+        itemCount: Number(t.itemCount) || (t.items || []).length,
         ended: tripUtil.isEnded(t),
         pinned: pinned.indexOf(t._id) >= 0,
         // 还在后台细化中（多天行程要跑好几轮）：列表里直接标出来
         generating: t.genStatus === 'generating',
+        genFailed: t.genStatus === 'failed',
+        genError: t.genError || '',
         genDone: (t.genProgress && t.genProgress.done) || 0,
         genTotal: (t.genProgress && t.genProgress.total) || 0,
       }));

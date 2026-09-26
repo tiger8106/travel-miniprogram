@@ -36,15 +36,20 @@
     <view class="day-header card">
       <view class="card-title">
         {{dayLabel}}
-        <text wx:if="{{readonly}}" class="past-badge">历史行程 · 只读</text>
+        <text wx:if="{{trip.genStatus === 'generating'}}" class="past-badge">正在生成 · 只读</text>
+        <text wx:elif="{{trip.genStatus === 'failed'}}" class="past-badge">生成未完成 · 只读</text>
+        <text wx:elif="{{readonly}}" class="past-badge">历史行程 · 只读</text>
       </view>
       <view class="text-secondary">共 {{items.length}} 项行程</view>
+      <view wx:if="{{trip.genStatus === 'generating'}}" class="text-secondary" style="margin-top: 10rpx; color: #2563eb;">
+        已生成的内容可以先查看，剩余天数会在后台继续补全。
+      </view>
     </view>
 
     <view wx:if="{{!items.length}}" class="empty">
       <text class="empty-icon">📭</text>
-      <view>今天还没有安排</view>
-      <button class="btn-ghost" bindtap="onAddItem" style="margin-top: 32rpx;">+ 添加行程</button>
+      <view>{{trip.genStatus === 'generating' ? '这一天还在生成中' : '今天还没有安排'}}</view>
+      <button wx:if="{{!readonly}}" class="btn-ghost" bindtap="onAddItem" style="margin-top: 32rpx;">+ 添加行程</button>
     </view>
 
     <block wx:else>

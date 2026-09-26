@@ -291,7 +291,8 @@ ok('行李规则有代码兜底且挂在 sanitize 之后', /function enforceLugg
   && /items = enforceLuggageRules\(items, outline\)/.test(planJs));
 ok('已确认大交通有确定性对齐兜底（车次错时刻/漏排/重复/起终点错都能拽回）',
   /function enforceMovesAlignment/.test(planJs)
-  && /时刻漂移/.test(planJs) && /全天未安排，补一条/.test(planJs));
+  && /时刻漂移/.test(planJs) && /wantS != null/.test(planJs)
+  && /全天未安排，补一条/.test(planJs));
 ok('细化清洗链按序挂全（对齐→去重→起点→接驳→早餐→禁午睡→晚间→餐次纠偏→闭环→行李→顺延）',
   /items = enforceMovesAlignment\(sanitizeItems/.test(planJs)
     && /items = dedupeTransports\(items\);/.test(planJs)
@@ -578,7 +579,9 @@ ok('后台生成：任务落库 + 支持续跑（resume / jobStatus）',
 
 ok('后台生成：租约防并发（同一任务不会被跑两遍）',
   /JOB_LEASE_MS/.test(gpIdx) && /leaseUntil/.test(gpIdx)
-    && /expectRound/.test(gpIdx) && /const busy/.test(gpIdx));
+    && /expectRound/.test(gpIdx) && /const busy/.test(gpIdx)
+    && /leaseOwner/.test(gpIdx) && /claimWhere/.test(gpIdx)
+    && /runnerId/.test(fs.readFileSync(path.join(CF, 'genWorker/index.js'), 'utf8')));
 
 ok('后台生成：有定时触发器兜底（用户关掉小程序也能跑完）',
   /genWorker/.test(workerIdx) && /action: 'resume'/.test(workerIdx)
@@ -623,7 +626,8 @@ ok('细化轮时间纪律：地理编码有硬预算（不再顶穿 60s）+ 闹�
 
 ok('生成失败可续：前端超时自动重试（不吓用户）+ 云端 failed 任务可复活',
   /TIMEOUT_RE/.test(genrunnerJs) && /timeouts/.test(genrunnerJs)
-    && /revivals/.test(gpIdx));
+    && /revivals/.test(gpIdx) && /resumeFailed/.test(genrunnerJs)
+    && /sync\(\{ resumeFailed: true \}\)/.test(fs.readFileSync(path.join(MP, 'pages/mytrips/mytrips.js'), 'utf8')));
 
 ok('开发者补测试额度有云端开关（QUOTA_DEV_GRANT，默认关死）',
   /QUOTA_DEV_GRANT/.test(fs.readFileSync(path.join(CF, 'quota/index.js'), 'utf8'))
@@ -651,6 +655,51 @@ ok('细化波次提到 4 天/轮（并行耗时≈最慢一天，8 天行程少�
 
 ok('补测试额度用 KeepCode（callFn 成功只回 data，页面判 r.code===0 会误报"没补上"）',
   /callFnKeepCode\('quota', \{ action: 'devGrant' \}\)/.test(quotaUtil));
+
+// ---------- ⑰ 生成状态与上线边界（2026-09-27） ----------
+const genIndex2 = fs.readFileSync(path.join(CF, 'generatePlan/index.js'), 'utf8');
+const indexPage2 = fs.readFileSync(path.join(MP, 'pages/index/index.js'), 'utf8');
+const indexWxml2 = fs.readFileSync(path.join(MP, 'pages/index/index.wxml'), 'utf8');
+const itinPage2 = fs.readFileSync(path.join(MP, 'pages/itinerary/itinerary.js'), 'utf8');
+const itinWxml2 = fs.readFileSync(path.join(MP, 'pages/itinerary/itinerary.wxml'), 'utf8');
+const itineraryFn2 = fs.readFileSync(path.join(CF, 'itinerary/index.js'), 'utf8');
+const alarmFn2 = fs.readFileSync(path.join(CF, 'ticketAlarm/index.js'), 'utf8');
+const auth2 = fs.readFileSync(path.join(MP, 'utils/auth.js'), 'utf8');
+const apiReal2 = fs.readFileSync(path.join(MP, 'services/api-real.js'), 'utf8');
+
+ok('后台任务创建时立即建立生成中的行程占位记录（首页可提前显示）',
+  /genStatus: 'generating'/.test(genIndex2) && /const trip = await db\.collection\(COL_TRIP\)\.add/.test(genIndex2)
+    && /tripId, updatedAt/.test(genIndex2));
+ok('生成轮次完成/失败会同步行程状态',
+  /genCompletedAt/.test(genIndex2) && /genStatus: 'failed'/.test(genIndex2)
+    && /updateTripGeneration/.test(genIndex2));
+ok('续跑接口校验行程归属，防止伪造 tripId 覆盖他人攻略',
+  /oldData\._openid !== openid/.test(genIndex2)
+    && /where\(\{ _openid: openid, tripId: finalTripId, source: 'ai' \}\)/.test(genIndex2));
+ok('同一账号云端禁止重复生成任务',
+  /已有一个行程正在生成/.test(genIndex2) && /status: 'running'/.test(genIndex2));
+ok('首页有生成状态提示和轮询刷新',
+  /trip\.genStatus === 'generating'/.test(indexWxml2) && /setInterval\(.*6000/.test(indexPage2)
+    && /scheduleGenerationRefresh/.test(indexPage2));
+ok('行程列表走摘要接口，首页只拉当前行程详情（避免多份攻略撑爆响应）',
+  /event && event\.compact/.test(itineraryFn2) && /fullTripId/.test(itineraryFn2)
+    && /listItineraries\(options\)/.test(apiReal2) && /compact: !!options\.compact/.test(apiReal2));
+ok('生成中的行程详情只读，完成后恢复编辑',
+  /effectiveReadonly/.test(itinPage2) && /trip\.genStatus === 'generating'/.test(itinWxml2)
+    && /trip\.genStatus === 'failed'/.test(itinWxml2)
+    && /已生成的内容可以先查看/.test(itinWxml2));
+ok('行程更新接口只允许白名单字段',
+  /const textFields = \{ title: 60, summary: 500, region: 300, startDate: 20, endDate: 20 \}/.test(itineraryFn2)
+    && /safePatch\.items = patch\.items\.slice\(0, 500\)/.test(itineraryFn2)
+    && /行程仍在生成，请完成后再编辑/.test(itineraryFn2));
+ok('生成中的行程禁止删除，避免后台任务写回孤儿数据',
+  /cur\.data\.genStatus === 'generating'/.test(itineraryFn2)
+    && /行程正在生成，请完成后再删除/.test(itineraryFn2));
+ok('闹钟保存先校验行程归属且更新字段白名单化',
+  /COL_TRIP = 'trips'/.test(alarmFn2) && /trip\.data\._openid !== openid/.test(alarmFn2)
+    && /safePatch\.fireAtStr/.test(alarmFn2));
+ok('退出登录清理本地快照，避免账号切换串数据',
+  /require\('\.\/homecache'\)\.clearAll/.test(auth2));
 
 console.log(failed ? `\n${failed} 项失败 ✗` : '\n全部通过 ✓');
 process.exit(failed ? 1 : 0);

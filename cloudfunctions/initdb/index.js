@@ -1,11 +1,12 @@
-// cloudfunctions/_init/index.js
+// cloudfunctions/initdb/index.js
 // 数据库初始化 —— 一次性创建所有 collection + 索引
-// 调用方式：在小程序里手动 wx.cloud.callFunction({ name: '_init' })
+// 调用方式：在小程序里手动 wx.cloud.callFunction({ name: 'initdb' })
 
 const cloud = require('wx-server-sdk');
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
 const db = cloud.database();
+const INIT_VERSION = 'v1.1-safe-init';
 
 // 要建的 collection 列表
 const COLLECTIONS = [
@@ -16,6 +17,8 @@ const COLLECTIONS = [
   { name: 'parse_tasks',   desc: '分步解析任务态' },
   { name: 'orders',        desc: '虚拟支付订单' },
   { name: 'quota_logs',    desc: '额度流水（扣费幂等用）' },
+  { name: 'gen_jobs',      desc: 'AI 行程后台生成任务' },
+  { name: 'schedule_cache', desc: '按日期缓存官方班次' },
 ];
 
 exports.main = async (event, context) => {
@@ -44,32 +47,35 @@ exports.main = async (event, context) => {
     }
   }
 
-  // 给 trips 建一个示例行（避免空表引发其他问题）
-  try {
-    const trips = await db.collection('trips').limit(1).get();
-    if (!trips.data || trips.data.length === 0) {
-      const now = Date.now();
-      await db.collection('trips').add({
-        data: {
-          _openid: openid,
-          title: '示例行程 - 删除或编辑',
-          summary: '这是初始化的示例行程',
-          startDate: '2026-10-01',
-          endDate: '2026-10-07',
-          items: [],
-          createdAt: now,
-          updatedAt: now,
-        },
-      });
-      results.push({ name: 'trips-sample', status: 'created' });
+  // 生产环境默认不写示例行程，避免初始化账号看到不属于自己的演示数据。
+  // 本地演示确实需要时，显式配置 INIT_SAMPLE_TRIP=1 再执行一次即可。
+  if (process.env.INIT_SAMPLE_TRIP === '1') {
+    try {
+      const trips = await db.collection('trips').where({ _openid: openid }).limit(1).get();
+      if (!trips.data || trips.data.length === 0) {
+        const now = Date.now();
+        await db.collection('trips').add({
+          data: {
+            _openid: openid,
+            title: '示例行程 - 删除或编辑',
+            summary: '这是初始化的示例行程',
+            startDate: '2026-10-01',
+            endDate: '2026-10-07',
+            items: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        results.push({ name: 'trips-sample', status: 'created' });
+      }
+    } catch (e) {
+      results.push({ name: 'trips-sample', status: 'fail', err: e.errMsg || e.message });
     }
-  } catch (e) {
-    results.push({ name: 'trips-sample', status: 'fail', err: e.errMsg || e.message });
   }
 
   return {
     code: 0,
-    data: { results, openid },
+    data: { results, openid, version: INIT_VERSION },
     msg: '初始化完成',
   };
 };
