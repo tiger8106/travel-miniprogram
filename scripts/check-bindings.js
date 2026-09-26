@@ -391,6 +391,14 @@ ok('QPS 限速保护（请求间隔 + infocode 重试，QPS 被限时不再掉�
   /AMAP_MIN_GAP_MS/.test(geoJs) && /resp\.infocode/.test(geoJs));
 ok('geocode 有关键词放宽兜底（砍开头两字，「大新明仕酒店」→「明仕酒店」）',
   /poi\/relax/.test(geoJs));
+ok('geo 有行政区划级防线 + 住宿餐饮类防线（客运站不再定位到市政府、编造酒店名宁可不给坐标）',
+  /function geoLevelOk/.test(geoJs) && /function geoClassOk/.test(geoJs)
+    && /geoLevelOk\(bare, r\.hay, r\.level\)/.test(geoJs) && /geoClassOk\(bare, r\.hay\)/.test(geoJs));
+ok('POI 名剥分支后缀 + 枢纽等价匹配（「XX客栈(客运中心店)」不顶掉真车站、「客运站」≈「市客运中心」）',
+  /function hubEquivalent/.test(geoJs)
+    && geoJs.includes('[（(]')        // 分支后缀剥除的字符类
+    && /HUB_TAIL\.test\(k\) && LODGE_FOOD_WORD\.test\(n\)/.test(geoJs));
+
 ok('geocode 回传命中的城市（item.city 按条目落准，前端实时定位直接用对城市）',
   /cityTagOf/.test(geoJs));
 const parseIdxJs = fs.readFileSync(path.join(ROOT, 'cloudfunctions/parseTravelPlan/index.js'), 'utf8');

@@ -3,16 +3,35 @@ const mapUtil = require('../../utils/map');
 
 const CATEGORY_ICONS = {
   sight: '🏞️', food: '🍜', hotel: '🏨',
-  transport: '🚄', ticket: '🎫', other: '📌',
+  ticket: '🎫', other: '📌',
 };
 
+// 交通条目按 transportType（activity 文本兜底）选图标，不再全员火车头
+function transportIcon(item) {
+  const t = String((item && item.transportType) || '').toLowerCase();
+  const act = String((item && item.activity) || '');
+  if (t === 'walk' || /步行|徒步/.test(act)) return '🚶';
+  if (t === 'train' || /高铁|动车|火车|列车|城际/.test(act)) return '🚄';
+  if (t === 'plane' || /航班|飞机|航站楼/.test(act)) return '✈️';
+  if (t === 'ride') {
+    if (/公交|巴士|大巴/.test(act)) return '🚌';
+    return '🚇';   // 生成端约定：ride = 公交地铁/电动车，默认给地铁
+  }
+  if (t === 'bus' || /公交|巴士|大巴|班车/.test(act)) return '🚌';
+  if (/缆车|索道/.test(act)) return '🚡';
+  if (/船|游船|渡轮/.test(act)) return '⛴️';
+  return '🚗';     // car / 未标注 → 打车/驾车
+}
+
 // 编辑抽屉里的选项（chips 形式，比 picker 更直观好看）
+// 注意取值约定与生成端一致：ride = 公交地铁/电动车（不是骑行）
 const TRANSPORT_OPTIONS = [
-  { value: 'car', label: '驾车', icon: '🚗' },
+  { value: 'car', label: '打车/驾车', icon: '🚗' },
   { value: 'walk', label: '步行', icon: '🚶' },
-  { value: 'ride', label: '骑行', icon: '🚲' },
-  { value: 'bus', label: '公交', icon: '🚌' },
+  { value: 'ride', label: '公交/地铁', icon: '🚇' },
   { value: 'train', label: '火车', icon: '🚄' },
+  { value: 'plane', label: '飞机', icon: '✈️' },
+  { value: 'bus', label: '大巴', icon: '🚌' },
 ];
 
 const CATEGORY_OPTIONS = [
@@ -67,7 +86,9 @@ Component({
     item(item) {
       if (item) {
         this.setData({
-          icon: CATEGORY_ICONS[item.category] || '📌',
+          icon: item.category === 'transport'
+            ? transportIcon(item)
+            : (CATEGORY_ICONS[item.category] || '📌'),
           navLegs: this.buildNavLegs(item),
         });
       }

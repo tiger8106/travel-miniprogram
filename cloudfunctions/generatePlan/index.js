@@ -44,8 +44,18 @@ async function geocodeItems(items, cityOf) {
       items.forEach((it) => {
         const s = coordMap.get(it.startLocation);
         const e = coordMap.get(it.endLocation);
-        if (s) { it.startLon = s.lon; it.startLat = s.lat; }
-        if (e) { it.endLon = e.lon; it.endLat = e.lat; }
+        if (s) {
+          it.startLon = s.lon; it.startLat = s.lat;
+          if (s.matchedName && s.matchedName !== it.startLocation) {
+            it.startLocation = s.matchedName;   // 回写高德真实 POI 名，用户搜索/导航不再落空
+          }
+        }
+        if (e) {
+          it.endLon = e.lon; it.endLat = e.lat;
+          if (e.matchedName && e.matchedName !== it.endLocation) {
+            it.endLocation = e.matchedName;
+          }
+        }
       });
     }
     // 每条也记下它自己的城市：前端点导航时用它消歧，比整个行程的城市串准得多

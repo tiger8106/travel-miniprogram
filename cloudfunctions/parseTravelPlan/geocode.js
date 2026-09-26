@@ -239,7 +239,7 @@ const TAIL_GROUPS = [
   /站|候机楼|航站楼/,                        // 车站/机场类（东站/南站/北站/客运站…）
   /码头|客运港|港口|渡口|游船/,               // 码头类
   /停车场|停车点|停车楼|泊车/,                // 停车场类
-  /服务中心|集散中心|游客中心|接待中心/,        // 中心类
+  /服务中心|集散中心|游客中心|接待中心|中心/,    // 中心类
   /酒店|宾馆|饭店|客栈|民宿|度假村|招待所/,     // 住宿类
   /景区|风景区|景点|名胜|公园|游览区/,          // 景区类
   /广场|步行街|商业街|街区/,                  // 街区类
@@ -247,6 +247,31 @@ const TAIL_GROUPS = [
   /市场|商场|超市|购物中心|商城/,              // 商圈类
   /大桥|桥/,                                 // 桥类
 ];
+
+/**
+ * 交通枢纽类尾缀：关键词带这类尾缀时，POI 基础名里出现住宿/餐饮词
+ * 几乎肯定是"XX客栈（某客运中心店）"这类分支店，不是枢纽本身。
+ */
+const HUB_TAIL = /(客运站|客运中心|火车站|高铁站|枢纽站|候机楼|机场|码头|渡口|游客中心|游客集散中心|旅游集散中心|集散中心|停车场|服务中心)$/;
+const LODGE_FOOD_WORD = /酒店|宾馆|客栈|民宿|饭店|餐厅|酒楼|饭馆|火锅|烧烤|小吃|汤锅|招待所/;
+
+/**
+ * 枢纽等价匹配（通用结构判定，不认任何具体站名）：
+ * 「XX客运站」vs「XX市客运中心」——差一个"站/中心"的叫法、中间还夹个
+ * 行政区字，但明明是同一座站。判定：关键词剥掉枢纽尾缀 = 主体；
+ * POI 名里主体出现（最多隔 1 个行政区字），剩余部分恰好是某种枢纽叫法。
+ */
+const HUB_REST = /^(客运中心|客运站|汽车客运中心|汽车客运站|汽车站|火车站|高铁站|枢纽站|站|候机楼|机场|码头|游客中心|游客集散中心|服务中心|停车场)$/;
+function hubEquivalent(k, n) {
+  if (!HUB_TAIL.test(k)) return false;
+  const stem = k.replace(HUB_TAIL, '');
+  if (stem.length < 2) return false;
+  const si = n.indexOf(stem);
+  if (si < 0) return false;
+  let rest = n.slice(si + stem.length);
+  rest = rest.replace(/^[市县区镇]/, '');
+  return HUB_REST.test(rest);
+}
 
 /**
  * POI 名与搜索词的匹配强度（3 > 2 > 1）：
@@ -257,7 +282,9 @@ const TAIL_GROUPS = [
  * 结果「德天瀑布服务中心」被酒店 POI 顶掉。现在按强度择优。
  */
 function nameScore(poiName, keyword) {
-  const n = normName(poiName);
+  // 剥掉 POI 名末尾的分支后缀（「XX客栈(某客运中心店)」）再比：
+  // 否则"客运中心"这类词会靠分支后缀蹭进匹配
+  const n = normName(String(poiName || '').replace(/[（(][^）)]*[）)]$/, ''));
   const k = normName(keyword);
   if (!n || !k) return 1;
   if (n.indexOf(k) >= 0) return 3;
@@ -285,9 +312,14 @@ function nameScore(poiName, keyword) {
  */
 const GENERIC_TAIL = /(风景名胜区|游客集散中心|旅游集散中心|集散中心|游客中心|游客服务中心|服务中心|客运站|枢纽站|火车站|高铁站|候机楼|东站|南站|西站|北站|风景区|景区|度假区|大酒店|饭店|酒店|宾馆|公园|广场|中心|码头|渡口|机场|大桥|学校|大学|学院|医院|商场|市场|超市|大楼|大厦|停车场|站)+$/;
 function nameOk(poiName, keyword) {
-  const n = normName(poiName);
+  // 同 nameScore：先剥分支后缀，再判"是不是同一件事"
+  const n = normName(String(poiName || '').replace(/[（(][^）)]*[）)]$/, ''));
   const k = normName(keyword);
   if (!n || !k) return true;                       // 没名可比就不加这道锁
+  // 枢纽词反查：搜车站/机场/游客中心，命中的却是"XX客栈/酒店" → 拒
+  if (HUB_TAIL.test(k) && LODGE_FOOD_WORD.test(n)) return false;
+  // 枢纽等价：「XX客运站」≈「XX市客运中心」（同一座站的不同叫法）
+  if (hubEquivalent(k, n)) return true;
   if (n.indexOf(k) >= 0) return true;              // POI 名包含搜索词（更具体的全称）
   const tailM = k.match(GENERIC_TAIL);
   if (tailM && tailM.index > 0) {
@@ -320,6 +352,34 @@ function geoNameOk(keyword, hay) {
   if (h.indexOf(k) >= 0) return true;
   if (k.length < 3) return false;
   return lcsLen(k, h) >= Math.min(3, k.length);
+}
+
+/**
+ * geo 结果是行政区划级（省/市/区县/乡镇）时的防线：结果名必须包含完整关键词。
+ * 实测翻车：搜「都江堰客运站」，POI 没搜到（真实名叫"都江堰客运中心"），
+ * geo 模糊兜底返回"四川省成都市都江堰市"——名称相关性过了（hay 含"都江堰"），
+ * 定位却落在区划中心点（市政府一带）。行政区划结果是"范围"不是"地点"，
+ * 只有关键词本身就是这个行政区名时才可信。
+ */
+const ADMIN_LEVEL_RE = /^(省|省份|城市|市|区县|县|乡镇|乡|镇|街道|商圈)$/;
+function geoLevelOk(keyword, hay, level) {
+  if (!ADMIN_LEVEL_RE.test(String(level || ''))) return true;
+  const k = normName(keyword);
+  const h = normName(hay);
+  return !!k && !!h && h.indexOf(k) >= 0;
+}
+
+/**
+ * 住宿/餐饮类关键词的 geo 兜底防线：geo 结果里也必须带同类词。
+ * 实测翻车：模型推荐了查无此店的"XX高原文化大酒店"，POI 搜不到，
+ * geo 兜底落到"XX镇"的镇域点——看着"在附近"，实际导去的是镇中心，
+ * 用户按推荐名也搜不到这家店。编造的名索性不给坐标（宁缺毋错）。
+ */
+const LODGE_FOOD_TAIL = /(酒店|大酒店|饭店|宾馆|民宿|客栈|公寓|招待所|度假村|餐厅|酒楼|饭馆|火锅|烧烤|小吃|汤锅|米粉|米线|面馆)$/;
+function geoClassOk(keyword, hay) {
+  const k = String(keyword || '').replace(/[（(][^）)]*[）)]/g, '');
+  if (!LODGE_FOOD_TAIL.test(k)) return true;
+  return LODGE_FOOD_TAIL.test(String(hay || ''));
 }
 
 // ---------------------------------------------------------------- 高德 API
@@ -437,8 +497,13 @@ async function geocodeOne(address, city) {
   // POI 步骤：基础证据 + 名称相关性（含类别尾缀锁）
   const poiOk = (kw) => (r) => baseOk(r) && nameOk(r.name, kw);
   // geo 步骤：基础证据 + 名称相关性（geo 模糊结果最容易张冠李戴）
-  const soft = (r) => baseOk(r) && geoNameOk(bare, r.hay);
-  const strict = (r) => cityHit(fullCity, r.hay) && selfHit(r.hay) && levelOk(r) && geoNameOk(bare, r.hay);
+  //   + 行政区级别防线（区划中心点不是具体地点）
+  //   + 住宿餐饮类防线（编造的店名 geo 会落到镇域点，宁可不给）
+  const geoOk = (r) => geoNameOk(bare, r.hay)
+    && geoLevelOk(bare, r.hay, r.level)
+    && geoClassOk(bare, r.hay);
+  const soft = (r) => baseOk(r) && geoOk(r);
+  const strict = (r) => cityHit(fullCity, r.hay) && selfHit(r.hay) && levelOk(r) && geoOk(r);
   // 命中的是哪个候选城市（回传给调用方记进 item.city，下次实时定位直接用对城市）
   const tagTokens = [...tokens, ...addrCities];
   const cityTagOf = (hay) => tagTokens.find((t) => String(hay || '').indexOf(t) >= 0) || '';
@@ -509,7 +574,7 @@ async function geocodeOne(address, city) {
   if (lastResortEligible && kNorm.length >= 4) {
     push('geo/last', () => geoRaw(raw, ''), (r) => {
       if (self.length && !selfHit(r.hay)) return false;
-      return geoNameOk(bare, r.hay);
+      return geoNameOk(bare, r.hay) && geoLevelOk(bare, r.hay, r.level) && geoClassOk(bare, r.hay);
     });
   }
 
@@ -564,4 +629,4 @@ async function geocodeBatch(addresses, cityOf) {
   return result;
 }
 
-module.exports = { geocodeOne, geocodeBatch, pickCity, cityTokens, stripSuffix, cityHit, selfTokens, selfMatch, addrTokens, nameOk, geoNameOk };
+module.exports = { geocodeOne, geocodeBatch, pickCity, cityTokens, stripSuffix, cityHit, selfTokens, selfMatch, addrTokens, nameOk, geoNameOk, geoLevelOk, geoClassOk };

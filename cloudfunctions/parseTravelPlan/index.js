@@ -184,8 +184,18 @@ exports.main = async (event, context) => {
         items.forEach((it) => {
           const s = coordMap.get(it.startLocation);
           const e = coordMap.get(it.endLocation);
-          if (s) { it.startLon = s.lon; it.startLat = s.lat; }
-          if (e) { it.endLon = e.lon; it.endLat = e.lat; }
+          if (s) {
+            it.startLon = s.lon; it.startLat = s.lat;
+            if (s.matchedName && s.matchedName !== it.startLocation) {
+              it.startLocation = s.matchedName;   // 回写高德真实 POI 名，搜索/导航不再落空
+            }
+          }
+          if (e) {
+            it.endLon = e.lon; it.endLat = e.lat;
+            if (e.matchedName && e.matchedName !== it.endLocation) {
+              it.endLocation = e.matchedName;
+            }
+          }
           // 命中的是哪个城市就记哪个（geocodeOne 校验通过时回传），
           // 前端点导航时用它做城市消歧——比整条行程共用一个城市词准得多
           const hitCity = (e && e.city) || (s && s.city) || '';
@@ -542,8 +552,18 @@ async function handleStep(event, ctx) {
       items.forEach((it) => {
         const s = coords[it.startLocation];
         const e = coords[it.endLocation];
-        if (s) { it.startLon = s.lon; it.startLat = s.lat; }
-        if (e) { it.endLon = e.lon; it.endLat = e.lat; }
+        if (s) {
+          it.startLon = s.lon; it.startLat = s.lat;
+          if (s.matchedName && s.matchedName !== it.startLocation) {
+            it.startLocation = s.matchedName;   // 回写高德真实 POI 名
+          }
+        }
+        if (e) {
+          it.endLon = e.lon; it.endLat = e.lat;
+          if (e.matchedName && e.matchedName !== it.endLocation) {
+            it.endLocation = e.matchedName;
+          }
+        }
         const hitCity = (e && e.city) || (s && s.city) || '';
         if (hitCity) it.city = hitCity;
         else if (cityHint && !it.city) it.city = cityHint;

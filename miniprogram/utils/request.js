@@ -2,14 +2,18 @@
 // 统一云函数调用封装
 
 /**
- * 检测云函数执行超时（-504003 FUNCTIONS_TIME_LIMIT_EXCEEDED）
+ * 检测云函数执行/网关超时：
+ *   -504003 FUNCTIONS_TIME_LIMIT_EXCEEDED 云函数执行超过配置时长
+ *   -601002 资源服务端超时（ESOCKETTIMEDOUT）——云函数内访问外部服务
+ *           （大模型/高德）太慢，平台网关等不到响应先断了
+ * 两者前端分步流水线都会自动重试（幂等），属预期内可恢复错误。
  * 云开发新创建的云函数**默认超时只有 3 秒**，跑 LLM 必然超，
  * 需要在控制台「云函数 → 配置 → 超时时间」改成 60 秒（每个函数单独配）
  * @param {object} err 原始错误
  */
 function isTimeout(err) {
   const raw = `${(err && (err.errMsg || err.message)) || ''}${(err && err.errCode) || ''}`;
-  return /-504003|timed out|TIME_LIMIT/i.test(raw);
+  return /-504003|-601002|ESOCKETTIMEDOUT|timed out|TIME_LIMIT/i.test(raw);
 }
 
 /**
@@ -45,12 +49,14 @@ function callFn(name, data = {}) {
         }
       },
       fail: (err) => {
-        console.error(`[cloud] ${name} fail:`, err);
-        // 超时不丢原始 errCode，改成能直接照做的人话提示
+        // 超时类（-504003/-601002）流水线会自动重试，属预期内错误：
+        // 只打一行 warn，不用 console.error 刷红调试台（真机上无声，不影响功能）
         if (isTimeout(err)) {
-          reject(new Error(`「${name}」执行超时：请在云开发控制台把该云函数的超时时间改成 60 秒（默认只有 3 秒）`));
+          console.warn(`[cloud] ${name} 本轮超时，自动重试继续`);
+          reject(new Error(`「${name}」本轮执行超时，正在自动重试继续`));
           return;
         }
+        console.error(`[cloud] ${name} fail:`, err);
         if (isFnNotFound(err)) {
           reject(new Error(`云函数「${name}」还没上传到云端：请在开发者工具左侧目录找到它，右键 →「上传并部署：云端安装依赖」`));
           return;

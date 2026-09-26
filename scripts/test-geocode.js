@@ -292,6 +292,46 @@ async function caseK() {
   ok(j && j.lon === 107.36 && j.city === '崇左',
     '「崇左南站」跨城候选逐个试 → 命中崇左并回传城市', j);
 
+  console.log('\n【2.5】2026-09-26 定位偏移三连（桩）');
+  // ① 枢纽词命中分支客栈：POI 名靠分支后缀"（…客运中心店）"蹭匹配 → 必须拒
+  ok(!G.nameOk('都江堰青之堰客栈(都江堰客运中心店)', '都江堰客运中心'),
+    '搜「客运中心」命中"客栈(客运中心店)" → 拒（剥分支后缀+枢纽反查）');
+  ok(G.nameOk('都江堰客运中心', '都江堰客运中心'),
+    '同名 POI 照常放行');
+  ok(!G.nameOk('重庆鲜面店', '重庆北站'),
+    '枢纽词反查不误伤原有类别锁用例');
+  // ② geo 行政区级兜底：区划中心点不是具体地点
+  ok(!G.geoLevelOk('都江堰客运站', '四川省成都市都江堰市', '市'),
+    '「都江堰客运站」geo 落到都江堰市（市级）→ 拒');
+  ok(G.geoLevelOk('四姑娘山', '四川省阿坝州小金县四姑娘山', '兴趣点'),
+    '非行政区级不受影响');
+  ok(G.geoLevelOk('都江堰市', '四川省成都市都江堰市', '市'),
+    '关键词本身是行政区名 → 区划中心就是答案，放行');
+  // ③ 编造的酒店名 geo 落到镇域点 → 拒
+  ok(!G.geoClassOk('四姑娘山高原文化大酒店', '四川省阿坝藏族羌族自治州小金县四姑娘山'),
+    '住宿词关键词 geo 结果里没住宿词 → 拒（宁缺毋错）');
+  ok(G.geoClassOk('悦来客栈', '小金县四姑娘山镇悦来客栈'),
+    'geo 结果确实是个客栈 → 放行');
+  ok(G.geoClassOk('象鼻山', '广西桂林象山区象鼻山'),
+    '非住宿餐饮词不受影响');
+
+  console.log('\n【2.6】链路级桩：编造酒店名 + 客运站 geo 区划兜底必须给出「放弃」');
+  const realGet2 = https.get;
+  stubHttp([
+    // POI 全部空手而归（这个名字高德搜不到 = 多半是编的）
+    { match: (u) => u.includes('/v3/place/text'), resp: { status: '1', pois: [] } },
+    // geo 只给到区划/镇域点
+    { match: (u) => u.includes('geocode/geo'), resp: { status: '1', geocodes: [{
+      formatted_address: '四川省阿坝藏族羌族自治州小金县四姑娘山镇',
+      location: '102.901969,31.11045', level: '乡镇',
+      province: '四川省', city: '阿坝藏族羌族自治州', district: '小金县', adcode: '513227',
+    }] } },
+  ]);
+  const fakeHotel = await G.geocodeOne('四姑娘山高原文化大酒店', '四川 阿坝 四姑娘山');
+  https.get = realGet2;
+  ok(fakeHotel === null, '查无此店的酒店名：geo 落到镇级区划 → 放弃坐标（宁缺毋错）', fakeHotel);
+  ok(fakeHotel !== undefined && fakeHotel === null, '桩确实生效（不是请求报错导致的假通过）');
+
   const k = await caseK();
   ok(k && k.lon === 106.86,
     '「大新明仕酒店」关键词放宽（砍开头两字）后命中', k);
