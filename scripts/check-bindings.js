@@ -49,6 +49,10 @@ fs.readdirSync(CF).forEach((dir) => {
   const err = syntaxOk(abs);
   ok(`JS 语法 cloudfunctions/${dir}/index.js`, !err, err || '');
 });
+['generatePlan/plan.js', 'generatePlan/schedule.js', 'generatePlan/rail12306.js'].forEach((rel) => {
+  const err = syntaxOk(path.join(CF, rel));
+  ok(`JS 语法 cloudfunctions/${rel}`, !err, err || '');
+});
 
 // ---------- ② 事件绑定对齐 ----------
 const RE = /(?:bind|catch)[:]?([a-zA-Z]*)\s*=\s*"([a-zA-Z_$][\w$]*)"/g;
@@ -594,8 +598,9 @@ ok('检索结果注入细化 prompt（模型只挑，不许自创车次与时刻
   /真实班次（已联网核对）/.test(planJs) && /day\.sched/.test(planJs)
     && /enforceRealSchedule/.test(planJs));
 
-ok('检索失败静默降级（绝不因为查不到就出不了行程）',
-  /沿用模型编排/.test(schedJs) && /沿用模型编排/.test(planJs));
+ok('12306 查不到时清除模型臆造车次（行程可继续但不冒充已核对）',
+  /official-unavailable/.test(planJs) && /班次与时刻暂未从12306查询到/.test(planJs)
+    && /lookupOfficial/.test(schedJs));
 
 ok('大纲超时不报错：云端后台补大纲（失败留下一轮重试）+ 前端转后台继续',
   /后台大纲完成/.test(gpIdx) && /attempts\.outline/.test(gpIdx)

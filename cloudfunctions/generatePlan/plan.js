@@ -226,7 +226,7 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
    **禁止舍近求远**：如果某个站下车后还要长距离打车折返才能到当天目的地，就是选错了站，必须换成更近的站（哪怕车次少一点）。
    4.2 **每段 mv 都要给 st（到站/下机后到当天首个目的地的接驳方式与耗时，如"地铁30分钟""步行8分钟""打车20分钟"）**：st 是你自己检验选站是否合格的尺子。
    判据：**st 里写"打车/网约车 ≥25 分钟"就说明这个站选在了反方向**（下车还得花钱绕回目的地），必须重选更近的站，或改成"同城轨道交通/市域铁路 + 短驳"的组合，把 st 变成步行或地铁；轨交/步行 1 小时以内都算合格（大城市坐地铁 40 分钟到酒店很正常，不算绕路）。确实没有更近的站才保留，并在当天 n 里说明原因。
-   4.3 **车次/航班是"参考班次"，你没有实时时刻表（铁律）**：你拿不到 12306 与航司的实时数据，凭记忆给的车次号可能已停开、时刻可能已调整。所以：① 车次号选该线路**长期稳定开行**的典型走向，不要生造"G9999"这类罕见号段；② **运行时长必须符合两地实际距离**（同城/市域 0.5~1.5 小时、邻省高铁 2~5 小时、1500km 以上才考虑 6 小时+或飞机），e-s 算出来的时长拿常识再验一遍，**严禁出现"高铁几十分钟跨省"这类离谱时长**；③ 发车/到达时刻必须是 **5 分钟的整数倍**（整点、半点、5 分、10 分这类刻度，如 08:30 / 14:05 / 19:45），**绝不要出现 08:37、14:23 这种分钟数**——真实运行图里没有这种时刻，一眼就看出是编的；④ 最终以 12306/航司实际为准（前端会向用户标注"仅供参考"）。
+   4.3 **铁路班次只作路线占位，最终由程序按日期查询 12306 官方结果**：不要凭记忆把车次号和时刻写成事实；如果暂时无法判断，车次可以留空，不能生造"G9999"。铁路运行时长仍要符合两地实际距离，站点必须是真实铁路站；最终显示给用户的车次与时刻以程序核对到的 12306 候选为准。航班同样只写合理的路线占位，最终以航司实际为准。
 5. hl 每天 3-4 个**具体景点/片区名称**，别写"逛逛市区"这种废话；城市漫游日（如"成都市区"）也要点名具体街区/景点（例：宽窄巷子、人民公园、武侯祠、太古里），兼顾${p.pace}节奏${p.interests.length ? '和偏好' : ''}。
    5.1 **地名用地图搜得到的通用叫法**：写"象鼻山"就别写成"象鼻山公园"（外省真有同名公园，导航会导过去），不要自造"XX景区大门""XX游客中心"这类后缀，也不要带括号补注。
 6. ${p.mustGo ? `用户必去：${p.mustGo}，必须排进合适的一天。` : ''}${p.extra ? `特殊要求：${p.extra}` : ''}
@@ -450,6 +450,7 @@ function enforceMovesAlignment(items, outline, activeDays) {
           startLocation: String(m.from || '').trim(),
           endLocation: String(m.to || '').trim(),
           transportType: transportTypeOf(m),
+          scheduleRequired: !!m.scheduleRequired,
           note: '',
         });
         console.warn('[generatePlan] 第%d天大纲大交通 %s 全天未安排，补一条', di + 1, `${m.from}→${m.to} ${code}`);
@@ -475,6 +476,7 @@ function enforceMovesAlignment(items, outline, activeDays) {
       it.endLocation = String(m.to || '').trim();
       it.category = 'transport';
       if (!it.transportType) it.transportType = transportTypeOf(m);
+      if (m.scheduleRequired) it.scheduleRequired = true;
 
       // 时刻漂移超 60 分钟 → 拽回大纲时刻（中间天模型按真实班次微调的半小时内不动）
       const drift = driftOf(it);
@@ -502,6 +504,43 @@ function transportCodeOf(it) {
   const m = /\b([A-Za-z]{1,2}\d{2,4})\b(?!\s*(?:号线|航站楼|号航站楼|站台))/
     .exec(`${it.activity || ''}${it.note || ''}`);
   return m ? m[1].toUpperCase() : '';
+}
+
+/**
+ * 12306 没有返回可用候选时，清掉细化模型可能重新编出的车次号。
+ * 时间字段保留为当天行程的占位安排，并在 note 明确这是估算，避免把“空缺”
+ * 误显示成“已核对”。一旦官方查询成功，enforceRealSchedule 会在这里之前完成
+ * 车次、站点和时刻的精确回写，不会进入本兜底。
+ */
+function stripUnverifiedSchedules(items, outline) {
+  const days = asArray(outline && outline.days);
+  const out = asArray(items).slice();
+  const append = (it, text) => {
+    const old = String(it.note || '').trim();
+    if (!old.includes(text)) it.note = old ? `${old}；${text}` : text;
+  };
+  days.forEach((day, di) => {
+    const pending = asArray(day && day.moves).filter((m) => m && m.scheduleRequired);
+    if (!pending.length) return;
+    out.forEach((it) => {
+      if (Number(it.dayIndex || 0) !== di || String(it.category || '') !== 'transport') return;
+      const mode = `${it.transportType || ''}${it.activity || ''}`;
+      if (!/train|高铁|动车|火车|列车/.test(mode)) return;
+      const matched = pending.find((m) =>
+        (it.startLocation && it.endLocation
+          && sameStation(it.startLocation, m.from) && sameStation(it.endLocation, m.to))
+        || pending.length === 1);
+      if (!matched) return;
+      it.schedSource = 'official-unavailable';
+      const from = String(matched.from || it.startLocation || '').trim();
+      const to = String(matched.to || it.endLocation || '').trim();
+      it.activity = `乘列车从${from}前往${to}`;
+      it.startLocation = from;
+      it.endLocation = to;
+      append(it, '班次与时刻暂未从12306查询到，购票前请核实');
+    });
+  });
+  return out;
 }
 
 function escapeRegExp(s) {
@@ -1531,6 +1570,7 @@ function dayDetailPrompt(p, day, idx, outline) {
   const tonight = day.overnight || day.city || '';
   const lastNight = prev ? (prev.overnight || prev.city || '') : '';
   const sameBase = samePlace(lastNight, tonight);
+  const officialUnavailable = asArray(day.moves).some((m) => m && m.scheduleRequired);
 
   const block =
     `【旅行需求】${profileText(p)}\n\n` +
@@ -1548,6 +1588,9 @@ function dayDetailPrompt(p, day, idx, outline) {
       ? `【真实班次（已联网核对）】${asArray(day.sched).map(
           (c) => `${c.code}${c.from ? ` ${c.from}→${c.to}` : ''} ${c.s}-${c.e}`
         ).join('；')}\n**只能从这里面挑，禁止自创车次号或改写时刻**；若这些班次都不合适，也必须保持车次号与时刻的原样。\n`
+      : '') +
+    (officialUnavailable
+      ? '【12306 班次状态】当天官方查询没有返回可用车次；只写“乘列车”及行程估算时间，严禁编造 G/D/C 车次号或把估算时间写成已核对时刻。备注写“班次与时刻待12306核实”。\n'
       : '') +
     (day.meals && asArray(day.meals).length ? `餐饮建议：${asArray(day.meals).join('、')}\n` : '') +
     (day.note ? `提示：${day.note}\n` : '') +
@@ -1572,6 +1615,7 @@ dayIndex 全部填 ${idx}。
 9. category 取值：景点游览=sight，餐饮=food，住宿/回酒店=hotel，交通=transport，门票预订/取票=ticket，其他=other。
 10. 输出顺序按时间先后。只输出数组，不要任何解释。
 11. **【今天的大交通】是既定路线**：交通方式、车次、出发站/到达站照抄，不许改成别的交通方式、不许编造新车次。
+    ${officialUnavailable ? '若【12306 班次状态】显示没有可用车次，车次字段留空，activity 只写“乘列车从A前往B”；时间是行程估算，note 必须标注“班次与时刻待12306核实”。' : ''}
     - 大交通条目必须排在它**真实被乘坐的时刻位置**（15:00 的车就写在 15:00 前后的时段），严禁为了"衔接顺"把它提前写成"倒叙/桥接/预告"。
     - ${((isFirst && p.goTime) || (isLast && p.backTime))
       ? '起止时刻是**用户指定的硬约束**，必须原样照抄，不许微调（首日照抄发车时刻、末日照抄到达时刻，用户指定的启程/到家时刻用来安排前后接驳）。'
@@ -2102,7 +2146,7 @@ function isIntercityMove(m) {
 }
 
 /** 从大纲里收集所有需要查真实班次的城际段（同方向只查一次） */
-function collectSegments(outline) {
+function collectSegments(outline, context = {}) {
   const seen = new Map();
   asArray(outline && outline.days).forEach((d, di) => {
     asArray(d && d.moves).forEach((m) => {
@@ -2117,6 +2161,8 @@ function collectSegments(outline) {
           key: routeKey,
           scheduleKey: key,
           from, to, date,
+          dayCity: String(d.city || '').trim(),
+          origin: String(context.origin || '').trim(),
           mode: String(m.mode || '').toLowerCase(),
         });
       }
@@ -2161,25 +2207,59 @@ function pickSchedule(list, wantTime) {
 function applyRealSchedules(outline, found) {
   if (!found) return null;
   const get = (k) => (found.get ? found.get(k) : found[k]);
+  const has = (k) => (found.has ? found.has(k) : Object.prototype.hasOwnProperty.call(found, k));
+  const metaOf = (k) => (found.routeMeta && found.routeMeta.get ? found.routeMeta.get(k) : null);
   const routeKeyOf = (from, to) => `${String(from || '').trim()}→${String(to || '').trim()}`;
-  const listFor = (day, move) => {
+  const dataFor = (day, move) => {
     const from = String(move.from || '').trim();
     const to = String(move.to || '').trim();
     const date = String(day.date || '').trim();
+    const exactKey = scheduleKeyOf({ from, to, date });
     // 新格式按日期隔离；保留 route-only 回退，兼容本地测试和旧缓存适配器。
-    return get(scheduleKeyOf({ from, to, date })) || get(routeKeyOf(from, to));
+    if (has(exactKey)) return {
+      list: Array.isArray(get(exactKey)) ? get(exactKey) : [],
+      meta: metaOf(exactKey),
+      present: true,
+    };
+    const routeKey = routeKeyOf(from, to);
+    if (has(routeKey)) return {
+      list: Array.isArray(get(routeKey)) ? get(routeKey) : [],
+      meta: metaOf(routeKey),
+      present: true,
+    };
+    return { list: [], meta: null, present: false };
   };
-  const routeMatch = (list, move) => asArray(list).filter((c) =>
-    c && sameStation(c.from, move.from) && sameStation(c.to, move.to));
+  const routeMatch = (data, move) => {
+    const targetFrom = data.meta && data.meta.from ? data.meta.from : move.from;
+    const targetTo = data.meta && data.meta.to ? data.meta.to : move.to;
+    return asArray(data.list).filter((c) =>
+      c && sameStation(c.from, targetFrom) && sameStation(c.to, targetTo));
+  };
   let hit = 0;
   let replaced = 0;
   asArray(outline && outline.days).forEach((d) => {
     asArray(d && d.moves).forEach((m) => {
-      const list = routeMatch(listFor(d, m), m);
-      if (!list || !list.length) return;
+      const data = dataFor(d, m);
+      const list = routeMatch(data, m);
+      if (!list.length) {
+        // 官方查询失败/当天没有可售结果时，必须清除模型给的车次和精确时刻。
+        // 留着 Gxxxx + 一个看似精确的时间会让用户误以为已核对，反而比空缺更危险。
+        if (data.present && data.meta && data.meta.official && data.meta.attempted) {
+          m.sched = [];
+          m.schedSource = 'official-unavailable';
+          m.scheduleRequired = true;
+          m.code = '';
+          m.startTime = '';
+          m.endTime = '';
+        }
+        return;
+      }
       hit += 1;
       // 一天可能有两段铁路交通，候选不能被后一个 move 覆盖。
-      m.sched = list.slice(0, 8);
+      // 保留完整候选（当前 direct 查询最多 48 条）。若只保留前 24 条，
+      // 19:00 左右的返程车可能被截掉，后面的 enforceRealSchedule 会把已核对
+      // 的晚班车误换成早班车。给 prompt 的 day.sched 仍限 16 条以控制 token。
+      m.sched = list.slice(0, 48);
       d.sched = asArray(d.sched).concat(list)
         .filter((c, i, all) => all.findIndex((x) =>
           x.code === c.code && x.s === c.s && x.e === c.e
@@ -2194,7 +2274,8 @@ function applyRealSchedules(outline, found) {
       // routeMatch 已经要求出发站/到达站分别对得上，这里才允许采用官方结果的标准站名。
       m.from = pick.from;
       m.to = pick.to;
-      m.schedSource = 'search';
+      m.schedSource = data.meta && data.meta.official ? '12306' : 'search';
+      m.scheduleRequired = false;
     });
   });
   console.log('[generatePlan] 联网班次：命中 %d 段，其中 %d 段换成了检索到的真实车次', hit, replaced);
@@ -2214,12 +2295,12 @@ function enforceRealSchedule(items, outline) {
     if (item.startLocation && item.endLocation) {
       const matchedMove = moves.find((m) => sameStation(m.from, item.startLocation)
         && sameStation(m.to, item.endLocation));
-      if (matchedMove) return asArray(matchedMove.sched);
+      if (matchedMove) return { list: asArray(matchedMove.sched), move: matchedMove };
     }
     // 模型有时漏填起点；若这天只有一段真实铁路交通，仍可安全使用这组候选。
-    if (moves.length === 1) return asArray(moves[0].sched);
+    if (moves.length === 1) return { list: asArray(moves[0].sched), move: moves[0] };
     // 多段铁路交通但条目没有起终点时，不能把另一段的车次套过来，宁可保留 AI 参考。
-    return moves.length ? [] : asArray(day && day.sched);
+    return { list: moves.length ? [] : asArray(day && day.sched), move: null };
   };
   const rewriteActivity = (item, pick, oldCode) => {
     let act = String(item.activity || '');
@@ -2232,7 +2313,8 @@ function enforceRealSchedule(items, outline) {
     out.forEach((it) => {
       if (Number(it.dayIndex || 0) !== di) return;
       if (String(it.category || '') !== 'transport') return;
-      const list = listForItem(day, it);
+      const data = listForItem(day, it);
+      const list = data.list;
       if (!list.length) return;
       const code = transportCodeOf(it);
       // 有真实候选时，即使模型挑中了正确车次，也要把发到时刻按候选纠正。
@@ -2249,13 +2331,103 @@ function enforceRealSchedule(items, outline) {
       }
       it.startLocation = pick.from;
       it.endLocation = pick.to;
-      it.schedSource = 'search';
+      it.schedSource = data.move && data.move.schedSource ? data.move.schedSource : 'search';
       if (!exact) {
         console.warn('[generatePlan] 第%d天车次 %s 不在联网检索结果里，拽回真实班次 %s', di + 1, old || '(缺失)', pick.code);
       }
     });
   });
   return out;
+}
+
+/**
+ * 最后一层铁路防线：当天只要有 12306 官方候选，所有铁路条目里的车次都必须
+ * 能落到某一段候选上。模型若漏填起终点或凭记忆多写一趟车，按候选重写；无法
+ * 绑定的只保留“乘列车”描述，绝不把陌生车次展示给用户。
+ */
+function enforceOfficialRailItems(items, outline) {
+  const days = asArray(outline && outline.days);
+  const out = asArray(items).slice();
+  const railish = (it) => /train|高铁|动车|火车|列车/.test(`${it.transportType || ''}${it.activity || ''}`);
+  const append = (it, text) => {
+    const old = String(it.note || '').trim();
+    if (!old.includes(text)) it.note = old ? `${old}；${text}` : text;
+  };
+  days.forEach((day, di) => {
+    const moves = asArray(day && day.moves).filter((m) => m && m.schedSource === '12306' && asArray(m.sched).length);
+    if (!moves.length) return;
+    out.forEach((it) => {
+      if (Number(it.dayIndex || 0) !== di || String(it.category || '') !== 'transport' || !railish(it)) return;
+      const code = transportCodeOf(it);
+      const byRoute = moves.find((m) => it.startLocation && it.endLocation
+        && sameStation(m.from, it.startLocation) && sameStation(m.to, it.endLocation));
+      const byCode = code && moves.find((m) => asArray(m.sched).some((c) =>
+        String(c.code || '').toUpperCase() === code
+        && (!it.startTime || c.s === it.startTime)
+        && (!it.endTime || c.e === it.endTime)));
+      const move = byRoute || byCode || (moves.length === 1 ? moves[0] : null);
+      if (!move) {
+        if (code) {
+          const from = String(it.startLocation || moves[0].from || '').trim();
+          const to = String(it.endLocation || moves[0].to || '').trim();
+          it.activity = `乘列车从${from}前往${to}`;
+          it.schedSource = 'official-unavailable';
+          append(it, '原车次未在当天12306候选中，已清除');
+        }
+        return;
+      }
+      const list = asArray(move.sched);
+      const exact = code && list.find((c) => String(c.code || '').toUpperCase() === code
+        && (!it.startTime || c.s === it.startTime)
+        && (!it.endTime || c.e === it.endTime));
+      const pick = exact || pickSchedule(list, it.startTime);
+      if (!pick) return;
+      const oldCode = code;
+      if (!exact || oldCode !== pick.code || it.startTime !== pick.s || it.endTime !== pick.e
+        || !String(it.activity || '').includes(pick.code)) {
+        it.activity = `乘 ${pick.code} 次列车从${pick.from}前往${pick.to}`;
+      }
+      it.startTime = pick.s;
+      it.endTime = pick.e;
+      it.startLocation = pick.from;
+      it.endLocation = pick.to;
+      it.schedSource = '12306';
+    });
+  });
+  return out;
+}
+
+/** 一段既定铁路移动只能对应一趟车；模型可能同时写出早晚两趟候选。 */
+function dedupeOfficialRailItems(items, outline) {
+  const out = asArray(items).slice();
+  const drop = new Set();
+  asArray(outline && outline.days).forEach((day, di) => {
+    asArray(day && day.moves).filter((m) => m && m.schedSource === '12306').forEach((move) => {
+      const bound = out.filter((it) => {
+        if (Number(it.dayIndex || 0) !== di || String(it.category || '') !== 'transport') return false;
+        if (!/train|高铁|动车|火车|列车/.test(`${it.transportType || ''}${it.activity || ''}`)) return false;
+        const code = transportCodeOf(it);
+        const sameRoute = it.startLocation && it.endLocation
+          && sameStation(it.startLocation, move.from) && sameStation(it.endLocation, move.to);
+        const inCandidates = code && asArray(move.sched).some((c) =>
+          String(c.code || '').toUpperCase() === code
+          && (!it.startTime || c.s === it.startTime)
+          && (!it.endTime || c.e === it.endTime));
+        return sameRoute || inCandidates;
+      });
+      if (bound.length < 2) return;
+      const want = toMin(move.startTime);
+      bound.sort((a, b) => {
+        const av = toMin(a.startTime) == null ? 1440 : toMin(a.startTime);
+        const bv = toMin(b.startTime) == null ? 1440 : toMin(b.startTime);
+        if (want === null) return av - bv;
+        return Math.abs(av - want) - Math.abs(bv - want);
+      });
+      bound.slice(1).forEach((it) => drop.add(it));
+    });
+  });
+  if (drop.size) console.warn('[generatePlan] 清理同一官方铁路段的重复车次 %d 条', drop.size);
+  return out.filter((it) => !drop.has(it));
 }
 
 async function generateOutline(rawInput, opts = {}) {
@@ -2270,7 +2442,7 @@ async function generateOutline(rawInput, opts = {}) {
   let schedule = null;
   if (typeof opts.scheduleLookup === 'function') {
     try {
-      const segs = collectSegments(outline);
+      const segs = collectSegments(outline, { origin: opts.origin || p.origin });
       const left = Math.min(
         opts.scheduleDeadline ? opts.scheduleDeadline - Date.now() : Infinity,
         opts.scheduleBudgetMs || Infinity,
@@ -2341,11 +2513,30 @@ function fixDayTimeOverlaps(items) {
   const out = [];
   days.forEach((d) => {
     const list = asArray(items).filter((it) => Number(it.dayIndex || 0) === d);
-    list.sort((a, b) => String(a.startTime || '99:99').localeCompare(String(b.startTime || '99:99')));
+    // LLM 偶尔输出 9:30 而不是 09:30；字符串排序会把 10:00 放到 9:30 前面，
+    // 这正是截图里“第一天顺序乱”的根因。先归一化，再按分钟数排序。
+    list.forEach((it) => {
+      const s = toMin(it.startTime);
+      const e = toMin(it.endTime);
+      if (s !== null) it.startTime = fmtMin(s);
+      if (e !== null) it.endTime = fmtMin(e);
+    });
+    const startValue = (it) => {
+      const v = toMin(it.startTime);
+      return v === null ? 24 * 60 : v;
+    };
+    list.sort((a, b) => startValue(a) - startValue(b));
     for (let i = 1; i < list.length; i++) {
       const prevEnd = toMin(list[i - 1].endTime);
       const curStart = toMin(list[i].startTime);
       if (prevEnd === null || curStart === null || curStart >= prevEnd) continue;
+      // 官方班次的发到时刻是事实，任何时间线修复都不能改它。
+      // 前一条若只是普通接驳/游览，可以提前收尾让路；两条已核对大交通
+      // 真正冲突时保留两条官方时刻，交给用户重新选班次，不伪造第三个时刻。
+      if (list[i].schedSource === '12306') {
+        if (list[i - 1].schedSource !== '12306') list[i - 1].endTime = list[i].startTime;
+        continue;
+      }
       // 交通条目（尤其有真实班次的火车/飞机）**不许顺延**：把时刻一挪，
       // 车次号还是那个车次号，发车时间却成了我们算出来的，用户一查就对不上。
       // 正确做法：让上一条非交通的行程（景点/用餐/接驳）提前收尾来让路。
@@ -2441,6 +2632,9 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
     .map((it) => Number(it.dayIndex || 0)))];
   let items = enforceMovesAlignment(sanitizeItems(baseItems.concat(skeleton.items)), outline, roundDays);
   items = enforceRealSchedule(items, outline);   // 车次不在联网检索结果里 → 拽回真实班次
+  items = enforceOfficialRailItems(items, outline); // 官方候选存在时，铁路条目逐条锁定
+  items = dedupeOfficialRailItems(items, outline); // 一段官方铁路移动只保留一趟车
+  items = stripUnverifiedSchedules(items, outline); // 12306 无结果 → 不留模型臆造车次
   items = dedupeTransports(items);
   items = enforceDayStartLocation(items, outline);
   items = enforceOriginAccess(items, p, outline, roundDays);

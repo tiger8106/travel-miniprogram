@@ -352,6 +352,20 @@ ok(overlapped[0].activity === 'C' && overlapped[1].activity === 'A' && overlappe
   '同天条目按开始时间排序', JSON.stringify(overlapped.map((x) => x.activity)));
 ok(overlapped[2].startTime === '10:00' && overlapped[2].endTime === '11:00',
   '重叠条目开始时间被顺延到上一条结束，结束时间保留', `${overlapped[2].startTime}-${overlapped[2].endTime}`);
+const unpadded = P.fixDayTimeOverlaps([
+  { dayIndex: 0, startTime: '9:30', endTime: '10:00', activity: '上午交通' },
+  { dayIndex: 0, startTime: '10:00', endTime: '11:00', activity: '上午景点' },
+  { dayIndex: 0, startTime: '8:00', endTime: '9:00', activity: '早餐' },
+]);
+ok(unpadded.map((x) => x.activity).join('/') === '早餐/上午交通/上午景点'
+  && unpadded[1].startTime === '09:30',
+  '单数字小时先补零再按分钟排序（首日不再把10:00排到9:30前）', JSON.stringify(unpadded));
+const fixedOfficial = P.fixDayTimeOverlaps([
+  { dayIndex: 0, startTime: '08:00', endTime: '10:30', activity: '赶车接驳', category: 'transport' },
+  { dayIndex: 0, startTime: '09:30', endTime: '11:00', activity: '乘 G3351 次列车', category: 'transport', schedSource: '12306' },
+]);
+ok(fixedOfficial[1].startTime === '09:30' && fixedOfficial[1].endTime === '11:00',
+  '已核对12306班次发生重叠时不顺延真实发到时刻', `${fixedOfficial[1].startTime}-${fixedOfficial[1].endTime}`);
 const contained = P.fixDayTimeOverlaps([
   { dayIndex: 0, startTime: '09:00', endTime: '12:00', activity: 'A' },
   { dayIndex: 0, startTime: '10:00', endTime: '10:30', activity: 'B' },

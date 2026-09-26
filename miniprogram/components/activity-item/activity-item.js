@@ -105,15 +105,19 @@ Component({
       if (!item || item.category !== 'transport') return '';
       const t = String(item.transportType || '').toLowerCase();
       const act = String(item.activity || '');
-      // 通过出发站、到达站、日期和时刻校验的候选，提示用户仍以官方售票结果为准。
-      const verified = item.schedSource === 'search';
+      // 12306 官方结果才算按日期、站点和时刻核对；旧版模型联网搜索仍只作参考。
+      const verified = item.schedSource === '12306';
+      const unavailable = item.schedSource === 'official-unavailable';
+      const searched = item.schedSource === 'search';
       if (t === 'train' || /高铁|动车|火车|列车|城际/.test(act)) {
         return verified
-          ? '🚄 已按出行日期联网检索候选，购票前请以 12306 显示的车次和时刻为准'
+          ? '🚄 已按出行日期从 12306 核对车次和时刻，购票前请再次确认余票与运行状态'
+          : unavailable
+            ? '🚄 12306 暂未返回当天可用班次，行程时间仅作估算，请先在 12306 购票核实'
           : '🚄 班次与时刻为 AI 参考编排，乘车前请在 12306 核实实际车次与时刻';
       }
       if (t === 'plane' || /航班|飞机|航站楼/.test(act)) {
-        return verified
+        return (verified || searched)
           ? '✈️ 航班已联网检索核对，出行前请以航司实际信息为准'
           : '✈️ 航班时刻为 AI 参考编排，出行前请以航司实际信息为准';
       }
