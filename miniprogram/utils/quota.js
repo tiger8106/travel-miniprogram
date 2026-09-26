@@ -178,7 +178,9 @@ async function syncOrders() {
 
 /** 开发者补测试额度（云端 QUOTA_DEV_GRANT=1 才生效；开发/体验自测用） */
 async function devGrant() {
-  const r = await callFn('quota', { action: 'devGrant' });
+  // 必须用 KeepCode：callFn 成功时只回 data（没有 code 字段），
+  // 页面按 r.code===0 判断会把成功当成"没补上"（2026-09-26 实测踩坑）
+  const r = await callFnKeepCode('quota', { action: 'devGrant' });
   clear();
   return r;
 }

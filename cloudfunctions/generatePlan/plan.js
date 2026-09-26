@@ -1629,10 +1629,10 @@ async function genDayItems(p, outline, opts = {}) {
   const pending = days.map((_, i) => i)
     .filter((i) => !done.has(i) && (attempts[i] || 0) < MAX_DAY_RETRY);
   const deadline = opts.deadline || (Date.now() + 40 * 1000);
-  // 一批最多 3 天（并行一次约 20-33s，视模型快慢）；剩余时间不够时自动缩批到
-  // 2 天/1 天 —— 固定 3 天一批时，预算只剩 20s 就整批放弃，实测返程日因此
-  // 整天空掉，兜底只剩"17:40 高铁 + 17:00 吃早餐"。
-  const WAVE = 3;
+  // 一批最多 4 天（并行，耗时 ≈ 最慢那一天而不是 4 天相加，实测 ~25-35s）；
+  // 剩余时间不够时自动缩批 —— 固定大批次时预算只剩 20s 就整批放弃，
+  // 实测返程日因此整天空掉，兜底只剩"17:40 高铁 + 17:00 吃早餐"。
+  const WAVE = 4;
   const FIRST_PER_DAY_ESTIMATE = 8500;   // 首轮按单天 ~8.5s 估
 
   const items = [];
@@ -1642,10 +1642,11 @@ async function genDayItems(p, outline, opts = {}) {
   let prevWave = WAVE;
 
   for (let k = 0; k < pending.length;) {
-    // 批大小自适应：剩余时间充裕一次 3 天，紧张就缩批，尽量别浪费预算
+    // 批大小自适应：剩余预算 >30s 开满 4 天，>19s 缩到 2 天，再紧就 1 天
+    // （细化预算默认 38s：首轮 rem≈38s → 4 天；跑完一批剩几秒 → 收尾 1 天）
     const rem = deadline - Date.now();
     const wave = Math.max(1, Math.min(WAVE, pending.length - k,
-      rem > 50 * 1000 ? 3 : rem > 26 * 1000 ? 2 : 1));
+      rem > 30 * 1000 ? 4 : rem > 19 * 1000 ? 2 : 1));
     const batch = pending.slice(k, k + wave);
     // 单天耗时估算：首轮用默认值，之后按上一批均摊 ×1.2（单天封顶 15s）
     const perDay = lastCost

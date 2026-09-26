@@ -17,7 +17,7 @@
 const cloud = require('wx-server-sdk');
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
-const { generateOutline, buildPlan, dayDiff } = require('./plan');
+const { generateOutline, buildPlan, dayDiff, collectSegments, applyRealSchedules } = require('./plan');
 const { geocodeBatch } = require('./geocode');
 const { lookupSchedules } = require('./schedule');
 
@@ -26,7 +26,9 @@ const COL_ALARM = 'ticket_alarms';
 const COL_SUG = 'suggestions';
 const COL_JOB = 'gen_jobs';
 const COL_SCHED = 'schedule_cache';
-const SCHED_TTL_MS = 7 * 24 * 3600 * 1000;   // 班次缓存 7 天
+// 班次缓存 36 小时：缓存键带出行日期（同线路不同日期开行方案不同），
+// 日期一换就是新键，TTL 再长也只是防止"同一天反复生成重复烧检索"
+const SCHED_TTL_MS = 36 * 3600 * 1000;
 
 // 生成引擎版本（用于确认线上跑的是哪一版）
 const GEN_VERSION = 'v1.3-bgjob';
@@ -333,19 +335,14 @@ async function runJobRound(openid, job) {
   delete payload.action;
   delete payload.jobMode;
 
-  // ★ 大纲缺失（前端大纲阶段撞 60s 上限转入后台 / 纯后台生成）：
-  //   本轮**只生成大纲**并写回任务，细化留给下一轮 —— 云函数 60s 装不下
-  //   "大纲 ~50s + 细化 ~40s" 两件大事，硬塞必然整轮被系统杀掉。
-  //   大纲失败也不放弃：任务保持 running，下一轮自动重试（最多 3 次）。
+  // ★ 联网核对真实班次 = 后台专轮。为什么不再塞在大纲轮里：
+  //   大纲 LLM 本身要 35-50s，塞进去检索只剩十几秒残羹，经常草草超时 →
+  //   前台 outline 调用被 60s 掐死 → 转后台又从头重做大纲+检索 ——
+  //   一次行程六七分钟的大头就在这。现在前台大纲不检索（快、稳），
+  //   后台拿到大纲后单独用一整轮（~26s 预算）安心查，查完写回大纲再细化。
   if (!(input.outline && input.outline.days && input.outline.days.length)) {
-    const t0 = Date.now();
-    const wantSearch = process.env.LLM_ENABLE_SEARCH !== '0';
     try {
-      const res = await generateOutline(payload, wantSearch ? {
-        scheduleLookup: makeScheduleLookup(),
-        scheduleDeadline: t0 + 50000,
-        scheduleBudgetMs: Number(process.env.LLM_SEARCH_BUDGET_MS) || 22000,
-      } : {});
+      const res = await generateOutline(payload, {});
       const totalDays = (res.outline && res.outline.days || []).length;
       const now = Date.now();
       await db.collection(COL_JOB).doc(job._id).update({
@@ -404,6 +401,52 @@ async function runJobRound(openid, job) {
         version: GEN_VERSION,
       };
     }
+  }
+
+  // ★ 班次专轮：大纲已就绪但还没联网核对过班次 → 本轮只做检索。
+  //   给检索一整个独立预算（不再和大纲/细化抢 60s），查到的真实班次
+  //   写回大纲（day.sched + moves 时刻），细化阶段照着挑、enforceRealSchedule 兜底。
+  //   查询失败/超时都静默降级（沿用模型编排），绝不卡住任务。
+  const wantSearch = process.env.LLM_ENABLE_SEARCH !== '0';
+  if (!job.schedDone && wantSearch) {
+    try {
+      const segs = collectSegments(input.outline);
+      const budget = Math.max(8000, Number(process.env.LLM_SEARCH_BUDGET_MS) || 26000);
+      const left = Math.min(budget, 50000);
+      if (segs.length && left > 6000) {
+        const t0 = Date.now();
+        const found = await lookupSchedules(segs, left, scheduleCacheAdapter());
+        const stat = applyRealSchedules(input.outline, found);
+        console.log('[generatePlan] 班次专轮：命中 %d 段 / 换 %d 段，用时 %dms',
+          stat ? stat.segments : 0, stat ? stat.replaced : 0, Date.now() - t0);
+      }
+    } catch (e) {
+      console.warn('[generatePlan] 班次检索整体失败，沿用模型编排:', e.message);
+    }
+    const now = Date.now();
+    await db.collection(COL_JOB).doc(job._id).update({
+      data: {
+        // applyRealSchedules 原地改写了 outline（day.sched / moves 时刻），要写回
+        'input.outline': input.outline,
+        schedDone: true,
+        round: (job.round || 0) + 1,
+        updatedAt: now,
+        leaseUntil: now + JOB_LEASE_MS,
+      },
+    }).catch((e) => console.warn('[generatePlan] 班次写回任务失败:', e.message));
+    job.schedDone = true;
+    return {
+      jobId: job._id,
+      tripId: job.tripId || '',
+      title: job.title || '',
+      status: 'running',
+      partial: true,           // 细化下一轮开始
+      round: (job.round || 0) + 1,
+      progress: job.progress || { done: 0, total: (input.outline.days || []).length },
+      itemCount: job.itemCount || 0,
+      error: '',
+      version: GEN_VERSION,
+    };
   }
 
   const plan = await buildPlan(payload, payload, {
@@ -479,12 +522,9 @@ async function schedCacheSet(key, list) {
   } catch (e) { console.warn('[generatePlan] 班次缓存写入失败:', e.message); }
 }
 
-/** 联网查真实班次的落地实现（带缓存 + 降级） */
-function makeScheduleLookup() {
-  return (segments, ms) => lookupSchedules(segments, ms, {
-    get: schedCacheGet,
-    set: schedCacheSet,
-  });
+/** 联网查真实班次的缓存适配（班次专轮用） */
+function scheduleCacheAdapter() {
+  return { get: schedCacheGet, set: schedCacheSet };
 }
 
 /**
@@ -671,19 +711,11 @@ exports.main = async (event, context) => {
     // 用户明明还有额度，却因为"今天换够了"而生成不了攻略 —— 等于收了钱不给货。
     // 现在只计次不拦截（额度侧 canHit 对 outline 恒放行），刷量由"生成要扣次数"兜住。
     quotaCall(openid, { action: 'hit', scene: 'outline' }).catch(() => {});
-    const t0 = Date.now();
     try {
-      // 联网核对真实班次：模型凭记忆写的车次号/时刻和现实对不上（根因是它没有实时数据）。
-      // 开搜索会让大纲多花几秒，所以给一个硬预算，超了就静默降级回"模型自己编排"。
-      // 关掉：环境变量 LLM_ENABLE_SEARCH=0
-      // 开搜索会让大纲多花几秒，所以两道约束：整体不越过 50s（云函数 60s），
-      // 检索本身不超过 LLM_SEARCH_BUDGET_MS（默认 22s）。超了就静默降级。
-      const wantSearch = process.env.LLM_ENABLE_SEARCH !== '0';
-      const res = await generateOutline(event, wantSearch ? {
-        scheduleLookup: makeScheduleLookup(),
-        scheduleDeadline: t0 + 50000,
-        scheduleBudgetMs: Number(process.env.LLM_SEARCH_BUDGET_MS) || 22000,
-      } : {});
+      // 前台大纲**不做联网检索**：大纲 LLM 本身 35-50s，再塞检索必撞 60s 上限
+      // → 超时转后台 → 大纲从头重做，一次行程平白多两三分钟。
+      // 联网核对班次改由后台任务专轮完成（见 runJobRound），大纲阶段只管快。
+      const res = await generateOutline(event, {});
       return {
         code: 0,
         data: {
@@ -693,7 +725,7 @@ exports.main = async (event, context) => {
           endDate: res.endDate,
           days: res.days,
           outline: res.outline,
-          schedule: res.schedule,      // { segments, replaced }：命中几段、换了几段
+          schedule: null,              // 班次核对在后台专轮做，这里恒为空
           version: GEN_VERSION,
         },
       };

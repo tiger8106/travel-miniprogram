@@ -624,5 +624,28 @@ ok('开发者补测试额度有云端开关（QUOTA_DEV_GRANT，默认关死）'
   /QUOTA_DEV_GRANT/.test(fs.readFileSync(path.join(CF, 'quota/index.js'), 'utf8'))
     && /devGrant/.test(quotaUtil));
 
+// ---------- ⑯ 班次准确性与生成提速（2026-09-26 晚） ----------
+ok('班次缓存键带出行日期（同线路不同日期开行方案不同，套用就是错车次）',
+  /cacheKeyOf/.test(schedJs) && /@/.test((schedJs.match(/function cacheKeyOf[\s\S]{0,200}/) || [''])[0]));
+
+ok('检索 prompt 要求带日期查询并逐条核对（不许凭常态时刻表猜）',
+  /检索与核对步骤/.test(schedJs) && /严禁凭印象编造/.test(schedJs));
+
+ok('班次缓存 36 小时过期（日期键换了本来就查不到旧缓存）',
+  /SCHED_TTL_MS = 36 \* 3600 \* 1000/.test(gpIdx));
+
+ok('前台大纲不联网检索（检索塞在大纲尾巴上必撞 60s → 转后台重做一遍）',
+  /generateOutline\(event, \{\}\)/.test(gpIdx) && !/scheduleLookup: makeScheduleLookup/.test(gpIdx));
+
+ok('班次专轮：后台任务拿到大纲后单独一轮联网核对（写回 outline + schedDone）',
+  /班次专轮/.test(gpIdx) && /schedDone: true/.test(gpIdx)
+    && /'input\.outline': input\.outline/.test(gpIdx));
+
+ok('细化波次提到 4 天/轮（并行耗时≈最慢一天，8 天行程少跑一两轮）',
+  /const WAVE = 4/.test(planJs));
+
+ok('补测试额度用 KeepCode（callFn 成功只回 data，页面判 r.code===0 会误报"没补上"）',
+  /callFnKeepCode\('quota', \{ action: 'devGrant' \}\)/.test(quotaUtil));
+
 console.log(failed ? `\n${failed} 项失败 ✗` : '\n全部通过 ✓');
 process.exit(failed ? 1 : 0);
