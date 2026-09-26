@@ -76,7 +76,10 @@ Page({
       }
     } catch (err) {
       const msg = (err && err.message) || '支付失败';
-      if (!/取消/.test(msg)) wx.showToast({ title: msg.slice(0, 30), icon: 'none' });
+      if (!/取消/.test(msg)) {
+        // 长报错用弹窗（toast 只能显示 30 字，截断看不出原因）
+        wx.showModal({ title: '支付没走成', content: msg.slice(0, 200), showCancel: false });
+      }
     } finally {
       this.setData({ payingId: '' });
       this.refresh();

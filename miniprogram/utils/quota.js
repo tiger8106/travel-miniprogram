@@ -103,7 +103,15 @@ async function pay(goodsId) {
   let order;
   try {
     const code = await loginCode().catch(() => '');
-    order = await callFn('virtualPay', { action: 'createOrder', goodsId, code });
+    try {
+      order = await callFn('virtualPay', { action: 'createOrder', goodsId, code });
+    } catch (e) {
+      // code 是一次性的：偶发失效（并行登录/时钟差）会报"登录态"，换个新 code 重试一次
+      if (!/登录态/.test(e.message)) throw e;
+      const code2 = await loginCode().catch(() => '');
+      if (!code2) throw e;
+      order = await callFn('virtualPay', { action: 'createOrder', goodsId, code: code2 });
+    }
   } finally {
     wx.hideLoading();
   }

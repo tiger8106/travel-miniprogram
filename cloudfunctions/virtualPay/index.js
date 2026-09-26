@@ -230,6 +230,7 @@ async function actionCreateOrder(openid, event) {
   const users = await db.collection('users').where({ _openid: openid }).limit(1).get().catch(() => ({ data: [] }));
   const me = users.data && users.data[0];
   let code = String(event.code || '');
+  let codeErr = '';
   if (code) {
     try {
       const r = await cloud.openapi.auth.code2Session({ js_code: code });
@@ -239,14 +240,21 @@ async function actionCreateOrder(openid, event) {
           await db.collection('users').doc(me._id)
             .update({ data: { sessionKey, sessionKeyAt: Date.now() } }).catch(() => {});
         }
+      } else {
+        codeErr = `code2Session 没返回 session_key（errMsg=${String((r && r.errMsg) || JSON.stringify(r)).slice(0, 120)}）`;
       }
     } catch (e) {
-      console.warn('[virtualPay] code2Session 失败:', e.message);
+      codeErr = String(e.errMsg || e.errCode || e.message || e).slice(0, 120);
+      console.warn('[virtualPay] code2Session 失败:', codeErr);
     }
+  } else {
+    codeErr = '前端没有传 wx.login code';
   }
   if (!sessionKey && me) sessionKey = String(me.sessionKey || '');
   if (!sessionKey) {
-    return { code: -3, msg: '登录态已过期，请重新登录后重试（错误码 -15007 就是它）' };
+    // 把真实原因带出去：云端日志里也有，别只给一句模糊提示
+    console.error('[virtualPay] 拿不到 session_key:', codeErr, 'users记录存在:', !!me);
+    return { code: -3, msg: `拿不到微信登录态（${codeErr || '无缓存 session_key'}）。请退出小程序重新进入后再买一次` };
   }
 
   const outTradeNo = genOutTradeNo();
@@ -364,11 +372,12 @@ function actionDiag() {
   return {
     code: 0,
     data: {
-      version: 'v1.0-pay',
+      version: 'v1.1-pay',
       env: ENV,
       envText: ENV === 1 ? '沙箱（安卓可自测）' : '现网',
       offerId: OFFER_ID ? `${OFFER_ID.slice(0, 4)}****` : '',
       appKeyReady: !!APP_KEY,
+      code2SessionReady: !!(cloud.openapi && cloud.openapi.auth && cloud.openapi.auth.code2Session),
       canQueryOrder: !!MP_APPID && !!MP_SECRET,
       internalTokenReady: !!process.env.INTERNAL_TOKEN,
       missing: miss,
