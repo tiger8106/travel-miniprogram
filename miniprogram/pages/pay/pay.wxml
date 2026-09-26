@@ -19,9 +19,9 @@
           <text>长期额度</text>
           <text class="quota-row-val">{{info.quota || 0}} 次</text>
         </view>
-        <view class="quota-row" wx:if="{{info.gift}}">
+        <view class="quota-row quota-row-tap" wx:if="{{info.gift}}" bindtap="onGiftInfo">
           <text>赠送额度</text>
-          <text class="quota-row-val">{{info.gift}} 次（限时）</text>
+          <text class="quota-row-val">{{info.gift}} 次（限时 · 点我看有效期）</text>
         </view>
         <view class="quota-row" wx:if="{{info.vip}}">
           <text>月卡剩余</text>
@@ -54,6 +54,7 @@
         </view>
       </view>
     </view>
+    <view class="refund-tip">⚠️ 虚拟商品，下单成功后不支持退款，购买前请确认好再下单</view>
     <view class="sync-row" wx:if="{{loggedIn}}">
       <text class="sync-text">付了钱额度没到账？</text>
       <text class="sync-btn" bindtap="onSync">刷新额度</text>
@@ -65,7 +66,7 @@
     <view class="card-title">🎁 邀请好友各得 1 次</view>
     <view class="invite-code-row" bindtap="onCopyCode">
       <view>
-        <view class="invite-code">{{invite.inviteCode}}</view>
+        <view class="invite-code"><text user-select>{{invite.inviteCode}}</text></view>
         <view class="invite-sub">点击复制 · 已邀请 {{invite.inviteCount}} 人（上限 {{invite.inviteCap}} 次）</view>
       </view>
       <text class="text-placeholder">复制</text>
@@ -85,6 +86,7 @@
     <view class="rule-item">· 大纲不满意可以换方案，不额外扣次数</view>
     <view class="rule-item">· 行程没生成出来不扣次数</view>
     <view class="rule-item">· 查看行程、编辑、导航、闹钟提醒永久免费</view>
+    <view class="rule-item">· 虚拟商品，额度到账后不支持退款，请按需购买</view>
     <view class="rule-item">· 每天有生成次数上限，保护服务稳定</view>
   </view>
 

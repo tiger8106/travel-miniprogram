@@ -40,11 +40,34 @@ Page({
       quota.info(true),
       quota.inviteInfo(),
     ]);
+    // 赠送额度的有效期展示用：到期日 + 剩余天数
+    let giftInfo = null;
+    const exp = info && Number(info.giftExpireAt || 0);
+    if (info && info.gift > 0 && exp) {
+      const d = new Date(exp);
+      const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      const daysLeft = Math.max(0, Math.ceil((exp - Date.now()) / 86400000));
+      giftInfo = { dateStr, daysLeft };
+    }
     this.setData({
       info,
+      giftInfo,
       goods: (info && info.goods) || [],
       invite,
       loading: false,
+    });
+  },
+
+  /** 点「赠送额度（限时）」看有效期 */
+  onGiftInfo() {
+    const g = this.data.giftInfo;
+    const n = this.data.info && this.data.info.gift;
+    if (!g || !n) return;
+    wx.showModal({
+      title: '赠送额度有效期',
+      content: `赠送的 ${n} 次在 ${g.dateStr} 前有效（还剩 ${g.daysLeft} 天）。过期没用的部分会作废，记得安排上。`,
+      showCancel: false,
+      confirmText: '知道了',
     });
   },
 
@@ -107,10 +130,22 @@ Page({
 
   onCopyCode() {
     const code = (this.data.invite && this.data.invite.inviteCode) || '';
-    if (!code) return;
+    if (!code) {
+      wx.showToast({ title: '邀请码还没拿到，稍后再试', icon: 'none' });
+      return;
+    }
     wx.setClipboardData({
       data: code,
       success: () => wx.showToast({ title: '邀请码已复制', icon: 'none' }),
+      fail: () => {
+        // 模拟器/个别机型剪贴板会失败：兜底让用户长按选中手动复制
+        wx.showModal({
+          title: '自动复制没成功',
+          content: `请长按选中下面的邀请码手动复制：\n\n${code}`,
+          showCancel: false,
+          confirmText: '知道了',
+        });
+      },
     });
   },
 

@@ -126,3 +126,20 @@
 .rule-item { font-size: 24rpx; color: #666; line-height: 1.8; }
 
 .text-placeholder { color: #bbb; font-size: 26rpx; }
+
+/* 赠送额度行可点（看有效期） */
+.quota-row-tap .quota-row-val {
+  color: #ffe08a;
+}
+
+/* 不支持退款提示 */
+.refund-tip {
+  margin-top: 16rpx;
+  padding: 14rpx 20rpx;
+  background: #fff7ed;
+  border: 1rpx solid #fed7aa;
+  border-radius: 12rpx;
+  font-size: 24rpx;
+  color: #c2410c;
+  line-height: 1.5;
+}
