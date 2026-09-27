@@ -1,5 +1,16 @@
 // utils/request.js
 // 统一云函数调用封装
+const cloudState = require('./cloud');
+
+function unavailableError() {
+  return cloudState.hasInitError()
+    ? cloudState.requestError()
+    : new Error('当前微信版本不支持云开发，请升级微信或重新打开小程序');
+}
+
+function markCloudFailure(err) {
+  if (cloudState.isInitFailure(err)) cloudState.markFailed(err);
+}
 
 /**
  * 检测云函数执行/网关超时：
@@ -35,7 +46,11 @@ function isFnNotFound(err) {
 function callFn(name, data = {}) {
   return new Promise((resolve, reject) => {
     if (!wx.cloud || typeof wx.cloud.callFunction !== 'function') {
-      reject(new Error('当前微信版本不支持云开发，请升级微信'));
+      reject(unavailableError());
+      return;
+    }
+    if (cloudState.hasInitError()) {
+      reject(cloudState.requestError());
       return;
     }
     wx.cloud.callFunction({
@@ -49,6 +64,7 @@ function callFn(name, data = {}) {
         }
       },
       fail: (err) => {
+        markCloudFailure(err);
         // 超时类（-504003/-601002）流水线会自动重试，属预期内错误：
         // 只打一行 warn，不用 console.error 刷红调试台（真机上无声，不影响功能）
         if (isTimeout(err)) {
@@ -76,7 +92,11 @@ function callFn(name, data = {}) {
 function callFnKeepCode(name, data = {}) {
   return new Promise((resolve) => {
     if (!wx.cloud || typeof wx.cloud.callFunction !== 'function') {
-      resolve({ code: -999, msg: '当前微信版本不支持云开发' });
+      resolve({ code: -999, msg: unavailableError().message });
+      return;
+    }
+    if (cloudState.hasInitError()) {
+      resolve({ code: -999, msg: cloudState.requestError().message });
       return;
     }
     wx.cloud.callFunction({
@@ -87,8 +107,9 @@ function callFnKeepCode(name, data = {}) {
         resolve({ code: typeof r.code === 'number' ? r.code : 0, msg: r.msg || '', data: r.data });
       },
       fail: (err) => {
+        markCloudFailure(err);
         if (!isTimeout(err)) console.error(`[cloud] ${name} fail:`, err);
-        resolve({ code: -999, msg: (err && (err.errMsg || err.message)) || '网络异常' });
+        resolve({ code: -999, msg: cloudState.hasInitError() ? cloudState.requestError().message : ((err && (err.errMsg || err.message)) || '网络异常') });
       },
     });
   });
@@ -100,14 +121,18 @@ function callFnKeepCode(name, data = {}) {
 function uploadFile(cloudPath, filePath) {
   return new Promise((resolve, reject) => {
     if (!wx.cloud || typeof wx.cloud.uploadFile !== 'function') {
-      reject(new Error('当前微信版本不支持云开发'));
+      reject(unavailableError());
+      return;
+    }
+    if (cloudState.hasInitError()) {
+      reject(cloudState.requestError());
       return;
     }
     wx.cloud.uploadFile({
       cloudPath,
       filePath,
       success: (res) => resolve(res.fileID),
-      fail: reject,
+      fail: (err) => { markCloudFailure(err); reject(err); },
     });
   });
 }
@@ -118,13 +143,17 @@ function uploadFile(cloudPath, filePath) {
 function downloadFile(fileID) {
   return new Promise((resolve, reject) => {
     if (!wx.cloud || typeof wx.cloud.downloadFile !== 'function') {
-      reject(new Error('当前微信版本不支持云开发'));
+      reject(unavailableError());
+      return;
+    }
+    if (cloudState.hasInitError()) {
+      reject(cloudState.requestError());
       return;
     }
     wx.cloud.downloadFile({
       fileID,
       success: (res) => resolve(res.tempFilePath),
-      fail: reject,
+      fail: (err) => { markCloudFailure(err); reject(err); },
     });
   });
 }
@@ -135,13 +164,17 @@ function downloadFile(fileID) {
 function deleteFile(fileIDs) {
   return new Promise((resolve, reject) => {
     if (!wx.cloud || typeof wx.cloud.deleteFile !== 'function') {
-      reject(new Error('当前微信版本不支持云开发'));
+      reject(unavailableError());
+      return;
+    }
+    if (cloudState.hasInitError()) {
+      reject(cloudState.requestError());
       return;
     }
     wx.cloud.deleteFile({
       fileList: Array.isArray(fileIDs) ? fileIDs : [fileIDs],
       success: resolve,
-      fail: reject,
+      fail: (err) => { markCloudFailure(err); reject(err); },
     });
   });
 }
@@ -152,7 +185,10 @@ function deleteFile(fileIDs) {
 // ============================================================
 function getDB() {
   if (!wx.cloud || typeof wx.cloud.database !== 'function') {
-    throw new Error('当前微信版本不支持云开发');
+    throw unavailableError();
+  }
+  if (cloudState.hasInitError()) {
+    throw cloudState.requestError();
   }
   return wx.cloud.database();
 }

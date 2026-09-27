@@ -27,6 +27,7 @@ const syntaxOk = (abs) => {
   }
 };
 const jsFiles = [
+  'app.js',
   'pages/itinerary/itinerary.js',
   'pages/tickets/tickets.js',
   'pages/index/index.js',
@@ -35,6 +36,8 @@ const jsFiles = [
   'components/map-button/map-button.js',
   'pages/planner/planner.js',
   'utils/eta.js',
+  'utils/cloud.js',
+  'utils/request.js',
 ];
 jsFiles.forEach((rel) => {
   const err = syntaxOk(path.join(MP, rel));
@@ -83,6 +86,14 @@ const actWxml = fs.readFileSync(path.join(MP, 'components/activity-item/activity
 const actWxss = fs.readFileSync(path.join(MP, 'components/activity-item/activity-item.wxss'), 'utf8');
 const itWxml = fs.readFileSync(path.join(MP, 'pages/itinerary/itinerary.wxml'), 'utf8');
 const itJs = fs.readFileSync(path.join(MP, 'pages/itinerary/itinerary.js'), 'utf8');
+const cloudAppJs = fs.readFileSync(path.join(MP, 'app.js'), 'utf8');
+const cloudUtilJs = fs.readFileSync(path.join(MP, 'utils/cloud.js'), 'utf8');
+const cloudRequestJs = fs.readFileSync(path.join(MP, 'utils/request.js'), 'utf8');
+
+ok('云开发初始化有统一状态与诊断',
+  /cloud\.init\(\{ envId: CLOUD_ENV_ID/.test(cloudAppJs)
+    && /function userMessage/.test(cloudUtilJs)
+    && /cloudState\.hasInitError\(\)/.test(cloudRequestJs));
 
 ok('编辑/删除已独立成行（无 action-row）',
   !/class="action-row"/.test(actWxml) && !/class="spacer"/.test(actWxml));

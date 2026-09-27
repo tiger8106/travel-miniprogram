@@ -3,6 +3,7 @@
 const auth = require('./utils/auth');
 const alarm = require('./utils/alarm');
 const privacy = require('./utils/privacy');
+const cloud = require('./utils/cloud');
 
 // ============================================================
 // ⚠️ 必填：云开发环境 ID（仅 USE_MOCK=false 时需要）
@@ -27,6 +28,8 @@ App({
     currentTripId: null,        // 当前正在查看的行程 id
     currentTrip: null,          // 当前行程缓存
     systemInfo: null,
+    cloudReady: false,
+    cloudInitError: '',
   },
 
   onLaunch() {
@@ -60,12 +63,16 @@ App({
       });
       return;
     }
-    wx.cloud.init({
-      env: CLOUD_ENV_ID === 'YOUR_ENV_ID' ? undefined : CLOUD_ENV_ID,
-      traceUser: true,
-    });
-    if (CLOUD_ENV_ID === 'YOUR_ENV_ID') {
-      console.warn('[阿稳提示] CLOUD_ENV_ID 还是占位符,已临时使用默认环境。建议在 app.js 顶部填入真实环境 ID。');
+    const cloudResult = cloud.init({ envId: CLOUD_ENV_ID, traceUser: true });
+    if (!cloudResult.ok) {
+      this.globalData.cloudInitError = cloudResult.error && (cloudResult.error.message || cloudResult.error.errMsg) || '云开发初始化失败';
+      console.error('[阿稳] 云开发初始化失败', cloudResult.diagnostics, cloudResult.error);
+      this._showCloudInitError();
+      return;
+    }
+    this.globalData.cloudReady = true;
+    if (!CLOUD_ENV_ID || CLOUD_ENV_ID === 'YOUR_ENV_ID') {
+      console.warn('[阿稳提示] CLOUD_ENV_ID 还是占位符，当前使用开发者工具默认环境。正式环境请填入真实环境 ID。');
     }
 
     // 1. 初始化系统信息（getSystemInfoSync 已废弃，改用拆分后的新 API）
@@ -84,6 +91,12 @@ App({
     //    用户主动退出过时不会自动登录，要等他在页面上自己点登录
     auth.requireLogin().then((ok) => {
       if (!ok) {
+        if (cloud.hasInitError()) {
+          this.globalData.cloudReady = false;
+          this.globalData.cloudInitError = cloud.requestError().message;
+          this._showCloudInitError();
+          return;
+        }
         console.info('[阿稳] 当前未登录，等待用户在页面点登录');
         return;
       }
@@ -112,6 +125,8 @@ App({
 
   onShow() {
     alarm.refreshAlarms();
+    // 云初始化失败时不要让后台生成续跑再次触发一串无意义的云函数报错。
+    if (!USE_MOCK && (this.globalData.cloudInitError || cloud.hasInitError())) return;
     // 回到小程序（包括从后台切回来）先看一眼有没有没跑完的生成任务。
     // 用户点完"生成详细行程"就退出小程序时，云端 genWorker 已经在一轮轮接力了，
     // 这里 sync() 会立刻接手剩下的轮次，不等下一分钟的定时触发。
@@ -131,5 +146,19 @@ App({
   onError(err) {
     console.error('App.onError:', err);
     // 可上报到日志服务
+  },
+
+  _showCloudInitError() {
+    if (this._cloudInitErrorShown) return;
+    this._cloudInitErrorShown = true;
+    wx.showModal({
+      title: '云开发连接失败',
+      content: cloud.userMessage(),
+      confirmText: '知道了',
+      showCancel: false,
+      complete: () => {
+        this._cloudInitErrorShown = false;
+      },
+    });
   },
 });

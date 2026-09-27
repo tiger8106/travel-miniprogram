@@ -263,6 +263,9 @@ A: 小程序前台轮询只能在小程序运行时震动；锁屏提醒需要�
 **Q: 云函数调用失败？**  
 A: 检查云开发环境是否初始化、openid 是否注入（`wxContext.OPENID`）。
 
+**Q: 开发者工具提示 `cloud init error: no baseresponse`？**
+A: 这是小程序在 `wx.cloud.init` 阶段没有拿到云环境响应，常见原因是项目 AppID、云环境 ID、开发者工具当前选中的环境或登录账号不一致，也可能是网络/代理暂时无法访问云开发。当前项目的 AppID 在 `project.config.json`，环境 ID 在 `miniprogram/app.js` 顶部；两者必须属于同一个小程序和账号。打开开发者工具「云开发」，确认右上角环境与代码中的 `CLOUD_ENV_ID` 完全一致，确认环境仍可用后重新编译。代码现在会在初始化失败时停止后续云函数请求，并弹出当前 AppID、环境 ID 和排查步骤。
+
 ---
 
 ## 📄 License
