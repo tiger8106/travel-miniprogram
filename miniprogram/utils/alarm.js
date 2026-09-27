@@ -25,6 +25,47 @@ function setAdvanceMin(minutes) {
   return m;
 }
 
+function leadOf(alarm) {
+  const n = Number(alarm && alarm.leadMinutes);
+  return isFinite(n) && n > 0 ? Math.max(1, Math.min(60, Math.round(n))) : getAdvanceMin();
+}
+
+// fireAt 是实际放票/办理时刻；旧数据里的 triggerAt 也按实际时刻兼容。
+function actionAtOf(alarm) {
+  if (alarm && Number(alarm.actionAt) > 0) return Number(alarm.actionAt);
+  if (alarm && alarm.fireAtStr) {
+    const parsed = calcTriggerAt(alarm.fireAt, alarm.fireAtStr);
+    if (parsed) return parsed;
+  }
+  if (alarm && Number(alarm.fireAt) > 0) return Number(alarm.fireAt);
+  if (alarm && Number(alarm.triggerAt) > 0) return Number(alarm.triggerAt);
+  return null;
+}
+
+function remindAtOf(alarm) {
+  const actionAt = actionAtOf(alarm);
+  if (!actionAt) return null;
+  // 提醒时刻是派生值，不采用可能来自旧缓存的 remindAt。
+  return actionAt - leadOf(alarm) * 60 * 1000;
+}
+
+function isCompleted(alarm) {
+  return !!(alarm && (alarm.completed === true || alarm.status === 'completed'));
+}
+
+function normalizeAlarm(alarm) {
+  const actionAt = actionAtOf(alarm);
+  const leadMinutes = leadOf(alarm);
+  const remindAt = actionAt ? actionAt - leadMinutes * 60 * 1000 : null;
+  return Object.assign({}, alarm, {
+    actionAt,
+    remindAt,
+    leadMinutes,
+    // 保留旧页面依赖的字段，但它现在代表“实际提醒时间”。
+    triggerAt: remindAt,
+  });
+}
+
 /**
  * 加载本地闹钟缓存
  */
@@ -69,11 +110,13 @@ function fireAlarm(alarm, phase) {
   setTimeout(() => wx.vibrateLong({ type: 'heavy' }), 1600);
 
   // 2. 提示
-  const friendly = timeUtil.fmtFriendly(alarm.triggerAt);
+  const actionAt = actionAtOf(alarm);
+  const friendly = timeUtil.fmtFriendly(actionAt);
+  const leadMinutes = leadOf(alarm);
   const isAdvance = phase === 'advance';
   wx.showModal({
     title: isAdvance ? '⏰ 即将到点' : '⏰ 时间到',
-    content: `${alarm.title || '该抢票了'}\n${isAdvance ? `还有 ${getAdvanceMin()} 分钟，请提前准备` : '就是现在，行动！'}\n时间：${friendly}\n${alarm.note || ''}`,
+    content: `${alarm.title || '该办事项了'}\n${isAdvance ? `还有 ${leadMinutes} 分钟，请提前准备` : '就是现在，行动！'}\n办理时间：${friendly}\n${alarm.note || ''}`,
     confirmText: '知道了',
     showCancel: false,
   });
@@ -83,28 +126,29 @@ function fireAlarm(alarm, phase) {
  * 检查所有闹钟：提前 x 分钟一次 + 到点一次，各只提醒一回
  */
 function checkAlarms() {
-  const alarms = loadAlarms();
+  const alarms = loadAlarms().map(normalizeAlarm);
   if (!alarms.length) return;
   const now = Date.now();
   const fired = loadFired();
-  const advanceMs = getAdvanceMin() * 60 * 1000;
   let changed = false;
 
   alarms.forEach((alarm) => {
-    const triggerAt = alarm.triggerAt;
-    if (!triggerAt) return;
+    if (isCompleted(alarm)) return;
+    const actionAt = alarm.actionAt;
+    const remindAt = alarm.remindAt;
+    if (!actionAt || !remindAt) return;
 
-    // 阶段一：提前提醒（triggerAt - x ~ triggerAt 之间）
+    // 阶段一：按每条事项的 leadMinutes 提前提醒。
     const advKey = alarm._id + '__adv';
-    if (now >= triggerAt - advanceMs && now < triggerAt && !fired[advKey]) {
+    if (now >= remindAt && now < actionAt && !fired[advKey]) {
       fireAlarm(alarm, 'advance');
       fired[advKey] = Date.now();
       changed = true;
     }
 
-    // 阶段二：到点提醒（triggerAt ~ +10 分钟）
+    // 阶段二：到实际办理时刻再提醒一次。
     const dueKey = alarm._id + '__due';
-    if (now >= triggerAt && now <= triggerAt + 10 * 60 * 1000 && !fired[dueKey]) {
+    if (now >= actionAt && now <= actionAt + 10 * 60 * 1000 && !fired[dueKey]) {
       fireAlarm(alarm, 'due');
       fired[dueKey] = Date.now();
       changed = true;
@@ -147,16 +191,20 @@ function refreshAlarms() {
  * 保证云函数定时推送也按手机时区触发
  */
 function syncAlarms(alarms) {
-  const list = alarms || [];
+  const list = (alarms || []).map(normalizeAlarm);
   saveAlarms(list);
   try {
     // 懒加载，避免循环依赖；mock 模式下 updateAlarm 是 no-op
     const api = require('../services/api');
     list.forEach((a) => {
-      if (!a || !a._id || !a.fireAtStr) return;
-      const ts = calcTriggerAt(a.fireAt, a.fireAtStr);
-      if (ts && ts !== a.fireAt) {
-        api.updateAlarm(a._id, { fireAt: ts }).catch(() => {});
+      if (!a || !a._id || !a.fireAtStr || !a.actionAt) return;
+      const original = Number(a.fireAt) || 0;
+      if (a.actionAt !== original || Number(a.remindAt) !== Number(a.actionAt - a.leadMinutes * 60 * 1000)) {
+        api.updateAlarm(a._id, {
+          fireAt: a.actionAt,
+          leadMinutes: a.leadMinutes,
+          fireAtStr: a.fireAtStr,
+        }).catch(() => {});
       }
     });
   } catch (e) { /* ignore */ }
@@ -198,7 +246,8 @@ function calcTriggerAt(fireAt, fireAtStr) {
  */
 function addToCalendar(a) {
   return new Promise((resolve, reject) => {
-    const start = a.triggerAt || calcTriggerAt(a.fireAt);
+    const start = actionAtOf(a);
+    const leadMinutes = leadOf(a);
     if (!start) return reject(new Error('该闹钟没有有效时间'));
     if (start <= Date.now()) return reject(new Error('该闹钟已过期，无需写入日历'));
     wx.addPhoneCalendar({
@@ -207,7 +256,7 @@ function addToCalendar(a) {
       endTime: Math.floor((start + 30 * 60 * 1000) / 1000),      // 秒，半小时后结束
       description: a.note || '',
       alarm: true,
-      alarmOffset: getAdvanceMin() * 60, // 提前 x 分钟（用户设置，单位秒）
+      alarmOffset: leadMinutes * 60, // 每条事项自己的提前量，单位秒
       success: resolve,
       fail: (err) => {
         const msg = (err && err.errMsg) || '';
@@ -231,8 +280,8 @@ function addToCalendar(a) {
 async function addAllToCalendar(list) {
   const now = Date.now();
   const future = (list || []).filter((a) => {
-    const t = a.triggerAt || calcTriggerAt(a.fireAt);
-    return t && t > now;
+    const t = actionAtOf(a);
+    return t && t > now && !isCompleted(a);
   });
   if (!future.length) return { ok: 0, total: 0, cancelled: 0 };
 
@@ -292,6 +341,9 @@ module.exports = {
   syncAlarms,
   loadAlarms,
   calcTriggerAt,
+  actionAtOf,
+  remindAtOf,
+  normalizeAlarm,
   fireAlarm,         // 暴露供测试
   addToCalendar,
   addAllToCalendar,

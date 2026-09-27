@@ -6,9 +6,31 @@ const cloud = require('wx-server-sdk');
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
 const COL = 'ticket_alarms';
+const DEFAULT_LEAD_MINUTES = 5;
 
 // 诊断标记：改一次升一次，用来确认线上跑的是不是最新代码
-const DEPLOY_TAG = 'v3-layout';
+const DEPLOY_TAG = 'v4-stateful-reminders';
+
+function leadOf(alarm) {
+  const n = Number(alarm && alarm.leadMinutes);
+  return isFinite(n) && n > 0 ? Math.max(1, Math.min(60, Math.round(n))) : DEFAULT_LEAD_MINUTES;
+}
+
+function actionAtOf(alarm) {
+  const n = Number(alarm && alarm.fireAt);
+  return isFinite(n) && n > 0 ? n : 0;
+}
+
+function notifyAtOf(alarm) {
+  const actionAt = actionAtOf(alarm);
+  if (!actionAt) return 0;
+  // remindAt 是派生值，按当前办理时间和提前量即时重算，兼容旧记录及用户改过提前量的情况。
+  return actionAt - leadOf(alarm) * 60 * 1000;
+}
+
+function isCompleted(alarm) {
+  return !!(alarm && (alarm.completed === true || alarm.status === 'completed'));
+}
 
 exports.main = async (event, context) => {
   // action = 'test'：立即给当前用户推一条订阅消息（闹钟页「测试」按钮用）
@@ -180,14 +202,14 @@ function explainError(err) {
 async function pollAndPush() {
   const now = Date.now();
   const tenMinLater = now + 10 * 60 * 1000;
+  // fireAt 是真正的放票/办理时刻。为覆盖用户最多提前 60 分钟提醒，
+  // 查询窗口要比实际通知窗口向后放宽，再在内存中按 remindAt 精确过滤。
+  const queryEnd = tenMinLater + 60 * 60 * 1000;
   const db = cloud.database();
   const _ = db.command;
 
-  // 查找在 [now - 5min, now + 10min] 区间内的闹钟
-  const window = [
-    now - 5 * 60 * 1000,
-    tenMinLater,
-  ];
+  // 查找可能落入通知窗口的事项；旧数据没有 remindAt 时按默认 5 分钟兼容。
+  const window = [now - 5 * 60 * 1000, queryEnd];
 
   try {
     const res = await db.collection(COL)
@@ -195,23 +217,31 @@ async function pollAndPush() {
         fireAt: _.and(_.gte(window[0]), _.lte(window[1])),
         notified: _.neq(true),
       })
-      .limit(100)
+      .limit(200)
       .get();
 
-    if (!res.data || !res.data.length) {
+    const candidates = (res.data || []).filter((alarm) => {
+      if (isCompleted(alarm) || alarm.notified === true) return false;
+      const notifyAt = notifyAtOf(alarm);
+      return notifyAt >= now - 5 * 60 * 1000 && notifyAt <= tenMinLater;
+    });
+
+    if (!candidates.length) {
       return { code: 0, data: { sent: 0 } };
     }
 
     let sent = 0;
-    for (const alarm of res.data) {
+    for (const alarm of candidates) {
       try {
         const layoutKey = process.env.SUBSCRIBE_LAYOUT || 'H_thing2_date4_time30_thing11';
         const build = LAYOUTS[layoutKey] || LAYOUTS.H_thing2_date4_time30_thing11;
+        const actionAt = actionAtOf(alarm);
+        const leadMinutes = leadOf(alarm);
         const vals = {
           title: String(alarm.title || '行程提醒').slice(0, 20),
-          date: formatDate(alarm.fireAt),
-          time: formatTime(alarm.fireAt),
-          note: String(alarm.note || '点击查看详情').slice(0, 20),
+          date: formatDate(actionAt),
+          time: formatTime(actionAt),
+          note: String(`提前 ${leadMinutes} 分钟提醒${alarm.note ? '；' + alarm.note : ''}`).slice(0, 20),
         };
         await cloud.openapi.subscribeMessage.send({
           touser: alarm._openid,
@@ -221,7 +251,7 @@ async function pollAndPush() {
         });
         // 标记已通知
         await db.collection(COL).doc(alarm._id).update({
-          data: { notified: true, notifiedAt: now },
+          data: { notified: true, notifiedAt: now, notifiedFor: notifyAtOf(alarm) },
         });
         sent++;
       } catch (err) {
@@ -229,7 +259,7 @@ async function pollAndPush() {
       }
     }
 
-    return { code: 0, data: { sent, total: res.data.length } };
+    return { code: 0, data: { sent, total: candidates.length } };
   } catch (err) {
     console.error('[sendAlarm]', err);
     return { code: -1, msg: err.message };

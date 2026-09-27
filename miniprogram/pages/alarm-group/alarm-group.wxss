@@ -119,6 +119,13 @@
   margin-bottom: 14rpx;
 }
 
+.field-help {
+  margin-top: -6rpx;
+  margin-bottom: 12rpx;
+  font-size: 22rpx;
+  color: var(--text-secondary);
+}
+
 /* 时间胶囊 */
 .time-row-edit {
   display: flex;

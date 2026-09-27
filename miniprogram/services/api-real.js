@@ -58,6 +58,10 @@ async function listAlarms(tripId) {
   return callFn('ticketAlarm', { action: 'list', tripId });
 }
 
+async function setAlarmAdvance(tripId, minutes) {
+  return callFn('ticketAlarm', { action: 'setAdvance', tripId, minutes });
+}
+
 async function updateAlarm(alarmId, patch) {
   return callFn('ticketAlarm', { action: 'update', alarmId, patch });
 }
@@ -151,6 +155,7 @@ module.exports = {
   deleteItinerary,
   saveAlarms,
   listAlarms,
+  setAlarmAdvance,
   updateAlarm,
   deleteAlarm,
   sendTestAlarm,

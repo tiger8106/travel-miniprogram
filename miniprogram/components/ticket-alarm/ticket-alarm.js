@@ -27,7 +27,7 @@ Component({
           hotel: '🏨', bus: '🚌', other: '⏰',
         })[item.type] || '⏰',
         statusLabel: ({
-          past: '已过期', soon: '即将开始', future: '未来', unknown: '未知',
+          completed: '已完成', past: '已逾期', soon: '即将提醒', future: '未来', unknown: '未知',
         })[item.status] || '未知',
       });
     },
@@ -40,6 +40,10 @@ Component({
 
     onTapDelete() {
       this.triggerEvent('tapdelete', { item: this.data.item });
+    },
+
+    onTapComplete() {
+      this.triggerEvent('togglecomplete', { item: this.data.item });
     },
 
     onTapTest() {

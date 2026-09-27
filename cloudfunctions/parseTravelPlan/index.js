@@ -9,7 +9,7 @@ const { callLLM, extractDay, extractAlarms, extractSuggestions, asArray } = requ
 const { buildDocMeta } = require('./docmeta');
 const { geocodeBatch, geocodeOne } = require('./geocode');
 const { sanitizeItems } = require('./normalize');
-const { inferAlarms, INFER_THRESHOLD } = require('./alarm-infer');
+const { inferAlarms, backfillRuleAlarms, INFER_THRESHOLD } = require('./alarm-infer');
 
 const COL_TRIP = 'trips';
 const COL_ALARM = 'ticket_alarms';
@@ -19,7 +19,44 @@ const COL_TASK = 'parse_tasks';
 const GEOCODE_DEADLINE_MS = 35 * 1000;
 
 // 解析引擎版本：返回给前端展示，用于确认线上跑的是不是最新代码
-const PARSE_VERSION = 'v3.8-geo-city';
+const PARSE_VERSION = 'v3.9-stateful-reminders';
+const DEFAULT_ALARM_LEAD_MINUTES = 5;
+
+function alarmType(type) {
+  return ['train', 'plane', 'ticket', 'hotel', 'bus', 'other'].includes(type) ? type : 'other';
+}
+
+function alarmKey(a) {
+  const date = String(a && (a.fireAtStr || '')).slice(0, 10);
+  const title = String((a && a.title) || '提醒').trim().replace(/[\s\u3000]+/g, '');
+  return `${alarmType(a && a.type)}|${date}|${title.slice(0, 100)}`;
+}
+
+function prepareAlarmRecords(list, openid, tripId, now) {
+  return (list || []).map((a) => {
+    const fireAt = Number(a.fireAt) || 0;
+    const n = Number(a.leadMinutes);
+    const leadMinutes = isFinite(n) && n > 0 ? Math.max(1, Math.min(60, Math.round(n))) : DEFAULT_ALARM_LEAD_MINUTES;
+    const fireAtStr = String(a.fireAtStr || tsToCnDateTimeStr(fireAt));
+    return Object.assign({}, a, {
+      _openid: openid,
+      tripId,
+      fireAt,
+      fireAtStr,
+      leadMinutes,
+      remindAt: fireAt - leadMinutes * 60 * 1000,
+      completed: a.completed === true,
+      completedAt: a.completed === true ? (Number(a.completedAt) || 0) : 0,
+      status: a.completed === true ? 'completed' : 'pending',
+      alarmKey: a.alarmKey || alarmKey(Object.assign({}, a, { fireAtStr })),
+      type: alarmType(a.type),
+      source: a.source || 'parsed',
+      notified: a.notified === true,
+      createdAt: a.createdAt || now,
+      updatedAt: now,
+    });
+  });
+}
 
 /**
  * 调额度中心（quota 云函数）。
@@ -296,12 +333,19 @@ exports.main = async (event, context) => {
         console.error('[parseTravelPlan] 待办反推异常（不影响主流程）:', e.message);
       }
     }
+    const ruleBackfill = backfillRuleAlarms({ startDate, endDate, items }, alarms);
+    if (ruleBackfill.length) {
+      alarms.push(...ruleBackfill);
+      alarms.sort((a, b) => a.fireAt - b.fireAt);
+      console.log('[parseTravelPlan] 详细行程规则查漏补齐 %d 条待办', ruleBackfill.length);
+    }
 
-    if (alarms.length) {
+    const storedAlarms = prepareAlarmRecords(alarms, openid, tripId, now);
+    if (storedAlarms.length) {
       // 批量插入，每次最多 20 条
-      for (let i = 0; i < alarms.length; i += 20) {
-        const batch = alarms.slice(i, i + 20).map((a) =>
-          db.collection(COL_ALARM).add({ data: { ...a, tripId } })
+      for (let i = 0; i < storedAlarms.length; i += 20) {
+        const batch = storedAlarms.slice(i, i + 20).map((a) =>
+          db.collection(COL_ALARM).add({ data: a })
         );
         await Promise.all(batch);
       }
@@ -510,6 +554,12 @@ async function handleStep(event, ctx) {
           console.error('[step/infer] 待办反推异常（不影响主流程）:', e.message);
         }
       }
+      const ruleBackfill = backfillRuleAlarms({ startDate, endDate, items }, alarms);
+      if (ruleBackfill.length) {
+        alarms.push(...ruleBackfill);
+        alarms.sort((a, b) => a.fireAt - b.fireAt);
+        console.log('[step/infer] 详细行程规则查漏补齐 %d 条待办', ruleBackfill.length);
+      }
 
       // 汇总去重要编码的地址（geocode 步按这个清单分批跑）
       const addrSet = new Set();
@@ -591,7 +641,7 @@ async function handleStep(event, ctx) {
         else if (cityHint && !it.city) it.city = cityHint;
       });
 
-      const alarms = task.alarms || [];
+      const alarms = prepareAlarmRecords(task.alarms || [], openid, '', now);
       const tripData = {
         _openid: openid,
         title: task.title || '我的行程',
@@ -610,10 +660,11 @@ async function handleStep(event, ctx) {
       const tripId = addRes._id;
 
       // 闹钟入库：批量插入，每次最多 20 条
-      if (alarms.length) {
-        for (let i = 0; i < alarms.length; i += 20) {
-          const batch = alarms.slice(i, i + 20).map((a) =>
-            db.collection(COL_ALARM).add({ data: Object.assign({}, a, { tripId }) })
+      const storedAlarms = alarms.map((a) => Object.assign({}, a, { tripId }));
+      if (storedAlarms.length) {
+        for (let i = 0; i < storedAlarms.length; i += 20) {
+          const batch = storedAlarms.slice(i, i + 20).map((a) =>
+            db.collection(COL_ALARM).add({ data: a })
           );
           await Promise.all(batch);
         }

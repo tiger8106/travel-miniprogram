@@ -6,7 +6,15 @@ cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
 const COL = 'ticket_alarms';
 const COL_TRIP = 'trips';
-const ALARM_VERSION = 'v1.1-ownership-safe';
+const ALARM_VERSION = 'v1.2-stateful-reminders';
+const {
+  DEFAULT_LEAD_MINUTES,
+  clampLead,
+  calcRemindAt,
+  normalizeAlarm,
+  normalizeType,
+  makeAlarmKey,
+} = require('./alarm-model');
 
 exports.main = async (event, context) => {
   const wxContext = cloud.getWXContext();
@@ -24,6 +32,8 @@ exports.main = async (event, context) => {
         return await save(db, openid, event);
       case 'list':
         return await list(db, openid, event.tripId);
+      case 'setAdvance':
+        return await setAdvance(db, openid, event);
       case 'update':
         return await update(db, openid, event);
       case 'delete':
@@ -49,21 +59,31 @@ async function save(db, openid, { tripId, alarms }) {
   const now = Date.now();
   const records = (Array.isArray(alarms) ? alarms : []).slice(0, 50)
     .filter((a) => a && typeof a === 'object')
-    .map((a) => ({
-    _openid: openid,
-    tripId,
-    title: String(a.title || '提醒').slice(0, 100),
-    note: String(a.note || '').slice(0, 500),
-    fireAt: Number(a.fireAt) || 0,
-    fireAtStr: String(a.fireAtStr || '').slice(0, 32),
-    type: String(a.type || 'other').slice(0, 20),
-    source: 'manual',
-    createdAt: now,
-    updatedAt: now,
-    }));
+    .map((a) => {
+      const fireAt = Number(a.fireAt) || 0;
+      const leadMinutes = clampLead(a.leadMinutes, DEFAULT_LEAD_MINUTES);
+      return {
+        _openid: openid,
+        tripId,
+        title: String(a.title || '提醒').slice(0, 100),
+        note: String(a.note || '').slice(0, 500),
+        fireAt,
+        fireAtStr: String(a.fireAtStr || '').slice(0, 32),
+        leadMinutes,
+        remindAt: calcRemindAt(fireAt, leadMinutes),
+        completed: false,
+        completedAt: 0,
+        status: 'pending',
+        alarmKey: makeAlarmKey({ ...a, fireAt, fireAtStr: a.fireAtStr }),
+        type: normalizeType(a.type),
+        source: 'manual',
+        notified: false,
+        createdAt: now,
+        updatedAt: now,
+      };
+    });
   if (records.some((r) => !r.fireAt)) return { code: -1, msg: '提醒时间不合法' };
-  // 先删除该行程下 source=manual 的，再批量插入（保持同步）
-  // 这里采用追加：返回结果让前端合并
+  // 手动保存采用追加语义；前端每次只传新事项，不能覆盖已有分类记录。
   const ids = [];
   for (const r of records) {
     const res = await db.collection(COL).add({ data: r });
@@ -80,7 +100,34 @@ async function list(db, openid, tripId) {
     .orderBy('fireAt', 'asc')
     .limit(200)
     .get();
-  return { code: 0, data: res.data };
+  return {
+    code: 0,
+    data: (res.data || []).map((a) => normalizeAlarm(a, DEFAULT_LEAD_MINUTES)),
+  };
+}
+
+/** 用户修改“提前几分钟提醒”时，统一更新本行程的事项。完成项也保存这个偏好，恢复待办时仍按新设置计算。 */
+async function setAdvance(db, openid, { tripId, minutes }) {
+  if (!tripId) return { code: -1, msg: '缺少 tripId' };
+  const trip = await db.collection(COL_TRIP).doc(tripId).get().catch(() => null);
+  if (!trip || !trip.data || trip.data._openid !== openid) {
+    return { code: -1, msg: '行程不存在或无权操作' };
+  }
+  const leadMinutes = clampLead(minutes, DEFAULT_LEAD_MINUTES);
+  const rows = await db.collection(COL).where({ _openid: openid, tripId }).limit(500).get();
+  const now = Date.now();
+  let updated = 0;
+  for (let i = 0; i < (rows.data || []).length; i += 20) {
+    const batch = rows.data.slice(i, i + 20).map((a) => db.collection(COL).doc(a._id).update({
+      data: {
+        leadMinutes,
+        remindAt: calcRemindAt(a.fireAt, leadMinutes),
+        updatedAt: now,
+      },
+    }).then(() => { updated += 1; }));
+    await Promise.all(batch);
+  }
+  return { code: 0, data: { tripId, leadMinutes, updated } };
 }
 
 async function update(db, openid, { alarmId, patch }) {
@@ -91,15 +138,34 @@ async function update(db, openid, { alarmId, patch }) {
   }
   if (!patch || typeof patch !== 'object') return { code: -1, msg: '缺少修改内容' };
   const safePatch = {};
+  const current = normalizeAlarm(cur.data, DEFAULT_LEAD_MINUTES);
   if (patch.title !== undefined) safePatch.title = String(patch.title).slice(0, 100);
   if (patch.note !== undefined) safePatch.note = String(patch.note).slice(0, 500);
-  if (patch.type !== undefined) safePatch.type = String(patch.type).slice(0, 20);
+  if (patch.type !== undefined) safePatch.type = normalizeType(patch.type);
   if (patch.fireAt !== undefined) {
     const fireAt = Number(patch.fireAt);
     if (!isFinite(fireAt) || fireAt <= 0) return { code: -1, msg: '提醒时间不合法' };
     safePatch.fireAt = fireAt;
   }
   if (patch.fireAtStr !== undefined) safePatch.fireAtStr = String(patch.fireAtStr).slice(0, 32);
+  if (patch.leadMinutes !== undefined) {
+    safePatch.leadMinutes = clampLead(patch.leadMinutes, current.leadMinutes);
+  }
+  if (patch.completed !== undefined) {
+    const completed = patch.completed === true || patch.completed === 1 || patch.completed === 'true';
+    safePatch.completed = completed;
+    safePatch.completedAt = completed ? Date.now() : 0;
+    safePatch.status = completed ? 'completed' : 'pending';
+  }
+  const nextFireAt = safePatch.fireAt !== undefined ? safePatch.fireAt : current.fireAt;
+  const nextLead = safePatch.leadMinutes !== undefined ? safePatch.leadMinutes : current.leadMinutes;
+  if (safePatch.fireAt !== undefined || safePatch.leadMinutes !== undefined) {
+    safePatch.remindAt = calcRemindAt(nextFireAt, nextLead);
+  }
+  if (safePatch.title !== undefined || safePatch.type !== undefined
+      || safePatch.fireAt !== undefined || safePatch.fireAtStr !== undefined) {
+    safePatch.alarmKey = makeAlarmKey(Object.assign({}, current, safePatch));
+  }
   if (!Object.keys(safePatch).length) return { code: -1, msg: '没有可保存的修改' };
   safePatch.updatedAt = Date.now();
   await db.collection(COL).doc(alarmId).update({ data: safePatch });

@@ -1839,12 +1839,12 @@ function makeRuleAlarmPusher(list, tripStartTs, tripEndTs) {
       overdueCount += 1;
       ts = nowMs() + (1 + overdueCount) * 3600 * 1000;
       // 半夜别打扰：降级提醒落在 22:00~08:00 的推到早上 9 点（同一时刻扎堆由后续错峰逻辑处理）
-      const h = new Date(ts).getHours();
+      // 云函数运行在 UTC，必须按北京时间判断小时，否则北京时间凌晨会被当成下午。
+      const cnNow = tsToCnDateTimeStr(ts);
+      const h = Number(cnNow.slice(11, 13));
       if (h >= 22 || h < 8) {
-        const d9 = new Date(ts);
-        d9.setHours(9, 0, 0, 0);
-        if (h >= 22) d9.setDate(d9.getDate() + 1);
-        ts = d9.getTime();
+        const d9 = h >= 22 ? shiftDate(cnNow.slice(0, 10), 1) : cnNow.slice(0, 10);
+        ts = parseCnTime(`${d9}T09:00:00`);
       }
       finalNote = `按常规 ${dateStr} 就该开票/预订了，现在已经进入抢票期：${finalNote}`;
     }
@@ -2002,6 +2002,70 @@ function backfillMissingAlarms(p, outline, nominated) {
     );
   });
 
+  return list;
+}
+
+/**
+ * 详细行程查漏：大纲里的 highlights 可能漏掉了 LLM 在某一天细化时新增的门票、
+ * 游船、竹筏、演出等事项。对明确写出“需要预约/购票”的条目按规则补一条，
+ * 让提醒来源真正覆盖最终详细行程。
+ */
+function backfillDetailAlarms(p, outline, items, existing) {
+  const list = [];
+  const tripStartTs = parseCnTime(`${p.startDate}T00:00:00`);
+  const tripEndTs = parseCnTime(`${p.endDate}T23:59:00`);
+  const push = makeRuleAlarmPusher(list, tripStartTs, tripEndTs);
+  const base = asArray(existing);
+  const days = asArray(outline.days);
+  const normalize = (s) => String(s || '').replace(/[\s\u3000→（）()：:，,。；;]/g, '').toLowerCase();
+  const actionClockOf = (text, fallback) => {
+    const s = String(text || '');
+    const patterns = [
+      /(?:开票|放票|起售|开售|售票)[^\d]{0,8}([01]?\d|2[0-3])[:：]([0-5]\d)/,
+      /([01]?\d|2[0-3])[:：]([0-5]\d)[^。；,，\n]{0,12}(?:开票|放票|起售|开售|售票)/,
+    ];
+    for (const re of patterns) {
+      const m = re.exec(s);
+      if (m) return `${String(Number(m[1])).padStart(2, '0')}:${m[2]}`;
+    }
+    return fallback;
+  };
+  const covered = (type, date, text) => {
+    const needle = normalize(text).slice(0, 8);
+    return base.concat(list).some((a) => {
+      if (a.type !== type || tsToDateStr(a.fireAt) !== date) return false;
+      const old = normalize(a.title);
+      return needle.length >= 4 && (old.indexOf(needle.slice(0, 4)) >= 0 || needle.indexOf(old.slice(0, 4)) >= 0);
+    });
+  };
+  asArray(items).forEach((it) => {
+    const text = `${it.activity || ''} ${it.note || ''}`;
+    if (/已(经)?(购买|预订|预约|订好)|无需(购买|预约|预订)|不需要(购买|预约|预订)/.test(text)) return;
+    const day = days[Number(it.dayIndex || 0)] || {};
+    const date = validDate(day.date) ? day.date : shiftDate(p.startDate, Number(it.dayIndex || 0));
+    const titleText = String(it.activity || it.endLocation || it.startLocation || '该项目').slice(0, 28);
+    const ticketLike = it.category === 'ticket'
+      || /门票|预约|船票|游船|竹筏|漂流|演出|缆车|索道|温泉|跟拍/.test(text);
+    if (ticketLike) {
+      const clock = actionClockOf(text, '09:00');
+      if (!covered('ticket', shiftDate(date, -TICKET_PRESALE_DAYS), titleText)) {
+        push(
+          `预约${date} ${titleText}`,
+          shiftDate(date, -TICKET_PRESALE_DAYS), clock, 'ticket',
+          '根据最终详细行程自动补齐，热门项目通常提前 1-7 天放票或预约。具体开放时间以景区官方公告为准，下单前请核对。'
+        );
+      }
+      return;
+    }
+    const prepLike = /身份证|护照|签证|通行证|驾照|药品|充电宝|装备|行李|宠物|外币|流量卡|保险|值机|选座|租车|包车|接送机/.test(text);
+    if (prepLike && !covered('other', shiftDate(date, -3), titleText)) {
+      push(
+        `准备${date} ${titleText}`,
+        shiftDate(date, -3), '20:00', 'other',
+        '根据最终详细行程自动补齐，出发前检查材料、装备或服务是否已经准备好。'
+      );
+    }
+  });
   return list;
 }
 
@@ -2818,7 +2882,12 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
       .catch((e) => { console.warn('[generatePlan] 补排闹钟失败，走规则兜底:', e.message); return null; });
   }
   // 规则兜底 = 硬底线（去程/返程票、行前准备）+ 查漏补齐（每段城际、每晚住宿）
-  const alarms = a || fallbackAlarms(p, outline);
+  let alarms = a || fallbackAlarms(p, outline);
+  const detailBackfill = backfillDetailAlarms(p, outline, items, alarms);
+  if (detailBackfill.length) {
+    alarms = alarms.concat(detailBackfill);
+    console.log('[generatePlan] 详细行程规则查漏补齐 %d 条待办', detailBackfill.length);
+  }
   const suggestions = s || {};
   console.log('[generatePlan] 清洗后条目=%d, 闹钟=%d, 剩余预算=%dms', items.length, alarms.length, remain);
 
@@ -2861,7 +2930,7 @@ async function generate(rawInput) {
 
 module.exports = {
   generate, generateOutline, buildPlan, genDayItems,
-  normalizeInput, sanitizeAlarmCandidates, buildFallbackAlarms, fallbackAlarms,
+  normalizeInput, sanitizeAlarmCandidates, buildFallbackAlarms, fallbackAlarms, backfillDetailAlarms,
   shiftDate, dayDiff, isHolidayRange,
   parseDestList, missingMustVisit, placeStem, duplicateHighlights,
   applyTripEdgeTimes, snapScheduleMinutes, isTransportItem,

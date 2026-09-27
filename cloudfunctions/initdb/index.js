@@ -12,7 +12,7 @@ const INIT_VERSION = 'v1.1-safe-init';
 const COLLECTIONS = [
   { name: 'users',         desc: '用户档案' },
   { name: 'trips',         desc: '行程主表' },
-  { name: 'ticket_alarms', desc: '抢票闹钟' },
+  { name: 'ticket_alarms', desc: '旅行提醒事项' },
   { name: 'suggestions',   desc: '旅行建议' },
   { name: 'parse_tasks',   desc: '分步解析任务态' },
   { name: 'orders',        desc: '虚拟支付订单' },

@@ -120,13 +120,41 @@ async function deleteItinerary(tripId) {
 // ============================================================================
 async function saveAlarms(tripId, alarms) {
   await delay(200);
-  STORE.alarms = alarms || [];
+  const now = Date.now();
+  const incoming = (alarms || []).map((a, i) => {
+    const fireAt = Number(a.fireAt) || Date.now() + 3600000;
+    const leadMinutes = Math.max(1, Math.min(60, Math.round(Number(a.leadMinutes) || 5)));
+    return Object.assign({}, a, {
+      _id: a._id || `mock-alarm-${now}-${i}`,
+      tripId: tripId || TRIP_ID,
+      fireAt,
+      leadMinutes,
+      remindAt: fireAt - leadMinutes * 60 * 1000,
+      completed: false,
+      completedAt: 0,
+    });
+  });
+  // 真实云函数的 save 是追加；mock 也必须追加，否则手动新增一条会把已有分类全部覆盖。
+  STORE.alarms = STORE.alarms.concat(incoming);
   return { ok: true };
 }
 
 async function listAlarms(tripId) {
   await delay(200);
-  return JSON.parse(JSON.stringify(STORE.alarms));
+  const rows = STORE.alarms.filter((a) => !tripId || !a.tripId || a.tripId === tripId);
+  return JSON.parse(JSON.stringify(rows));
+}
+
+async function setAlarmAdvance(tripId, minutes) {
+  await delay(100);
+  const leadMinutes = Math.max(1, Math.min(60, Math.round(Number(minutes) || 5)));
+  STORE.alarms.filter((a) => !tripId || a.tripId === tripId || !a.tripId).forEach((a) => {
+    const actionAt = Number(a.fireAt) || Number(a.triggerAt) + 5 * 60 * 1000;
+    a.leadMinutes = leadMinutes;
+    a.remindAt = actionAt - leadMinutes * 60 * 1000;
+    a.triggerAt = a.remindAt;
+  });
+  return { code: 0, data: { tripId, leadMinutes, updated: STORE.alarms.length } };
 }
 
 async function updateAlarm(alarmId, patch) {
@@ -134,6 +162,15 @@ async function updateAlarm(alarmId, patch) {
   const idx = STORE.alarms.findIndex((a) => a._id === alarmId);
   if (idx >= 0) {
     STORE.alarms[idx] = { ...STORE.alarms[idx], ...patch };
+    const a = STORE.alarms[idx];
+    const fireAt = Number(a.fireAt) || Number(a.triggerAt) || Date.now();
+    const leadMinutes = Math.max(1, Math.min(60, Math.round(Number(a.leadMinutes) || 5)));
+    a.fireAt = fireAt;
+    a.leadMinutes = leadMinutes;
+    a.remindAt = fireAt - leadMinutes * 60 * 1000;
+    a.triggerAt = a.remindAt;
+    if (a.completed) a.completedAt = a.completedAt || Date.now();
+    else a.completedAt = 0;
     return { ok: true };
   }
   // 找不到就新增
@@ -141,11 +178,13 @@ async function updateAlarm(alarmId, patch) {
     _id: alarmId,
     tripId: TRIP_ID,
     title: patch.title || '新闹钟',
-    fireAt: patch.fireAt || '',
-    triggerAt: patch.triggerAt || Date.now(),
+    fireAt: patch.fireAt || Date.now() + 3600000,
     leadMinutes: patch.leadMinutes || 5,
     note: patch.note || '',
+    completed: !!patch.completed,
   };
+  newAlarm.remindAt = newAlarm.fireAt - newAlarm.leadMinutes * 60 * 1000;
+  newAlarm.triggerAt = newAlarm.remindAt;
   STORE.alarms.push(newAlarm);
   return { ok: true, alarm: newAlarm };
 }
@@ -249,6 +288,7 @@ module.exports = {
   deleteItinerary,
   saveAlarms,
   listAlarms,
+  setAlarmAdvance,
   updateAlarm,
   deleteAlarm,
   // mock 模式下没有真实推送，直接返回成功

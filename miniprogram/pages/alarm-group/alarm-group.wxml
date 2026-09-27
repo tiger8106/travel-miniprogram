@@ -1,12 +1,14 @@
 <view class="container">
-  <view wx:if="{{loading}}" class="loading">加载中…</view>
+  <login-gate wx:if="{{needLogin}}" tip="登录后查看和管理分类提醒" bind:success="onLoginSuccess" />
+
+  <view wx:elif="{{loading}}" class="loading">加载中…</view>
 
   <block wx:else>
     <view class="head-card">
       <text class="head-icon">{{icon}}</text>
       <view class="head-main">
         <view class="head-title">{{label}}</view>
-        <view class="head-sub">{{pendingCount ? pendingCount + ' 项待办 / ' : ''}}共 {{alarms.length}} 条提醒</view>
+        <view class="head-sub">{{pendingCount ? pendingCount + ' 项待办 / ' : ''}}{{completedCount ? '已完成 ' + completedCount + ' 项 / ' : ''}}共 {{alarms.length}} 条提醒</view>
       </view>
       <view class="head-add" bindtap="onAdd">＋ 添加</view>
     </view>
@@ -23,7 +25,8 @@
                     devMode="{{devMode}}"
                     bind:tapcalendar="onTapCalendar"
                     bind:tapedit="onTapEdit"
-                    bind:tapdelete="onDelete" />
+                    bind:tapdelete="onDelete"
+                    bind:togglecomplete="onToggleComplete" />
     </view>
   </block>
 
@@ -49,7 +52,8 @@
         </view>
 
         <view class="field">
-          <view class="field-label">⏰ 提醒时间</view>
+          <view class="field-label">⏰ 办理 / 放票时间</view>
+          <view class="field-help">系统会按提前提醒设置通知你</view>
           <view class="time-row-edit">
             <picker mode="date" value="{{editForm.fireAtDate}}" bindchange="onDateChange" class="time-picker">
               <view class="time-pill">
