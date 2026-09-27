@@ -432,6 +432,60 @@ const homeByWord = P.enforceDayClosure([
 ok(homeByWord.length === 1, '描述里写了回酒店/民宿 → 视为已收尾，不重复补',
   JSON.stringify(homeByWord.map((x) => x.activity)));
 
+// 5i-1. 住宿范围隔离 / 跨天位置链：防止模型把上一份攻略的外地酒店带进来，
+//       以及“前一天收在 A、第二天从 B 开始”的断链。
+const lodgingOutline = { days: [
+  { city: '成都', overnight: '成都', hotel: '河北省石家庄市桥西区全季酒店(石家庄火车站)文景街' },
+  { city: '都江堰', overnight: '古尔沟/理县', hotel: '古尔沟华美达温泉度假酒店' },
+] };
+P.normalizeOutlineLodging(lodgingOutline);
+ok(lodgingOutline.days[0].hotel === '',
+  '住宿推荐带外省完整地址且与当天城市冲突 → 清空错误酒店', lodgingOutline.days[0].hotel);
+ok(lodgingOutline.days[1].hotel === '古尔沟华美达温泉度假酒店',
+  '住宿推荐属于 overnight 片区 → 保留有效酒店', lodgingOutline.days[1].hotel);
+const namedHotel = P.normalizeGeneratedLodging([{
+  dayIndex: 1, startTime: '19:00', endTime: '19:30',
+  activity: '办理入住', category: 'hotel', endLocation: '古尔沟',
+}], lodgingOutline);
+ok(namedHotel[0].endLocation === '古尔沟华美达温泉度假酒店',
+  '住宿条目只写片区且大纲有具体酒店 → 统一到可导航的推荐酒店', namedHotel[0].endLocation);
+const lodgingItems = P.normalizeGeneratedLodging([{
+  dayIndex: 0, startTime: '19:50', endTime: '20:20',
+  activity: '步行至全季酒店办理入住', category: 'hotel',
+  startLocation: '成都东站',
+  endLocation: '河北省石家庄市桥西区全季酒店(石家庄火车站)文景街',
+}], lodgingOutline);
+ok(lodgingItems[0].endLocation === '成都'
+  && /成都/.test(lodgingItems[0].activity)
+  && !lodgingItems[0].endLon && !lodgingItems[0].endLat,
+  '细化结果再次遇到外省酒店 → 回写当天住宿范围并清空旧坐标', JSON.stringify(lodgingItems[0]));
+const lodgingStartItems = P.normalizeGeneratedLodging([{
+  dayIndex: 1, startTime: '07:30', endTime: '08:00',
+  activity: '从河北省石家庄市桥西区全季酒店前往犀浦站', category: 'transport',
+  startLocation: '河北省石家庄市桥西区全季酒店', endLocation: '犀浦站',
+}], lodgingOutline, { origin: '重庆市金童路' });
+ok(lodgingStartItems[0].startLocation === '成都'
+  && lodgingStartItems[0].activity.includes('从成都前往犀浦站')
+  && lodgingStartItems[0].endLocation === '犀浦站'
+  && !lodgingStartItems[0].startLon && !lodgingStartItems[0].startLat,
+  '第二天首条起点仍串入外省酒店 → 回写到前一晚住宿地并清空旧坐标', JSON.stringify(lodgingStartItems[0]));
+const chainOutline = { days: [
+  { city: '成都', overnight: '成都', hotel: '' },
+  { city: '都江堰', overnight: '古尔沟', hotel: '古尔沟华美达温泉度假酒店' },
+] };
+const closedChain = P.enforceDayClosure([{
+  dayIndex: 0, startTime: '18:00', endTime: '19:00', activity: '抵达成都东站',
+  category: 'transport', startLocation: '都江堰站', endLocation: '成都东站', transportType: 'train',
+}], chainOutline, { origin: '重庆市金童路' });
+const chainedItems = P.enforceDayStartLocation(closedChain.concat([{
+  dayIndex: 1, startTime: '08:00', endTime: '08:30', activity: '前往都江堰景区',
+  category: 'transport', startLocation: '都江堰', endLocation: '都江堰景区', transportType: 'car',
+}]), chainOutline);
+const chainTransfer = chainedItems.find((x) => x.dayIndex === 1 && /跨日位置接驳/.test(x.note || ''));
+ok(!!chainTransfer && chainTransfer.startLocation === '成都'
+  && chainTransfer.endLocation === '都江堰' && chainTransfer.endTime === '08:00',
+  '第二天首条起点与前晚收尾不一致 → 自动补跨日接驳', JSON.stringify(chainTransfer));
+
 // 5i-2. 出发接驳 / 早餐 / 晚间安排 / 推荐酒店 / 到家接驳（确定性兜底）
 //       场景来自实测：出发地"重庆市金童路 15:30"被生成成"15:30 乘高铁"，
 //       从家去车站的接驳凭空消失；晚上 7 点到酒店后行程就断了。

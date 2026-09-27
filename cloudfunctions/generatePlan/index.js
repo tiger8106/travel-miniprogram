@@ -19,7 +19,7 @@ cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 const crypto = require('crypto');
 
 const { generateOutline, buildPlan, dayDiff, collectSegments, applyRealSchedules } = require('./plan');
-const { geocodeBatch } = require('./geocode');
+const { geocodeBatch, cityTokens } = require('./geocode');
 const { lookupSchedules, canLookupSchedules, canSearch } = require('./schedule');
 
 const COL_TRIP = 'trips';
@@ -32,7 +32,7 @@ const COL_SCHED = 'schedule_cache';
 const SCHED_TTL_MS = 36 * 3600 * 1000;
 
 // 生成引擎版本（用于确认线上跑的是哪一版）
-const GEN_VERSION = 'v1.8-stateful-reminders';
+const GEN_VERSION = 'v1.9-closure-navigation';
 
 // ---------------------------------------------------------------
 // 后台续跑（用户中途离开小程序也能跑完）
@@ -99,16 +99,22 @@ async function quotaCall(openid, data) {
  *  全国同名地点太多，不带城市可能把"象鼻山"定位到南昌去。
  *  显示名称不受影响：经纬度只用于打开地图，用户看到的还是短地名。
  */
-async function geocodeItems(items, cityOf, opts) {
+async function geocodeItems(items, regionOf, opts, cityOf) {
   try {
     const addrSet = new Set();
     items.forEach((it) => {
-      // 行程卡片的导航以终点为主；先查终点可把高德请求量近似减半，
-      // 起点没有坐标时前端仍会用城市 + 地名实时消歧。
-      const target = String(it.endLocation || it.startLocation || '').trim();
-      if (target) addrSet.add(target);
+      // 终点优先：卡片导航默认打开终点；只有没有终点时才查起点，
+      // 另外补查中间点。这样能修复分段导航，同时不把地理编码请求量翻倍。
+      const add = (value) => {
+        const name = String(value || '').trim();
+        if (name) addrSet.add(name);
+      };
+      add(it.endLocation || it.startLocation);
+      (Array.isArray(it.waypoints) ? it.waypoints : []).forEach((wp) => {
+        add(typeof wp === 'string' ? wp : (wp && (wp.name || wp.location)));
+      });
     });
-    const coordMap = await geocodeBatch([...addrSet], cityOf, opts);
+    const coordMap = await geocodeBatch([...addrSet], regionOf, opts);
     if (coordMap.size) {
       items.forEach((it) => {
         const startName = String(it.startLocation || '').trim();
@@ -134,14 +140,24 @@ async function geocodeItems(items, cityOf, opts) {
           it.city = hit.city;
         } else if (!it.city) {
           const target = endName || startName;
-          if (target) it.city = cityOf(target) || '';
+          if (target) it.city = cityOf ? cityOf(target) : '';
+        }
+
+        // 中间点的坐标也回写，activity-item 会按 waypoint 分段导航。
+        if (Array.isArray(it.waypoints)) {
+          it.waypoints = it.waypoints.map((wp) => {
+            const name = typeof wp === 'string' ? wp : (wp && (wp.name || wp.location));
+            const hitWp = coordMap.get(String(name || '').trim());
+            if (!hitWp || typeof wp === 'string') return wp;
+            return Object.assign({}, wp, { lon: hitWp.lon, lat: hitWp.lat });
+          });
         }
       });
     }
     // 每条也记下它自己的城市：前端点导航时用它消歧，比整个行程的城市串准得多
     items.forEach((it) => {
       const to = it.endLocation || it.startLocation;
-      if (to && !it.city) it.city = cityOf(to) || '';
+      if (to && !it.city) it.city = cityOf ? cityOf(to) : '';
     });
   } catch (e) {
     console.error('[generatePlan] 地理编码失败（不影响主流程）:', e.message);
@@ -149,11 +165,40 @@ async function geocodeItems(items, cityOf, opts) {
   return items;
 }
 
-function outlineRegion(outline) {
-  const list = (outline && Array.isArray(outline.days) ? outline.days : [])
-    .map((d) => String((d && (d.city || d.overnight)) || '').trim())
-    .filter(Boolean);
-  return [...new Set(list)].join(' ');
+/** 把大纲中的城市、片区、出发地整理成高德消歧范围。 */
+function regionAreasOf(values) {
+  const out = [];
+  const seen = new Set();
+  const add = (token, city) => {
+    const t = String(token || '').trim();
+    const c = String(city || t).trim();
+    if (!t || t.length < 2 || /^(返程|回家|家中)$/.test(t)) return;
+    const key = `${t}|${c}`;
+    if (!seen.has(key)) { seen.add(key); out.push({ token: t, city: c }); }
+  };
+  (values || []).forEach((value) => {
+    const text = String(value || '').replace(/[\/|]/g, ' ');
+    cityTokens(text).forEach((token) => add(token, token));
+    // cityTokens 会把「理县」这样的单字县名词根过滤掉，
+    // 但「理县古尔沟」仍然是有效的高德消歧范围，所以把完整行政词保留。
+    const re = /([\u4e00-\u9fa5]{1,8}(?:省|自治区|自治州|地区|盟|市|自治县|县|区|旗|镇|乡))/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      const full = m[1];
+      const bare = full.replace(/(省|自治区|自治州|地区|盟|自治县|县|区|旗|镇|乡|市)$/, '');
+      add(full, bare.length >= 2 ? bare : full);
+    }
+  });
+  return out;
+}
+
+function outlineRegion(outline, origin) {
+  const values = [origin];
+  (outline && Array.isArray(outline.days) ? outline.days : []).forEach((d) => {
+    if (!d) return;
+    values.push(d.city, d.overnight);
+  });
+  return [...new Set(regionAreasOf(values).map((x) => x.city))].join(' ');
 }
 
 /** 生成任务的状态始终同步到行程文档，首页和「我的行程」只需要查 trips。 */
@@ -190,29 +235,39 @@ async function savePlan(openid, plan, tripId, jobId) {
   // 城市集合也存进 trip.region——前端点击导航、条目缺坐标需要实时查时，
   // 拿它继续消歧（只用于查询，不会拼进显示名称）。
   const dayCities = Array.isArray(plan.dayCities) ? plan.dayCities : [];
-  const region = [...new Set(dayCities.filter(Boolean))].join(' ');
-  const firstCity = dayCities.find(Boolean) || '';
-  // 地址里自带城市名时以它为准（取最长匹配，避免"南宁东站"被短词误伤）：
+  const dayAreas = dayCities.map((value) => regionAreasOf([value]));
+  const routeAreas = regionAreasOf([plan.origin].concat(dayCities));
+  const region = [...new Set(routeAreas.map((x) => x.city))].join(' ');
+  const firstCity = (routeAreas[0] && routeAreas[0].city) || '';
+  // 地址里自带城市/县/片区时以它为准（取最长匹配，避免"南宁东站"被短词误伤）：
   // 城际段的终点常常不在当天城市里，用当天城市去约束会整条定位失败。
   const cityInAddr = (addr) => {
-    let best = '';
-    dayCities.forEach((c) => {
-      if (c && String(addr || '').indexOf(c) >= 0 && c.length > best.length) best = c;
-    });
-    return best;
+    const text = String(addr || '');
+    const matches = routeAreas.filter((area) => area.token && text.indexOf(area.token) >= 0);
+    matches.sort((a, b) => b.token.length - a.token.length);
+    return matches[0] ? matches[0].city : '';
+  };
+  const dayAreaOf = (idx) => {
+    const areas = idx >= 0 ? (dayAreas[idx] || []) : [];
+    return (areas[0] && areas[0].city) || '';
+  };
+  const regionOf = (addr) => {
+    const idx = plan.addrDay ? plan.addrDay.get(addr) : -1;
+    const own = cityInAddr(addr);
+    const day = idx >= 0 ? dayCities[idx] || '' : '';
+    // 传给高德的是当天范围 + 全程范围：既能定位同名 POI，
+    // 也能处理“当天住都江堰、终点却是古尔沟/理县”的跨城条目。
+    return [...new Set([own, day, region].filter(Boolean))].join(' ');
   };
   const cityOf = (addr) => {
     const idx = plan.addrDay ? plan.addrDay.get(addr) : -1;
-    const c = idx >= 0 ? (dayCities[idx] || '') : '';
-    // 兜底用第一个城市：plan.dest 是"桂林、龙脊梯田、阳朔…"整串，
-    // 直接塞给高德 city 参数只会被忽略，不能拿它兜底
-    return cityInAddr(addr) || c || firstCity;
+    return cityInAddr(addr) || dayAreaOf(idx) || firstCity;
   };
   // 地理编码的时间硬预算：细化轮本来就在云函数 60s 上限边缘跑，
   // 几十个地址逐个十几次高德请求不设防，整轮就被杀掉重来（反而更慢）。
   // 没编码上的地点前端导航时会走"复制地名/实时定位"兜底，功能不缺。
   const geoBudgetMs = Math.max(5000, Math.min(20000, parseInt(process.env.GEOCODE_BUDGET_MS || '', 10) || 12000));
-  await geocodeItems(plan.items, cityOf, { deadlineAt: Date.now() + geoBudgetMs });
+  await geocodeItems(plan.items, regionOf, { deadlineAt: Date.now() + geoBudgetMs }, cityOf);
   // 等哪一轮真有内容了再建，否则中途放弃会在「我的行程」里留下一条 0 条的空攻略。
   if (!tripId && !plan.items.length && plan.partial) {
     console.log('[generatePlan] 本轮没有新条目，暂不建库，等下一轮续跑');
@@ -467,7 +522,7 @@ async function runJobRound(openid, job) {
         summary: String(res.summary || '').slice(0, 200),
         startDate: res.startDate || input.startDate || null,
         endDate: res.endDate || input.endDate || null,
-        region: outlineRegion(res.outline),
+        region: outlineRegion(res.outline, input.origin),
         genStatus: 'generating',
         genProgress: { done: 0, total: totalDays },
         genError: '',
@@ -753,7 +808,7 @@ async function createJob(openid, event) {
       summary: String(input.summary || '').slice(0, 200),
       startDate: input.startDate || null,
       endDate: input.endDate || null,
-      region: outlineRegion(outline),
+      region: outlineRegion(outline, input.origin),
       sourceType: 'ai',
       sourceFileID: '',
       items: [],
