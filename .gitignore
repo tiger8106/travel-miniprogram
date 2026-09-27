@@ -31,3 +31,6 @@ scripts/llm-out*.json
 scripts/cloudfn-result.json
 scripts/commute-result.json
 scripts/*.log
+
+# 本地调试截图：仅供编程智能体查看，禁止提交
+截图/
