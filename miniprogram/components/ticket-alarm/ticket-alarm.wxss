@@ -7,6 +7,11 @@
   opacity: 0.5;
 }
 
+.alarm-completed {
+  opacity: 0.72;
+  background: #f7fbf8;
+}
+
 .alarm-header {
   display: flex;
   align-items: center;
@@ -31,6 +36,12 @@
   font-size: 26rpx;
   color: var(--primary);
   font-weight: 500;
+}
+
+.alarm-action-time {
+  margin-top: 6rpx;
+  font-size: 23rpx;
+  color: var(--text-secondary);
 }
 
 .alarm-note {
@@ -66,4 +77,9 @@
 .action-btn.danger {
   background: #ffebee;
   color: var(--danger);
+}
+
+.action-btn.complete {
+  background: #e8f7ed;
+  color: #29964b;
 }

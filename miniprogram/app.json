@@ -34,7 +34,7 @@
         "pagePath": "pages/tickets/tickets",
         "iconPath": "images/tab-ticket.png",
         "selectedIconPath": "images/tab-ticket-active.png",
-        "text": "闹钟"
+        "text": "提醒"
       },
       {
         "pagePath": "pages/suggestions/suggestions",

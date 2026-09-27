@@ -32,7 +32,7 @@ const COL_SCHED = 'schedule_cache';
 const SCHED_TTL_MS = 36 * 3600 * 1000;
 
 // 生成引擎版本（用于确认线上跑的是哪一版）
-const GEN_VERSION = 'v1.7-stateful-lease';
+const GEN_VERSION = 'v1.8-stateful-reminders';
 
 // ---------------------------------------------------------------
 // 后台续跑（用户中途离开小程序也能跑完）
@@ -51,9 +51,29 @@ const JOB_LEASE_MS = 70 * 1000;
 const JOB_MAX_ROUNDS = 12;                  // 正常 2-4 轮，12 轮是异常兜底
 const JOB_MAX_AGE_MS = 25 * 60 * 1000;      // 单个任务最长 25 分钟
 const JOB_STATUS_TTL_MS = 24 * 3600 * 1000; // 只把最近失败任务展示给前端，避免旧任务挡住新任务
+const DEFAULT_ALARM_LEAD_MINUTES = 5;
 
 function runnerIdOf(value) {
   return String(value || 'worker').slice(0, 80);
+}
+
+function alarmTypeOf(type) {
+  return ['train', 'plane', 'ticket', 'hotel', 'bus', 'other'].includes(type) ? type : 'other';
+}
+
+function alarmKeyOf(a) {
+  const date = String(a && (a.fireAtStr || '')).slice(0, 10);
+  const title = String((a && a.title) || '提醒').trim().replace(/[\s\u3000]+/g, '');
+  return `${alarmTypeOf(a && a.type)}|${date}|${title.slice(0, 100)}`;
+}
+
+function alarmLeadOf(a) {
+  const n = Number(a && a.leadMinutes);
+  return isFinite(n) && n > 0 ? Math.max(1, Math.min(60, Math.round(n))) : DEFAULT_ALARM_LEAD_MINUTES;
+}
+
+function alarmCompletedOf(a) {
+  return !!(a && (a.completed === true || a.status === 'completed'));
 }
 
 /**
@@ -268,30 +288,68 @@ async function savePlan(openid, plan, tripId, jobId) {
   // 只在最后一批（非 partial）写闹钟和建议，避免续跑时重复插入
   let alarmCount = 0;
   if (!plan.partial) {
-    // 幂等：先把这个行程已有的 AI 闹钟清掉再写，重复生成不会翻倍
+    // 幂等写回：同一事项尽量复用原记录，保留用户的完成状态、_id 和提醒偏好。
+    // 旧实现先删除全部 AI 闹钟，用户已经办完的事项会在重新生成后重新变成待办。
     const existed = await db.collection(COL_ALARM)
       .where({ _openid: openid, tripId: finalTripId, source: 'ai' }).get();
-    for (let i = 0; i < (existed.data || []).length; i += 20) {
-      await Promise.all(existed.data.slice(i, i + 20).map((a) =>
-        db.collection(COL_ALARM).doc(a._id).remove()));
-    }
-
-    const alarms = (plan.alarms || []).map((a) => ({
-      _openid: openid,
-      tripId: finalTripId,
-      title: a.title,
-      note: a.note || '',
-      fireAt: a.fireAt,
-      fireAtStr: a.fireAtStr,
-      type: a.type || 'other',
-      source: 'ai',
-      createdAt: now,
-      updatedAt: now,
-    }));
+    const oldByKey = new Map();
+    (existed.data || []).forEach((old) => {
+      const key = old.alarmKey || alarmKeyOf(old);
+      if (!oldByKey.has(key)) oldByKey.set(key, old);
+    });
+    const usedOldIds = new Set();
+    const alarms = (plan.alarms || []).map((a) => {
+      const fireAt = Number(a.fireAt) || 0;
+      const leadMinutes = alarmLeadOf(a);
+      const fireAtStr = String(a.fireAtStr || '');
+      const key = alarmKeyOf(Object.assign({}, a, { fireAtStr }));
+      const old = oldByKey.get(key);
+      if (old) usedOldIds.add(old._id);
+      const completed = old ? alarmCompletedOf(old) : false;
+      const oldFireAt = old ? Number(old.fireAt) : 0;
+      return {
+        old,
+        data: {
+          _openid: openid,
+          tripId: finalTripId,
+          title: String(a.title || '提醒').slice(0, 100),
+          note: String(a.note || '').slice(0, 500),
+          fireAt,
+          fireAtStr: fireAtStr.slice(0, 32),
+          leadMinutes: old ? alarmLeadOf(old) : leadMinutes,
+          remindAt: fireAt - (old ? alarmLeadOf(old) : leadMinutes) * 60 * 1000,
+          type: alarmTypeOf(a.type),
+          alarmKey: key,
+          source: 'ai',
+          completed,
+          completedAt: completed ? (Number(old.completedAt) || 0) : 0,
+          status: completed ? 'completed' : 'pending',
+          // 同一事项沿用通知状态；时间发生变化则必须允许新时间再次提醒。
+          notified: old && oldFireAt === fireAt ? old.notified === true : false,
+          notifiedAt: old && oldFireAt === fireAt ? (Number(old.notifiedAt) || 0) : 0,
+          createdAt: old && old.createdAt ? old.createdAt : now,
+          updatedAt: now,
+          archived: false,
+        },
+      };
+    });
     for (let i = 0; i < alarms.length; i += 20) {
-      await Promise.all(alarms.slice(i, i + 20).map((a) => db.collection(COL_ALARM).add({ data: a })));
+      await Promise.all(alarms.slice(i, i + 20).map((entry) => {
+        if (entry.old) return db.collection(COL_ALARM).doc(entry.old._id).update({ data: entry.data });
+        return db.collection(COL_ALARM).add({ data: entry.data });
+      }));
     }
-    alarmCount = alarms.length;
+    // 新大纲已经删掉的未完成事项可以清理；已完成事项保留在分类清单里，标记为历史记录。
+    const obsolete = (existed.data || []).filter((old) => !usedOldIds.has(old._id));
+    for (let i = 0; i < obsolete.length; i += 20) {
+      await Promise.all(obsolete.slice(i, i + 20).map((old) => {
+        if (alarmCompletedOf(old)) {
+          return db.collection(COL_ALARM).doc(old._id).update({ data: { archived: true, updatedAt: now } });
+        }
+        return db.collection(COL_ALARM).doc(old._id).remove();
+      }));
+    }
+    alarmCount = alarms.length + obsolete.filter(alarmCompletedOf).length;
 
     const s = plan.suggestions || {};
     if (s.weather || s.gear || s.food || s.tips || s.transport || s.budget) {

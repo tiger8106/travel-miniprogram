@@ -1,17 +1,17 @@
 <view class="container">
   <!-- 未登录：不展示闹钟 -->
-  <login-gate wx:if="{{needLogin}}" tip="登录后查看和管理闹钟" bind:success="onLoginSuccess" />
+  <login-gate wx:if="{{needLogin}}" tip="登录后查看和管理提醒事项" bind:success="onLoginSuccess" />
 
   <block wx:else>
   <view wx:if="{{loading}}" class="loading">加载中…</view>
 
   <view wx:elif="{{!alarms.length && !editForm}}" class="empty">
     <text class="empty-icon">⏰</text>
-    <view>暂无闹钟</view>
+    <view>暂无提醒事项</view>
     <view class="text-secondary" style="font-size: 24rpx; margin-top: 16rpx;">
-      上传攻略后会自动从文档提取抢票时间
+      制定或上传攻略后，会自动提取车票、酒店、门票和行前准备事项
     </view>
-    <button class="btn-primary" bindtap="onAdd" style="margin-top: 32rpx;">+ 手动添加闹钟</button>
+    <button class="btn-primary" bindtap="onAdd" style="margin-top: 32rpx;">+ 手动添加提醒</button>
     <view wx:if="{{devMode}}" class="add-btn" bindtap="onSelfCheck" style="margin-top: 24rpx;">🩺 订阅消息推送自检</view>
   </view>
 
@@ -40,8 +40,8 @@
           <view class="settings-label">同步到系统日历</view>
           <view class="settings-sub">系统日历提醒，微信不用打开</view>
         </view>
-        <view class="settings-value {{pendingCount ? '' : 'muted'}}">
-          {{pendingCount ? pendingCount + ' 个 ›' : '无待同步'}}
+        <view class="settings-value {{futureCount ? '' : 'muted'}}">
+          {{futureCount ? futureCount + ' 个 ›' : '无待同步'}}
         </view>
       </view>
       <view wx:if="{{devMode}}" class="settings-divider"></view>
@@ -64,7 +64,7 @@
             <text class="now-emoji">🔔</text>
             正在进行 / 即将进行
           </view>
-          <text class="now-more">{{nowAlarms.length}} 项待办</text>
+          <text class="now-more">未完成 {{pendingCount}} 项</text>
         </view>
         <view class="now-list">
           <view wx:for="{{nowAlarms}}" wx:key="_id"
@@ -76,12 +76,14 @@
             </view>
             <view class="now-body">
               <view class="now-line1">
-                <text class="now-time">{{item.friendly}}</text>
+                <text class="now-time">提醒 {{item.remindFriendly}}</text>
                 <text class="now-status {{item.ongoing ? 'live' : ''}}">{{item.statusText}}</text>
                 <text class="now-day">{{item.typeLabel}}</text>
               </view>
               <view class="now-title-text">{{item.title}}</view>
+              <view class="now-action-time">办理时间：{{item.actionFriendly}}</view>
               <view wx:if="{{item.note}}" class="now-note">{{item.note}}</view>
+              <view class="now-complete" data-idx="{{index}}" catchtap="onToggleComplete">✓ 标记已完成</view>
             </view>
           </view>
         </view>
@@ -105,6 +107,7 @@
             <text class="group-count">{{g.pending ? g.pending + ' 项待办' : '共 ' + g.count + ' 项'}}</text>
           </view>
           <view wx:if="{{g.nextTitle}}" class="group-next">下一条：{{g.nextTitle}} · {{g.nextTime}}</view>
+          <view wx:if="{{g.completed}}" class="group-done">已完成 {{g.completed}} 项</view>
         </view>
       </view>
       <text class="group-arrow">›</text>
@@ -120,7 +123,7 @@
 
       <view class="sheet-head">
         <view class="sheet-head-left">
-          <view class="sheet-title">{{sheetMode === 'new' ? '添加闹钟' : '编辑闹钟'}}</view>
+          <view class="sheet-title">{{sheetMode === 'new' ? '添加提醒' : '编辑提醒'}}</view>
           <view class="sheet-sub">{{editForm.fireAtDate}} {{editForm.fireAtTime}}</view>
         </view>
         <view class="sheet-close" bindtap="onCancelEdit">✕</view>
@@ -137,7 +140,8 @@
 
         <!-- 提醒时间 -->
         <view class="field">
-          <view class="field-label">⏰ 提醒时间</view>
+          <view class="field-label">⏰ 办理 / 放票时间</view>
+          <view class="field-help">系统会按上方提前提醒设置通知你</view>
           <view class="time-row-edit">
             <picker mode="date" value="{{editForm.fireAtDate}}" bindchange="onDateChange" class="time-picker">
               <view class="time-pill">
@@ -178,7 +182,7 @@
 
       <view class="sheet-foot">
         <view class="btn-cancel" bindtap="onCancelEdit">取消</view>
-        <view class="btn-save" bindtap="onSheetSave">{{sheetMode === 'new' ? '添加闹钟' : '保存修改'}}</view>
+        <view class="btn-save" bindtap="onSheetSave">{{sheetMode === 'new' ? '添加提醒' : '保存修改'}}</view>
       </view>
     </view>
   </view>
@@ -187,7 +191,7 @@
   <view wx:if="{{delItem}}" class="sheet-mask confirm-mask" bindtap="onCancelDelete" catchtouchmove="noop">
     <view class="confirm-card" catchtap="noop">
       <view class="confirm-icon">🗑</view>
-      <view class="confirm-title">删除这个闹钟？</view>
+      <view class="confirm-title">删除这个提醒？</view>
       <view class="confirm-text">{{delItem.title}}</view>
       <view class="confirm-hint">删除后将不再提醒</view>
       <view class="confirm-actions">

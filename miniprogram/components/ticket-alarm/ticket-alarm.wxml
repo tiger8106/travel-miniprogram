@@ -1,20 +1,23 @@
-<view class="alarm-card card {{item.status === 'past' ? 'alarm-past' : ''}}">
+<view class="alarm-card card {{item.completed ? 'alarm-completed' : (item.status === 'past' ? 'alarm-past' : '')}}">
   <view class="alarm-header">
     <text class="alarm-icon">{{icon}}</text>
     <view class="alarm-info">
       <view class="alarm-title">{{item.title}}</view>
-      <view class="alarm-time">{{item.friendly}}</view>
+      <view class="alarm-time">提醒 {{item.remindFriendly || item.friendly}}</view>
     </view>
-    <text class="tag {{item.status === 'past' ? '' : (item.status === 'soon' ? 'tag-warning' : 'tag-success')}}">
+    <text class="tag {{item.completed ? 'tag-done' : (item.status === 'past' ? '' : (item.status === 'soon' ? 'tag-warning' : 'tag-success'))}}">
       {{statusLabel}}
     </text>
   </view>
+
+  <view class="alarm-action-time">办理：{{item.actionFriendly || item.friendly}}</view>
 
   <view wx:if="{{item.note}}" class="alarm-note">{{item.note}}</view>
 
   <view class="alarm-actions">
     <view class="action-btn primary" bindtap="onTapCalendar">📅 日历</view>
     <view wx:if="{{devMode}}" class="action-btn" bindtap="onTapTest">🔔 测试</view>
+    <view class="action-btn complete" bindtap="onTapComplete">{{item.completed ? '↩ 恢复待办' : '✓ 已完成'}}</view>
     <view class="action-btn" bindtap="onTapEdit">✏️ 编辑</view>
     <view class="action-btn danger" bindtap="onTapDelete">🗑 删除</view>
   </view>

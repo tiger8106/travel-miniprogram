@@ -319,6 +319,7 @@ Page({
       .then((alarms) => {
         const localAlarms = (alarms || []).map((a) => ({
           ...a,
+          leadMinutes: alarm.getAdvanceMin(),
           triggerAt: alarm.calcTriggerAt(a.fireAt, a.fireAtStr),
         }));
         alarm.syncAlarms(localAlarms);

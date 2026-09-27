@@ -244,9 +244,16 @@ const MOCK_TRIP = {
 function alarmAt(minutesFromNow) {
   const t = new Date();
   t.setMinutes(t.getMinutes() + minutesFromNow);
+  const fireAt = t.getTime();
+  const pad = (n) => (n < 10 ? '0' + n : '' + n);
+  const fireAtStr = `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())} ${pad(t.getHours())}:${pad(t.getMinutes())}`;
   return {
-    fireAt: t.toISOString().slice(0, 19).replace('T', ' '),
-    triggerAt: t.getTime(),
+    fireAt,
+    fireAtStr,
+    triggerAt: fireAt - 5 * 60 * 1000,
+    remindAt: fireAt - 5 * 60 * 1000,
+    leadMinutes: 5,
+    completed: false,
   };
 }
 

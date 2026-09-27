@@ -32,9 +32,11 @@ Page({
     label: '分类提醒',
     icon: '⏰',
     loading: true,
+    needLogin: false,
     alarms: [],
-    totalCount: 0,     // 行程全部闹钟数（显示"共 N 类里的 M 条"用不上，先给标题计数）
-    pendingCount: 0,   // 该分类未来待办数
+    totalCount: 0,
+    pendingCount: 0,   // 该分类未完成事项数
+    completedCount: 0,
     editForm: null,    // 编辑抽屉（null=关闭）
     editingId: null,
     delItem: null,
@@ -56,6 +58,10 @@ Page({
       devMode: env.showDevTools(),
     });
     if (query && query.label) wx.setNavigationBarTitle({ title: decodeURIComponent(query.label) });
+    this._offAuth = auth.watch(this, {
+      onLogin: () => this.load(),
+      onLogout: () => this.setData({ loading: false, needLogin: true, alarms: [], pendingCount: 0, completedCount: 0 }),
+    });
   },
 
   onShow() {
@@ -63,6 +69,7 @@ Page({
   },
 
   onUnload() {
+    if (this._offAuth) { this._offAuth(); this._offAuth = null; }
     this.unbindPrivacy();
   },
 
@@ -86,42 +93,60 @@ Page({
   async load() {
     const ok = await auth.requireLogin();
     if (!ok) {
-      this.setData({ loading: false, alarms: [] });
+      this.setData({ loading: false, needLogin: true, alarms: [], pendingCount: 0, completedCount: 0 });
       return;
     }
+    if (this.data.needLogin) this.setData({ needLogin: false });
     this.bindPrivacy();
     const tripId = app.globalData.currentTripId;
     if (!tripId) {
-      this.setData({ loading: false, alarms: [], pendingCount: 0 });
+      this.setData({ loading: false, alarms: [], totalCount: 0, pendingCount: 0, completedCount: 0 });
       return;
     }
     try {
       const list = await api.listAlarms(tripId);
+      const preferredLead = alarm.getAdvanceMin();
+      // 分类页也要把完整行程同步到本地轮询缓存，完成一条事项后不会继续弹旧提醒；
+      // 不能只同步当前分类，否则会把其他分类从本地缓存覆盖掉。
+      alarm.syncAlarms((list || []).map((a) => ({ ...a, leadMinutes: preferredLead })));
+      if ((list || []).some((a) => Number(a.leadMinutes || 5) !== preferredLead)
+          && this._advanceSyncKey !== `${tripId}:${preferredLead}`) {
+        this._advanceSyncKey = `${tripId}:${preferredLead}`;
+        api.setAlarmAdvance(tripId, preferredLead).catch(() => { this._advanceSyncKey = ''; });
+      }
       const now = Date.now();
       const items = (list || [])
         .filter((a) => this._types.indexOf(a.type || 'other') >= 0)
         .map((a) => {
-          const triggerAt = alarm.calcTriggerAt(a.fireAt, a.fireAtStr);
+          const actionAt = alarm.actionAtOf(a);
+          const leadMinutes = preferredLead;
+          const remindAt = actionAt ? actionAt - leadMinutes * 60 * 1000 : null;
+          const completed = a.completed === true || a.status === 'completed';
           return {
             ...a,
-            triggerAt,
-            friendly: triggerAt ? timeUtil.fmtFriendly(triggerAt) : '',
-            status: this.computeStatus(triggerAt),
+            actionAt,
+            remindAt,
+            triggerAt: remindAt,
+            leadMinutes,
+            completed,
+            friendly: actionAt ? timeUtil.fmtFriendly(actionAt) : '',
+            actionFriendly: actionAt ? timeUtil.fmtFriendly(actionAt) : '',
+            remindFriendly: remindAt ? timeUtil.fmtFriendly(remindAt) : '',
+            status: this.computeStatus(remindAt, completed),
           };
         });
-      // 未来的在前（按时间升序），过期的沉底
+      // 未完成事项在前，已完成事项沉底；分类页仍保留全部记录。
       items.sort((a, b) => {
-        const ta = a.triggerAt || 0;
-        const tb = b.triggerAt || 0;
-        const aPast = ta < now;
-        const bPast = tb < now;
-        if (aPast !== bPast) return aPast ? 1 : -1;
+        if (a.completed !== b.completed) return a.completed ? 1 : -1;
+        const ta = a.remindAt || a.actionAt || 0;
+        const tb = b.remindAt || b.actionAt || 0;
         return ta - tb;
       });
       this.setData({
         loading: false,
         alarms: items,
-        pendingCount: items.filter((a) => a.triggerAt && a.triggerAt > now).length,
+        pendingCount: items.filter((a) => !a.completed).length,
+        completedCount: items.filter((a) => a.completed).length,
       });
     } catch (err) {
       wx.showToast({ title: err.message || '加载失败', icon: 'none' });
@@ -129,12 +154,19 @@ Page({
     }
   },
 
-  computeStatus(triggerAt) {
+  computeStatus(triggerAt, completed) {
+    if (completed) return 'completed';
     if (!triggerAt) return 'unknown';
     const now = Date.now();
     if (triggerAt < now) return 'past';
     if (triggerAt - now < 86400000) return 'soon';
     return 'future';
+  },
+
+  onLoginSuccess() {
+    if (!this.data.needLogin) return;
+    this.setData({ needLogin: false });
+    this.load();
   },
 
   // ============================================================
@@ -162,8 +194,8 @@ Page({
       editForm: {
         title: item.title || '',
         note: item.note || '',
-        fireAtDate: this.toDateStr(item.triggerAt || item.fireAt),
-        fireAtTime: this.toTimeStr(item.triggerAt || item.fireAt),
+        fireAtDate: this.toDateStr(item.actionAt || item.fireAt),
+        fireAtTime: this.toTimeStr(item.actionAt || item.fireAt),
         type: item.type || (this._types[0] || 'other'),
       },
     });
@@ -227,6 +259,7 @@ Page({
       title: editForm.title,
       note: editForm.note,
       fireAt,
+      leadMinutes: alarm.getAdvanceMin(),
       fireAtStr: `${editForm.fireAtDate} ${editForm.fireAtTime}`,
       type: editForm.type,
     };
@@ -269,6 +302,22 @@ Page({
   onSheetSave() {
     if (this.data.editingId === 'new') this.onConfirmAdd();
     else this.onSaveEdit();
+  },
+
+  async onToggleComplete(e) {
+    const item = (e.detail && e.detail.item) || e.currentTarget.dataset.item;
+    if (!item || !item._id || this._completeBusy) return;
+    this._completeBusy = true;
+    try {
+      const completed = !item.completed;
+      await api.updateAlarm(item._id, { completed });
+      await this.load();
+      wx.showToast({ title: completed ? '已完成，仍保留在分类清单' : '已恢复待办', icon: 'none' });
+    } catch (err) {
+      wx.showToast({ title: err.message || '状态保存失败', icon: 'none' });
+    } finally {
+      this._completeBusy = false;
+    }
   },
 
   onCancelEdit() {

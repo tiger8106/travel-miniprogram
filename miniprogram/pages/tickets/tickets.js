@@ -21,7 +21,6 @@ const GROUP_DEFS = [
   { key: 'other', label: '其他事项', icon: '⏰', types: ['other'] },
 ];
 const NOW_LIMIT = 4;               // 「正在进行/即将进行」最多展示条数
-const ONGOING_WINDOW = 2 * 3600000; // 提醒刚触发 2 小时内算"正在进行"
 const SOON_WINDOW = 7 * 86400000;   // 7 天内算"即将进行"
 
 function groupRank(type) {
@@ -52,7 +51,9 @@ Page({
     editForm: null,
     delItem: null,        // 待删除的闹钟（删除确认卡）
     typeOptions: TYPE_OPTIONS,
-    pendingCount: 0,      // 未来闹钟数（同步到日历入口显示）
+    pendingCount: 0,      // 所有未完成事项数
+    futureCount: 0,       // 尚未到办理时间的事项数（同步到日历入口显示）
+    completedCount: 0,    // 已完成但仍保留在分类清单中的事项数
     advanceOptions: [1, 2, 3, 5, 10, 15, 30, 60],  // 提前提醒分钟数可选项
     advanceOptionsLabel: ['1 分钟', '2 分钟', '3 分钟', '5 分钟', '10 分钟', '15 分钟', '30 分钟', '60 分钟'],
     advanceIdx: 3,
@@ -69,7 +70,7 @@ Page({
     this._offAuth = auth.watch(this, {
       onLogin: () => this.load(),
       onLogout: () => this.setData({
-        loading: false, alarms: [], pendingCount: 0, editForm: null, delItem: null,
+        loading: false, alarms: [], pendingCount: 0, futureCount: 0, completedCount: 0, editForm: null, delItem: null,
         groups: [], nowAlarms: [], nowExtra: 0,
       }),
     });
@@ -111,14 +112,27 @@ Page({
     this.load();
   },
 
-  // 修改提前提醒分钟数：小程序弹窗提醒 + 写入日历的提前量都跟着变
-  onAdvanceChange(e) {
+  // 修改提前提醒分钟数：本地轮询、系统日历和云端订阅消息统一使用这个值
+  async onAdvanceChange(e) {
     const idx = Number(e.detail.value);
     const minutes = this.data.advanceOptions[idx];
     if (!minutes) return;
+    const tripId = app.globalData.currentTripId;
     alarm.setAdvanceMin(minutes);
     this.setData({ advanceIdx: idx, advanceMin: minutes });
-    wx.showToast({ title: `已设为提前 ${minutes} 分钟提醒`, icon: 'none' });
+    if (!tripId) {
+      wx.showToast({ title: `已设为提前 ${minutes} 分钟提醒`, icon: 'none' });
+      return;
+    }
+    try {
+      await api.setAlarmAdvance(tripId, minutes);
+      this._advanceSyncKey = `${tripId}:${minutes}`;
+      this._sig = '';
+      await this.load();
+      wx.showToast({ title: `已设为提前 ${minutes} 分钟提醒`, icon: 'none' });
+    } catch (err) {
+      wx.showToast({ title: err.message || '提醒设置保存失败', icon: 'none' });
+    }
   },
 
   // 登录成功后由门禁组件回调（正常情况下登录广播已刷新过，这里只兜底）
@@ -134,7 +148,7 @@ Page({
     if (!ok) {
       this.setData({
         loading: false, needLogin: true,
-        alarms: [], pendingCount: 0, editForm: null, delItem: null,
+        alarms: [], pendingCount: 0, futureCount: 0, completedCount: 0, editForm: null, delItem: null,
         groups: [], nowAlarms: [], nowExtra: 0,
       });
       return;
@@ -142,7 +156,10 @@ Page({
     if (this.data.needLogin) this.setData({ needLogin: false });
     const tripId = app.globalData.currentTripId;
     if (!tripId) {
-      this.setData({ loading: false, alarms: [], pendingCount: 0 });
+      this.setData({
+        loading: false, alarms: [], groups: [], nowAlarms: [], nowExtra: 0,
+        pendingCount: 0, futureCount: 0, completedCount: 0,
+      });
       return;
     }
 
@@ -157,7 +174,8 @@ Page({
       const snap = homeCache.readPage(CACHE_KEY);
       if (snap && snap.tripId === tripId) {
         this._sig = JSON.stringify(snap);
-        this.setData({ loading: false, alarms: snap.alarms || [], pendingCount: snap.pendingCount || 0 });
+        this.setData({ loading: false, alarms: snap.alarms || [], pendingCount: snap.pendingCount || 0,
+          futureCount: snap.futureCount || 0, completedCount: snap.completedCount || 0 });
       } else {
         this.setData({ loading: true });
       }
@@ -165,34 +183,52 @@ Page({
 
     try {
       const list = await api.listAlarms(tripId);
+      const preferredLead = alarm.getAdvanceMin();
+      const needAdvanceSync = (list || []).some((a) =>
+        Number(a.leadMinutes || 5) !== preferredLead);
+      if (needAdvanceSync && this._advanceSyncKey !== `${tripId}:${preferredLead}`) {
+        this._advanceSyncKey = `${tripId}:${preferredLead}`;
+        api.setAlarmAdvance(tripId, preferredLead).catch(() => {
+          this._advanceSyncKey = '';
+        });
+      }
       const items = (list || []).map((a) => {
-        const triggerAt = alarm.calcTriggerAt(a.fireAt, a.fireAtStr);
+        const actionAt = alarm.actionAtOf(a);
+        const leadMinutes = preferredLead;
+        const remindAt = actionAt ? actionAt - leadMinutes * 60 * 1000 : null;
+        const completed = a.completed === true || a.status === 'completed';
         return {
           ...a,
-          triggerAt,
-          friendly: triggerAt ? timeUtil.fmtFriendly(triggerAt) : '',
-          status: this.computeStatus(triggerAt),
+          actionAt,
+          remindAt,
+          triggerAt: remindAt, // 兼容旧组件，新的展示逻辑使用 actionAt/remindAt
+          leadMinutes,
+          completed,
+          friendly: actionAt ? timeUtil.fmtFriendly(actionAt) : '',
+          actionFriendly: actionAt ? timeUtil.fmtFriendly(actionAt) : '',
+          remindFriendly: remindAt ? timeUtil.fmtFriendly(remindAt) : '',
+          status: this.computeStatus(remindAt, completed),
         };
       });
       const now = Date.now();
-      // 排序：未来的按时间升序在前，过期的沉到列表底部（内部仍按时间升序）
+      // 未完成事项在前，已完成事项沉底；各自按提醒时间排序。
       items.sort((a, b) => {
-        const ta = a.triggerAt || 0;
-        const tb = b.triggerAt || 0;
-        const aPast = ta < now;
-        const bPast = tb < now;
-        if (aPast !== bPast) return aPast ? 1 : -1; // 过期的排后面
+        if (a.completed !== b.completed) return a.completed ? 1 : -1;
+        const ta = a.remindAt || a.actionAt || 0;
+        const tb = b.remindAt || b.actionAt || 0;
         return ta - tb;
       });
-      const pendingCount = items.filter((a) => a.triggerAt && a.triggerAt > now).length;
+      const pendingCount = items.filter((a) => !a.completed).length;
+      const futureCount = items.filter((a) => !a.completed && a.actionAt && a.actionAt > now).length;
+      const completedCount = items.filter((a) => a.completed).length;
       const views = this.buildViews(items);
 
       // ② 内容没变就不 setData，避免无谓重绘（视图派生数据一起比，避免状态过期）
-      const snap = { tripId, alarms: items, pendingCount };
+      const snap = { tripId, alarms: items, pendingCount, futureCount, completedCount };
       const sig = JSON.stringify(snap);
       if (sig !== this._sig) {
         this._sig = sig;
-        this.setData(Object.assign({ alarms: items, pendingCount }, views));
+        this.setData(Object.assign({ alarms: items, pendingCount, futureCount, completedCount }, views));
         homeCache.writePage(CACHE_KEY, snap);
       } else {
         // 数据没变，但"正在进行/即将进行"是按当前时间算的，仍要刷新一次
@@ -200,15 +236,8 @@ Page({
       }
       this.setData({ loading: false });
 
-      // ③ 时区校准放后台（fireAt/fireAtStr，syncAlarms 会回写云端），不阻塞渲染
-      alarm.syncAlarms(items.map((a) => ({
-        _id: a._id,
-        title: a.title,
-        note: a.note,
-        fireAt: a.fireAt,
-        fireAtStr: a.fireAtStr,
-        triggerAt: a.triggerAt,
-      })));
+      // ③ 时区与提醒时间校准放后台，不阻塞渲染
+      alarm.syncAlarms(items);
     } catch (err) {
       wx.showToast({ title: err.message || '加载失败', icon: 'none' });
       this.setData({ loading: false });
@@ -220,35 +249,39 @@ Page({
   buildViews(items) {
     const now = Date.now();
 
-    // 分类只出摘要卡：数量 + 下一条最近的提醒，全量列表在 alarm-group 分类页
+    // 分类只出摘要卡：待办数/已完成数 + 下一条最近提醒，全量列表在分类页
     const groups = GROUP_DEFS.map((def) => {
       const list = items.filter((a) => def.types.indexOf(a.type || 'other') >= 0);
       const upcoming = list
-        .filter((a) => a.triggerAt && a.triggerAt > now)
-        .sort((a, b) => a.triggerAt - b.triggerAt)[0];
+        .filter((a) => !a.completed && (a.remindAt || a.actionAt))
+        .sort((a, b) => (a.remindAt || a.actionAt) - (b.remindAt || b.actionAt))[0];
       return {
         key: def.key,
         label: def.label,
         icon: def.icon,
         count: list.length,
-        pending: list.filter((a) => a.triggerAt && a.triggerAt > now).length,
+        pending: list.filter((a) => !a.completed).length,
+        completed: list.filter((a) => a.completed).length,
         nextTitle: upcoming ? upcoming.title : '',
-        nextTime: upcoming ? upcoming.friendly : '',
+        nextTime: upcoming ? `提醒 ${upcoming.remindFriendly}` : '',
       };
     }).filter((g) => g.count);
 
-    // 正在进行：提醒已经触发但还在 2 小时窗口内（比如"正在开抢"）
-    // 即将进行：7 天内要动手的
+    // 正在进行：提醒时间已到但事项还没完成（即使跨天也保留，避免漏办）
+    // 即将进行：未来 7 天内需要办理的事项
     const cand = items.filter((a) =>
-      a.triggerAt && a.triggerAt > now - ONGOING_WINDOW && a.triggerAt <= now + SOON_WINDOW);
-    // 先按板块优先级（车票 > 门票 > 酒店 > 其他），同级按时间先后
-    cand.sort((a, b) => (groupRank(a.type) - groupRank(b.type)) || (a.triggerAt - b.triggerAt));
+      !a.completed && (a.remindAt || a.actionAt) && (a.remindAt || a.actionAt) <= now + SOON_WINDOW);
+    // 先按提醒时间，再按板块优先级；逾期事项会优先显示。
+    cand.sort((a, b) => ((a.remindAt || a.actionAt) - (b.remindAt || b.actionAt))
+      || (groupRank(a.type) - groupRank(b.type)));
 
     const nowAlarms = cand.slice(0, NOW_LIMIT).map((a) => {
-      const ongoing = a.triggerAt <= now;
-      const gap = a.triggerAt - now;
+      const remindAt = a.remindAt || a.actionAt;
+      const ongoing = remindAt <= now;
+      const gap = remindAt - now;
       let statusText = '待办';
-      if (ongoing) statusText = '进行中';
+      if (a.actionAt <= now) statusText = '已逾期';
+      else if (ongoing) statusText = '现在准备';
       else if (gap < 3600000) statusText = `${Math.max(1, Math.round(gap / 60000))} 分钟后`;
       else if (gap < 86400000) statusText = `${Math.round(gap / 3600000)} 小时后`;
       else statusText = `${Math.round(gap / 86400000)} 天后`;
@@ -274,6 +307,26 @@ Page({
     if (item) this.onTapEdit({ detail: { item } });
   },
 
+  async onToggleComplete(e) {
+    const detailItem = e.detail && e.detail.item;
+    const ds = e.currentTarget.dataset || {};
+    const item = detailItem || ds.item
+      || (ds.idx != null ? this.data.nowAlarms[Number(ds.idx)] : null);
+    if (!item || !item._id || this._completeBusy) return;
+    this._completeBusy = true;
+    const completed = !item.completed;
+    try {
+      await api.updateAlarm(item._id, { completed });
+      this._sig = '';
+      await this.load();
+      wx.showToast({ title: completed ? '已完成，已移出待办' : '已恢复待办', icon: 'none' });
+    } catch (err) {
+      wx.showToast({ title: err.message || '状态保存失败', icon: 'none' });
+    } finally {
+      this._completeBusy = false;
+    }
+  },
+
   // 点分类折叠卡 → 跳到分类详情页看该类全部闹钟
   onTapGroup(e) {
     const key = e.currentTarget.dataset.key;
@@ -284,11 +337,12 @@ Page({
     });
   },
 
-  computeStatus(triggerAt) {
-    if (!triggerAt) return 'unknown';
+  computeStatus(remindAt, completed) {
+    if (completed) return 'completed';
+    if (!remindAt) return 'unknown';
     const now = Date.now();
-    if (triggerAt < now) return 'past';
-    if (triggerAt - now < 86400000) return 'soon';
+    if (remindAt < now) return 'past';
+    if (remindAt - now < 86400000) return 'soon';
     return 'future';
   },
 
@@ -305,8 +359,8 @@ Page({
       editForm: {
         title: item.title || '',
         note: item.note || '',
-        fireAtDate: this.toDateStr(item.triggerAt || item.fireAt),
-        fireAtTime: this.toTimeStr(item.triggerAt || item.fireAt),
+        fireAtDate: this.toDateStr(item.actionAt || item.fireAt),
+        fireAtTime: this.toTimeStr(item.actionAt || item.fireAt),
         type: item.type || 'train',
       },
     });
@@ -376,7 +430,7 @@ Page({
   validateForm() {
     const { editForm } = this.data;
     if (!editForm.title) {
-      wx.showToast({ title: '请输入闹钟标题', icon: 'none' });
+      wx.showToast({ title: '请输入提醒标题', icon: 'none' });
       return null;
     }
     if (!editForm.fireAtDate || !editForm.fireAtTime) {
@@ -392,6 +446,7 @@ Page({
       title: editForm.title,
       note: editForm.note,
       fireAt,
+      leadMinutes: this.data.advanceMin,
       // 保存用户选择的本地墙面时刻，时区重算时以此为准
       fireAtStr: `${editForm.fireAtDate} ${editForm.fireAtTime}`,
       type: editForm.type,
@@ -533,7 +588,8 @@ Page({
       const res = await api.sendTestAlarm({
         title: item.title || '行程提醒',
         note: item.note || '点击查看详情',
-        fireAt: item.triggerAt || Date.now(),
+        fireAt: item.actionAt || item.fireAt || Date.now(),
+        leadMinutes: item.leadMinutes || this.data.advanceMin,
       });
       step('云函数耗时', (Date.now() - t0) + 'ms');
       const d = (res && res.data) || res || {};
@@ -600,15 +656,15 @@ Page({
 
   // 一键同步所有未来闹钟 → 系统日历
   async onSyncAllToCalendar() {
-    const { alarms, pendingCount } = this.data;
-    if (!pendingCount) {
-      wx.showToast({ title: '没有未来的闹钟', icon: 'none' });
+    const { alarms, futureCount } = this.data;
+    if (!futureCount) {
+      wx.showToast({ title: '没有未来的事项', icon: 'none' });
       return;
     }
     const res = await new Promise((resolve) => {
       wx.showModal({
         title: '同步到系统日历',
-        content: `将把 ${pendingCount} 个未来闹钟写入手机系统日历，到点锁屏也会响铃震动（微信关了也有效）。`,
+        content: `将把 ${futureCount} 个未来事项写入手机系统日历，到点锁屏也会响铃震动（微信关了也有效）。`,
         confirmText: '开始同步',
         success: resolve,
       });
