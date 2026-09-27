@@ -170,6 +170,7 @@ Component({
         endLat: item.endLat,
         endLon: item.endLon,
         region: this.data.region || '',
+        fallbackRegion: this.data.fallbackRegion || this.data.region || '',
       });
     },
 

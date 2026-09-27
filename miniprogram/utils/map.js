@@ -29,7 +29,9 @@ function currentTripRegion() {
 
 /** 从"广西 桂林 阳朔"里取第一个城市词（复制给地图 App 搜索时用） */
 function firstCity(region) {
-  const tokens = String(region || '').split(/[\s,，、]+/).map((s) => s.trim()).filter(Boolean);
+  // 保留“都江堰/理县”这种片区组合，复制给地图搜索比只留第一个词更稳。
+  const tokens = String(region || '').split(/[\s,，、]+/)
+    .map((s) => s.trim()).filter(Boolean);
   return tokens[0] || '';
 }
 
@@ -43,6 +45,7 @@ function firstCity(region) {
  *   条目上，光靠"桂林"一个词是查不到的。
  */
 async function openAmapNav(opts) {
+  const regionHint = String((opts && (opts.region || opts.fallbackRegion)) || currentTripRegion() || '').trim();
   let lat = Number(opts.endLat);
   let lon = Number(opts.endLon);
   let reason = '';
@@ -86,7 +89,7 @@ async function openAmapNav(opts) {
   }
 
   // 降级：把「城市 + 地名」复制给用户，粘到高德里搜才不会搜到外省的同名点
-  const city = firstCity(opts.region);
+  const city = firstCity(regionHint);
   const keyword = city ? `${city} ${opts.to || ''}` : String(opts.to || '');
   wx.showModal({
     title: '暂时无法打开地图',
@@ -108,7 +111,8 @@ async function openAmapNav(opts) {
  * 兜底：复制目的地（带上城市，避免搜到同名地点）
  */
 function fallbackCopyRoute(opts) {
-  const city = firstCity(opts.region);
+  const regionHint = String((opts && (opts.region || opts.fallbackRegion)) || currentTripRegion() || '').trim();
+  const city = firstCity(regionHint);
   const keyword = city ? `${city} ${opts.to || ''}` : String(opts.to || '');
   wx.setClipboardData({
     data: keyword,

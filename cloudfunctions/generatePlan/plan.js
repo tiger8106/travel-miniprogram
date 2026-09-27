@@ -134,6 +134,153 @@ function normalizeInput(input) {
   };
 }
 
+// ============================================================
+// 0.1 地点范围校验（确定性，防止模型把上一份攻略的酒店地址带进来）
+// ============================================================
+
+const LODGING_WORD_RE = /酒店|民宿|客栈|宾馆|青旅|住宿|度假村|招待所/;
+const ADMIN_SUFFIX_RE = /(省|自治区|自治州|地区|盟|市|自治县|县|区|旗|镇|乡)$/;
+
+/** 从地址里提取带行政后缀的词根，例如「石家庄市」「桥西区」。 */
+function adminRootsOf(value) {
+  const s = String(value || '').replace(/[（(][^）)]*[）)]/g, '');
+  const re = /([\u4e00-\u9fa5]{2,8}?)(省|自治区|自治州|地区|盟|市|自治县|县|区|旗|镇|乡)/g;
+  const out = [];
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    const root = String(m[1] || '').trim();
+    const suffix = String(m[2] || '');
+    if (root.length >= 2 && !out.some((x) => x.root === root && x.suffix === suffix)) {
+      out.push({ root, suffix });
+    }
+  }
+  return out;
+}
+
+/** 把城市/住宿地拆成可比较的词根，既支持「成都市」也支持「古尔沟」。 */
+function scopeWordsOf(value) {
+  const out = [];
+  const add = (word) => {
+    const w = String(word || '').replace(/[\s,，、;；/|]+/g, '').trim();
+    if (w.length >= 2 && !out.includes(w)) out.push(w);
+    const bare = w.replace(ADMIN_SUFFIX_RE, '');
+    if (bare.length >= 2 && !out.includes(bare)) out.push(bare);
+  };
+  String(value || '').split(/[\s,，、;；/|]+/).forEach(add);
+  adminRootsOf(value).forEach((x) => add(x.root));
+  return out;
+}
+
+/**
+ * 判断地点是否至少和当天范围相容。
+ * 没有明确省/市/县后缀的短 POI 无法仅靠字符串证明归属，保留给高德校验；
+ * 一旦地点带了完整行政区，却与当天城市完全冲突，就不能继续把它当住宿地。
+ */
+function locationFitsScope(location, scope) {
+  const place = String(location || '').replace(/[\s,，、·]/g, '');
+  const words = scopeWordsOf(scope);
+  if (!place || !words.length) return true;
+  if (words.some((w) => place.includes(w) || w.includes(place))) return true;
+  const roots = adminRootsOf(location);
+  if (!roots.length) return true;
+  return roots.some((x) => words.some((w) => w.includes(x.root) || x.root.includes(w)));
+}
+
+/** 两个地点是否属于同一片区，允许「城市」和「城市某酒店」这种粒度差异。 */
+function sameTravelArea(a, b) {
+  if (samePlace(a, b)) return true;
+  const ax = scopeWordsOf(a);
+  const bx = scopeWordsOf(b);
+  if (ax.some((x) => bx.some((y) => x === y || (x.length >= 2 && y.includes(x)) || (y.length >= 2 && x.includes(y))))) {
+    return true;
+  }
+  if (LODGING_WORD_RE.test(String(a || '')) || LODGING_WORD_RE.test(String(b || ''))) {
+    const prefix = (v) => (String(v || '').match(/^[\u4e00-\u9fa5]{2,4}/) || [''])[0].slice(0, 2);
+    const pa = prefix(a);
+    const pb = prefix(b);
+    if (pa && pb && pa === pb) return true;
+  }
+  return false;
+}
+
+function dayScope(day) {
+  const d = day || {};
+  return [d.city, d.overnight].filter((x) => String(x || '').trim()).join(' ');
+}
+
+/** 大纲里的酒店是模型推荐，不允许带入与当天路线冲突的完整外地地址。 */
+function safeHotelOf(day) {
+  const hotel = String((day && day.hotel) || '').trim();
+  return hotel && locationFitsScope(hotel, dayScope(day)) ? hotel : '';
+}
+
+function normalizeOutlineLodging(outline) {
+  asArray(outline && outline.days).forEach((day, di) => {
+    const hotel = String((day && day.hotel) || '').trim();
+    if (!hotel || locationFitsScope(hotel, dayScope(day))) return;
+    console.warn('[generatePlan] 第%d天推荐住宿与当天范围冲突，忽略错误酒店地址：%s', di + 1, hotel.slice(0, 80));
+    day.hotel = '';
+  });
+  return outline;
+}
+
+/** 细化结果再次校正住宿条目，防止错误酒店被闭环兜底和下一天继承。 */
+function normalizeGeneratedLodging(items, outline, p) {
+  const days = asArray(outline && outline.days);
+  const out = asArray(items).slice();
+  out.forEach((it) => {
+    if (!it) return;
+    const di = Number(it.dayIndex || 0);
+    const day = days[di] || {};
+    const scope = dayScope(day);
+    const hotel = safeHotelOf(day);
+    const target = hotel || String(day.overnight || day.city || '').trim();
+    const prevDay = di > 0 ? (days[di - 1] || {}) : null;
+    const startScope = prevDay ? dayScope(prevDay) : String((p && p.origin) || '').trim() || scope;
+    const startTarget = prevDay
+      ? (safeHotelOf(prevDay) || String(prevDay.overnight || prevDay.city || '').trim())
+      : String((p && p.origin) || '').trim();
+    const start = String(it.startLocation || '').trim();
+    const end = String(it.endLocation || '').trim();
+    const activity = String(it.activity || '');
+    const lodgingItem = String(it.category || '') === 'hotel'
+      || LODGING_WORD_RE.test(start)
+      || LODGING_WORD_RE.test(end)
+      || (LODGING_WORD_RE.test(activity) && adminRootsOf(activity).length > 0);
+    if (!lodgingItem) return;
+    const badStart = !!start && LODGING_WORD_RE.test(start)
+      && adminRootsOf(start).length > 0
+      && !locationFitsScope(start, startScope);
+    const badEnd = !end || !locationFitsScope(end, scope);
+    const lodgingEndItem = String(it.category || '') === 'hotel' || LODGING_WORD_RE.test(end);
+    const badNamedEnd = String(it.category || '') === 'hotel' && !!hotel && !!end
+      && (!LODGING_WORD_RE.test(end) || !samePlace(end, hotel));
+    const badActivity = LODGING_WORD_RE.test(activity)
+      && adminRootsOf(activity).length > 0
+      && !locationFitsScope(activity, scope)
+      && !badStart && lodgingEndItem;
+    if (badStart && startTarget) {
+      it.startLocation = startTarget;
+      it.startLon = '';
+      it.startLat = '';
+      if (activity.includes(start)) it.activity = activity.split(start).join(startTarget);
+      console.warn('[generatePlan] 第%d天住宿起点已校正：%s → %s', di + 1, start.slice(0, 80), startTarget);
+    }
+    if (badEnd || badNamedEnd || badActivity) {
+      const old = end;
+      if (target) it.endLocation = target;
+      it.endLon = '';
+      it.endLat = '';
+      if (target && (old || badActivity)
+        && /入住|办理入住|放行李|回到|回酒店|回民宿|住宿|步行至/.test(activity)) {
+        it.activity = `前往${target || '当晚住宿地'}办理入住，放下行李休息`;
+      }
+      console.warn('[generatePlan] 第%d天住宿条目终点已校正：%s → %s', di + 1, old || '(空)', target || '(空)');
+    }
+  });
+  return out;
+}
+
 /** 给用户画像一句话摘要（喂给 LLM） */
 function profileText(p) {
   const bits = [
@@ -248,7 +395,9 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
   ], { deadline: outlineDeadline });
 
   // 去程开始 / 返程到达时刻由代码兜底对齐（LLM 自己常常不照办）
-  const outline = applyTripEdgeTimes(p, normalizeOutlineJson(parseJSONFromText(text), p));
+  const outline = normalizeOutlineLodging(
+    applyTripEdgeTimes(p, normalizeOutlineJson(parseJSONFromText(text), p))
+  );
   if (!outline.days.length) throw new Error('大纲没有生成任何一天');
 
   // 点名地点兜底：LLM 偶尔会"自作主张"丢掉它认为不顺路的点
@@ -279,7 +428,7 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
         if (!stillMissing.length && stillDups.length < Math.max(1, dups.length) && okDetour) {
           console.log('[generatePlan] 修订成功（剩余：漏点 %d，重复 %d，绕路段 %d）',
             stillMissing.length, stillDups.length, stillDetours.length);
-          return warnDetourTransfers(repaired);
+          return warnDetourTransfers(normalizeOutlineLodging(repaired));
         }
         console.warn('[generatePlan] 修订后仍有问题（漏 %d，重复 %d，绕路段 %d），保留原大纲',
           stillMissing.length, stillDups.length, stillDetours.length);
@@ -288,7 +437,7 @@ ${p.holiday ? '【重要】含法定节假日：首末两天通常是往返大�
       console.warn('[generatePlan] 剩余时间不足，跳过修订，保留原大纲');
     }
   }
-  return warnDetourTransfers(outline);
+  return warnDetourTransfers(normalizeOutlineLodging(outline));
 }
 
 // ---- 时刻工具（分钟制，用于把大交通对齐到用户指定的去/返程时刻）----
@@ -329,15 +478,63 @@ function enforceDayStartLocation(items, outline) {
     if (!byDay.has(di)) byDay.set(di, []);
     byDay.get(di).push(it);
   });
-  byDay.forEach((list, di) => {
-    if (di <= 0) return;                       // 第一天本来就是从出发地启程
-    const prevOv = String((days[di - 1] && (days[di - 1].overnight || days[di - 1].city)) || '').trim();
-    if (!prevOv) return;
-    const first = list.slice().sort((a, b) =>
-      String(a.startTime || '').localeCompare(String(b.startTime || '')))[0];
-    if (first && !String(first.startLocation || '').trim()) first.startLocation = prevOv;
+  const ordered = (list) => list.slice().sort((a, b) => {
+    const av = toMin(a.startTime);
+    const bv = toMin(b.startTime);
+    return (av == null ? 24 * 60 : av) - (bv == null ? 24 * 60 : bv);
   });
-  return items;
+  const lastKnownOf = (list, day) => {
+    const scope = dayScope(day);
+    for (const it of ordered(list).reverse()) {
+      const end = String(it.endLocation || '').trim();
+      if (end && locationFitsScope(end, scope)) return end;
+      const start = String(it.startLocation || '').trim();
+      if (start && locationFitsScope(start, scope)) return start;
+    }
+    return safeHotelOf(day) || String((day && (day.overnight || day.city)) || '').trim();
+  };
+
+  const out = items.slice();
+  days.forEach((day, di) => {
+    if (di <= 0) return;                       // 第一天本来就是从出发地启程
+    const list = byDay.get(di) || [];
+    if (!list.length) return;
+    const prevDay = days[di - 1] || {};
+    const prevList = byDay.get(di - 1) || [];
+    const prevLocation = lastKnownOf(prevList, prevDay);
+    if (!prevLocation) return;
+    const first = ordered(list)[0];
+    const firstStart = String(first.startLocation || '').trim();
+    if (!firstStart) {
+      first.startLocation = prevLocation;
+      return;
+    }
+    if (sameTravelArea(firstStart, prevLocation)) return;
+
+    // 起点不一致时补一条真实的跨日接驳，保留模型原本的第一站，
+    // 比直接覆盖第一站更安全：有些行程确实需要先从住宿地去车站/景区。
+    const firstMin = toMin(first.startTime);
+    if (firstMin == null) {
+      first.startLocation = prevLocation;
+      return;
+    }
+    const end = firstMin;
+    const start = Math.max(0, end - 30);
+    out.push({
+      dayIndex: di,
+      startTime: fmtMin(start),
+      endTime: fmtMin(end),
+      activity: `从${prevLocation}前往${firstStart}，开始当天行程`,
+      category: 'transport',
+      startLocation: prevLocation,
+      endLocation: firstStart,
+      transportType: 'car',
+      note: '跨日位置接驳（根据前一天收尾位置补齐）',
+    });
+    console.warn('[generatePlan] 第%d天首条起点与前一晚位置不一致，补一条 %s→%s 接驳',
+      di + 1, prevLocation.slice(0, 20), firstStart.slice(0, 20));
+  });
+  return out;
 }
 
 /**
@@ -632,7 +829,8 @@ function enforceDayClosure(items, outline, p) {
       const origin = String((p && p.origin) || '').trim();
       if (!origin) return;
       const sorted = list.slice().sort((a, b) =>
-        String(a.startTime || '').localeCompare(String(b.startTime || '')));
+        (toMin(a.startTime) == null ? 24 * 60 : toMin(a.startTime))
+        - (toMin(b.startTime) == null ? 24 * 60 : toMin(b.startTime)));
       const last = sorted[sorted.length - 1];
       if (!last) return;
       // "返程/家中/回家"也算到家：模型常把最后一条的 endLocation 写成「返程」，
@@ -683,20 +881,43 @@ function enforceDayClosure(items, outline, p) {
       return;
     }
     const sorted = list.slice().sort((a, b) =>
-      String(a.startTime || '').localeCompare(String(b.startTime || '')));
+      (toMin(a.startTime) == null ? 24 * 60 : toMin(a.startTime))
+      - (toMin(b.startTime) == null ? 24 * 60 : toMin(b.startTime)));
     const last = sorted[sorted.length - 1];
     // 已经收在住宿地：hotel 条目，或终点/描述明确是酒店民宿类。
     // 注意别用 samePlace(终点, ov) 判——"眉山站"包含"眉山"会被误判成已到家，
     // 人明明还拎着行李站在火车站。描述类只认"回/到/入住 + 住宿词"的动宾搭配，
     // "去酒店附近的夜市"这种不算。
-    const lodgingWord = /酒店|民宿|客栈|宾馆|青旅|住宿/;
+    const lodgingWord = LODGING_WORD_RE;
     const atLodging = lodgingWord.test(String(last.endLocation || ''))
       || /(回|回到|抵达|入住|办理入住)[^。，；]{0,8}(酒店|民宿|客栈|宾馆|青旅|住宿)/
         .test(String(last.activity || ''));
-    if (last.category === 'hotel' || atLodging) {
-      if (last.category === 'hotel' && !String(last.endLocation || '').trim()) {
-        last.endLocation = String(today.hotel || '').trim() || tonight;
+    const scope = dayScope(today);
+    // 原始字段仍然来自 String(today.hotel || '')，但必须经过范围校验，
+    // 才能阻断“石家庄酒店”这类模型串入的外地地址。
+    const hotel = safeHotelOf(today); // String(today.hotel || '')
+    const destName = hotel || tonight;
+    if (last.category === 'hotel') {
+      // 推荐酒店经过范围校验后才可用于闭环；即使模型写了一个同城简称，
+      // 也统一回写成同一条大纲酒店，避免第二天从另一个“酒店”起步。
+      const endText = String(last.endLocation || '').trim();
+      const hotelMismatch = hotel && endText
+        && (!lodgingWord.test(endText) || !samePlace(endText, hotel));
+      if (destName && (!String(last.endLocation || '').trim()
+        || !locationFitsScope(last.endLocation, scope)
+        || hotelMismatch
+        || (hotel && !sameTravelArea(last.endLocation, hotel)))) {
+        const oldEnd = String(last.endLocation || '').trim();
+        last.endLocation = destName;
+        last.endLon = '';
+        last.endLat = '';
+        if (oldEnd && /入住|办理入住|放行李|回到|回酒店|回民宿|住宿/.test(String(last.activity || ''))) {
+          last.activity = `前往${destName}办理入住，放下行李休息`;
+        }
       }
+      return;
+    }
+    if (atLodging && locationFitsScope(last.endLocation, scope)) {
       return;
     }
     const from = String(last.endLocation || last.startLocation || '').trim();
@@ -705,9 +926,6 @@ function enforceDayClosure(items, outline, p) {
     // 不用 samePlace 判断要不要导航：'眉山站'包含'眉山'会被判成同地，
     // 人明明还拎着行李在火车站，却连"从哪去酒店"的导航都不给了
     const moved = !!from && from !== tonight;
-    // 大纲给了具体推荐酒店就用它（可导航到真酒店），没给就退回住宿片区
-    const hotel = String(today.hotel || '').trim();
-    const destName = hotel || tonight;
     out.push({
       dayIndex: di,
       startTime: fmtMin(Math.min(st, 23 * 60 + 30)),
@@ -717,7 +935,7 @@ function enforceDayClosure(items, outline, p) {
         : `回${destName}休息`,
       category: 'hotel',
       startLocation: moved ? from : '',
-      endLocation: moved ? destName : '',
+      endLocation: destName,
       transportType: moved ? 'car' : '',
       note: hotel ? `今晚住${tonight}` : '',
     });
@@ -2749,7 +2967,7 @@ function fixDayTimeOverlaps(items) {
 
 async function buildPlan(rawInput, outlineData, opts = {}) {
   const p = normalizeInput(rawInput);
-  const outline = (outlineData && outlineData.outline) || outlineData || {};
+  const outline = normalizeOutlineLodging((outlineData && outlineData.outline) || outlineData || {});
   if (!asArray(outline.days).length) throw new Error('缺少行程大纲，无法展开详情');
 
   const t1 = Date.now();
@@ -2822,20 +3040,27 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
   items = dedupeOfficialRailItems(items, outline); // 一段官方铁路移动只保留一趟车
   items = stripUnverifiedSchedules(items, outline); // 12306 无结果 → 不留模型臆造车次
   items = dedupeTransports(items);
-  items = enforceDayStartLocation(items, outline);
   items = enforceOriginAccess(items, p, outline, roundDays);
   items = enforceMorningRoutine(items, outline);
   items = enforceNoMiddayHotel(items, outline);   // 白天不许回酒店睡觉
   items = enforceEveningPlan(items, outline);
   items = fixMealLabels(items, outline);          // 餐次词按实际时刻纠偏（"早上吃晚饭"）
+  items = normalizeGeneratedLodging(items, outline, p); // 错误酒店不能进入闭环或跨日继承
   items = enforceDayClosure(items, outline, p);
+  items = enforceDayStartLocation(items, outline); // 闭环补齐后再校验跨日首条起点
   items = enforceLuggageRules(items, outline);
   items = fixDayTimeOverlaps(items);
 
   // 地理编码消歧要用的每天城市 + 地址→天下标映射。
   // savePlan 的 cityOf 靠它们给高德传 city 参数——之前只消费不生产，
   // cityOf 永远拿不到每天的城市，同名地点照样可能定位到别的省去。
-  const dayCities = asArray(outline.days).map((d) => String(d.city || d.overnight || '').trim());
+  // 同一天可能“白天在都江堰、晚上住古尔沟/理县”，两个范围都要留给
+  // 地理编码和跨天闭环，不能只取 city 把 overnight 丢掉。
+  const dayCities = asArray(outline.days).map((d) => [d.city, d.overnight]
+    .map((x) => String(x || '').trim())
+    .filter((x) => x && !/^(返程|回家|家中)$/.test(x))
+    .filter((x, i, arr) => arr.indexOf(x) === i)
+    .join(' '));
   const addrDay = new Map();
   items.forEach((it) => {
     const di = Number(it.dayIndex || 0);
@@ -2851,6 +3076,7 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
       summary: String((outlineData && outlineData.summary) || outline.summary || '').slice(0, 200),
       startDate: p.startDate,
       endDate: p.endDate,
+      origin: p.origin,
       items,
       dayCities,
       addrDay,
@@ -2896,6 +3122,7 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
     summary: String((outlineData && outlineData.summary) || outline.summary || '').slice(0, 200),
     startDate: p.startDate,
     endDate: p.endDate,
+    origin: p.origin,
     items,
     dayCities,
     addrDay,
@@ -2935,6 +3162,7 @@ module.exports = {
   parseDestList, missingMustVisit, placeStem, duplicateHighlights,
   applyTripEdgeTimes, snapScheduleMinutes, isTransportItem,
   enforceDayStartLocation, enforceDayClosure, enforceLuggageRules, enforceMovesAlignment,
+  normalizeOutlineLodging, normalizeGeneratedLodging, locationFitsScope, sameTravelArea,
   enforceOriginAccess, enforceMorningRoutine, enforceEveningPlan,
   fixMealLabels, enforceNoMiddayHotel, skeletonDayItems, skeletonForEmptyDays,
   transferMinutes, isCarTransfer, detourTransfers, warnDetourTransfers,
