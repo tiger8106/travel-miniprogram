@@ -101,9 +101,11 @@ Page({
     const trip = this._trip || this.data.trip;
     if (!trip) return;
     const nowItems = this.buildNowItems(trip);
+    const hotelBookingHint = (trip.items || []).some((it) => it && it.category === 'hotel');
     // 内容没变就别 setData，避免无谓的渲染
-    if (JSON.stringify(nowItems) === JSON.stringify(this.data.nowItems)) return;
-    this.setData({ nowItems, nowTitle: this.nowTitleOf(nowItems) });
+    if (JSON.stringify(nowItems) === JSON.stringify(this.data.nowItems)
+        && hotelBookingHint === this.data.hotelBookingHint) return;
+    this.setData({ nowItems, nowTitle: this.nowTitleOf(nowItems), hotelBookingHint });
   },
 
   nowTitleOf(list) {
@@ -287,6 +289,7 @@ Page({
       todayIdx: this.findTodayIdx(days),
       nowItems,
       nowTitle: this.nowTitleOf(nowItems),
+      hotelBookingHint: (trip.items || []).some((it) => it && it.category === 'hotel'),
       homeTrips: homeList.map((t) => ({
         _id: t._id,
         title: t.title,
@@ -454,7 +457,7 @@ Page({
     const list = [];
 
     (trip.items || []).forEach((it, i) => {
-      if (!it) return;
+      if (!it || it.category === 'hotel') return;
       const di = Number(it.dayIndex || 0);
       const dayDate = new Date(startTs);
       dayDate.setDate(dayDate.getDate() + di);
@@ -507,7 +510,7 @@ Page({
       routeText,
       navTarget: e || s,
       navFrom: s || '',
-      transportType: it.transportType || 'car',
+      transportType: it.transportType || 'ride',
       endLat: it.endLat || 0,
       endLon: it.endLon || 0,
       region: region || '',   // 大地名：导航缺坐标实时定位时给高德消歧

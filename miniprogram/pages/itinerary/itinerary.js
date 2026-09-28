@@ -160,9 +160,7 @@ Page({
           dayStartTs = d.getTime();
           label = `${this.formatYMD(d)} ${weekdays[d.getDay()]} · 第 ${di + 1} 天`;
         }
-        const list = map[di].slice().sort((a, b) =>
-          String(a.startTime || '99:99').localeCompare(String(b.startTime || '99:99'))
-        );
+        const list = this.sortDayItems(map[di]);
         const dayPast = dayStartTs !== null && dayStartTs + 86400000 <= now;
         const eid = this.data.editingId || '';
         const items = list.map((it) => {
@@ -279,14 +277,9 @@ Page({
       return;
     }
 
-    // 严格按开始时间从早到晚排；没填时间的排最后
-    const sorted = (trip.items || [])
-      .filter((it) => (it.dayIndex || 0) === this.data.dayIdx)
-      .sort((a, b) => {
-        const ta = a.startTime || '99:99';
-        const tb = b.startTime || '99:99';
-        return ta.localeCompare(tb);
-      });
+    // 缺时间的条目按相邻安排估算顺序，不再统一沉到一天末尾。
+    const sorted = this.sortDayItems((trip.items || [])
+      .filter((it) => Number(it.dayIndex || 0) === this.data.dayIdx));
     this.rawItems = sorted;
 
     const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
@@ -318,6 +311,42 @@ Page({
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   },
 
+  sortDayItems(items) {
+    const durationOf = (it) => {
+      const defaults = { food: 60, sight: 90, transport: 45, hotel: 30, ticket: 30, other: 30 };
+      const text = `${it && it.note || ''} ${it && it.activity || ''}`;
+      const hm = text.match(/(\d+(?:\.\d+)?)\s*小时(?:\s*(\d{1,2})\s*分)?/);
+      if (hm) return Math.max(15, Math.min(180, Math.round(Number(hm[1]) * 60 + Number(hm[2] || 0))));
+      const mm = text.match(/(\d{1,3})\s*分钟/);
+      return mm ? Math.max(15, Math.min(180, Number(mm[1]))) : defaults[it && it.category] || 30;
+    };
+    const rows = (items || []).map((item, index) => ({ item, index, minute: this.itemTs(item && item.startTime) }));
+    rows.forEach((row, index) => {
+      if (row.minute !== null) return;
+      const duration = durationOf(row.item);
+      let prev = null;
+      for (let i = index - 1; i >= 0; i--) {
+        const end = this.itemTs(rows[i].item && rows[i].item.endTime);
+        const start = rows[i].minute;
+        if (end !== null || start !== null) { prev = end !== null ? end : start; break; }
+      }
+      let next = null;
+      for (let i = index + 1; i < rows.length; i++) {
+        if (rows[i].minute !== null) { next = rows[i].minute; break; }
+      }
+      if (prev !== null) row.minute = next !== null && prev >= next ? Math.max(0, next - duration) : prev;
+      else if (next !== null) row.minute = Math.max(0, next - duration);
+      else row.minute = 8 * 60 + Math.max(0, index) * 30;
+      row.minute = Math.min(23 * 60 + 59, row.minute);
+      row.estimated = true;
+    });
+    rows.sort((a, b) => a.minute - b.minute || a.index - b.index);
+    return rows.map((row) => Object.assign({}, row.item, row.estimated ? {
+      displayStartTime: `${String(Math.floor(row.minute / 60)).padStart(2, '0')}:${String(row.minute % 60).padStart(2, '0')}`,
+      timeEstimated: true,
+    } : {}));
+  },
+
   // 行程项稳定 key：云端解析出来的 items 既没有 _id 也没有 id，
   // 导致「编辑/删除」定位不到具体条目（id 为 undefined 直接 return）。
   // 这里按「原 _id → 原 id → 天序号+数组下标」生成前端稳定 key，并写回 items，
@@ -326,11 +355,11 @@ Page({
     const used = {};
     return (items || []).map((it, i) => {
       if (!it || typeof it !== 'object') return it;
-      let k = it.key || it._id || it.id || `k${Number(it.dayIndex || 0)}_${i}`;
+      let k = it.key || it.itemId || it._id || it.id || `k${Number(it.dayIndex || 0)}_${i}`;
       while (used[k]) k += '_x';
       used[k] = 1;
-      if (it.key === k) return it;
-      return Object.assign({}, it, { key: k });
+      if (it.key === k && it.itemId) return it;
+      return Object.assign({}, it, { key: k, itemId: it.itemId || k });
     });
   },
 
@@ -355,7 +384,7 @@ Page({
     mapUtil.openAmapNav({
       from: item.startLocation || '',
       to,
-      mode: item.transportType || 'car',
+      mode: item.transportType || 'ride',
       title: item.startLocation && item.endLocation
         ? `${item.startLocation} → ${item.endLocation}`
         : `导航到 ${to}`,
@@ -391,8 +420,9 @@ Page({
         waypoints: (Array.isArray(item.waypoints) ? item.waypoints : [])
           .map((w) => (typeof w === 'string' ? w : (w && w.name) || ''))
           .filter((n) => String(n || '').trim()),
-        transportType: item.transportType || 'car',
+        transportType: item.transportType || 'ride',
         category: item.category || 'sight',
+        bookingInfo: item.bookingInfo || '',
         note: item.note || '',
       },
     });
@@ -472,6 +502,7 @@ Page({
         waypoints,
         transportType: editForm.transportType,
         category: editForm.category,
+        bookingInfo: editForm.bookingInfo,
         note: editForm.note,
       };
       if (needStart) {
@@ -680,7 +711,7 @@ Page({
       activity: '',
       startLocation: '',
       endLocation: '',
-      transportType: 'car',
+      transportType: 'ride',
       category: 'sight',
       note: '',
       isNew: true,

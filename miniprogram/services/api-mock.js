@@ -91,7 +91,7 @@ async function updateItinerary(tripId, patch) {
       activity: patch.item.activity || '',
       startLocation: patch.item.startLocation || '',
       endLocation: patch.item.endLocation || '',
-      transportType: patch.item.transportType || 'car',
+      transportType: patch.item.transportType || 'ride',
       category: patch.item.category || 'sight',
       note: patch.item.note || '',
     };

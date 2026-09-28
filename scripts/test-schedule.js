@@ -101,6 +101,20 @@ function ok(name, cond, extra) {
 console.log('== 4. 真实班次（联网检索） ==');
 {
   const S = require('../cloudfunctions/generatePlan/schedule.js');
+  const rail = require('../cloudfunctions/generatePlan/rail12306.js');
+
+  const stationFixture = [
+    { name: '南宁东', code: 'NNZ', city: '南宁' },
+    { name: '崇左南', code: 'CZN', city: '崇左' },
+  ];
+  const forwardRepair = rail.routePairs({ from: '南宁东站', to: '大新南站', dayCity: '崇左' }, stationFixture);
+  ok('非铁路目的地补站时保持南宁→崇左方向',
+    forwardRepair.some((pair) => pair.from.name === '南宁东' && pair.to.name === '崇左南'),
+    JSON.stringify(forwardRepair));
+  const reverseRepair = rail.routePairs({ from: '大新南站', to: '南宁东站', dayCity: '崇左' }, stationFixture);
+  ok('反向非铁路起点补站时保持崇左→南宁方向',
+    reverseRepair.some((pair) => pair.from.name === '崇左南' && pair.to.name === '南宁东'),
+    JSON.stringify(reverseRepair));
 
   // 4.1 脏数据清洗：时刻不合法 / 车次号不成型的一律丢掉
   const cleaned = S.normalizeList([
@@ -174,6 +188,19 @@ console.log('== 4. 真实班次（联网检索） ==');
   ok('标记了来源，前端才能写"已核对"',
     outline.days[0].moves[0].schedSource === 'search', outline.days[0].moves[0].schedSource);
 
+  const returnDeadlineOutline = { days: [{ date: '2026-12-22', city: '成都', moves: [
+    { from: '成都东站', to: '重庆西站', mode: 'train', code: 'G0001', startTime: '14:00', endTime: '16:00' },
+  ], sched: [] }] };
+  const returnOptions = new Map([['成都东站→重庆西站', [
+    { code: 'G0001', from: '成都东站', to: '重庆西站', s: '14:00', e: '16:00' },
+    { code: 'G0002', from: '成都东站', to: '重庆西站', s: '12:30', e: '15:10' },
+  ]]]);
+  P.applyRealSchedules(returnDeadlineOutline, returnOptions, { endTime: '16:00' });
+  ok('末日按到家截止时间挑选能留出 40 分钟接驳的官方返程班次',
+    returnDeadlineOutline.days[0].moves[0].code === 'G0002'
+      && returnDeadlineOutline.days[0].moves[0].endTime === '15:10',
+    JSON.stringify(returnDeadlineOutline.days[0].moves[0]));
+
   // 4.4 检索结果串到别的城市时：整条候选丢弃，不能把错车次写进攻略
   const o2 = { days: [{ moves: [{ from: '甲城站', to: '乙城站', mode: 'train', code: 'G1', startTime: '08:00', endTime: '12:00' }], sched: [] }] };
   P.applyRealSchedules(o2, new Map([['甲城站→乙城站', [
@@ -236,6 +263,20 @@ console.log('== 4. 真实班次（联网检索） ==');
       && unavailable.days[0].moves[0].schedSource === 'official-unavailable',
     JSON.stringify(unavailable.days[0].moves[0]));
 
+  const unresolved = {
+    days: [{ date: '2027-01-01', moves: [{ from: '非铁路地点甲', to: '非铁路地点乙', mode: 'train', code: 'G0000',
+      startTime: '08:00', endTime: '10:00' }] }],
+  };
+  const unresolvedKey = S.cacheKeyOf({ from: '非铁路地点甲', to: '非铁路地点乙', date: '2027-01-01' });
+  const unresolvedLookup = new Map([[unresolvedKey, []]]);
+  unresolvedLookup.routeMeta = new Map([[unresolvedKey, { attempted: true, official: true, unresolvedStations: true }]]);
+  P.applyRealSchedules(unresolved, unresolvedLookup);
+  ok('铁路站点无法解析时降级为待核实的大巴/专线，不保留虚构列车',
+    unresolved.days[0].moves[0].mode === 'bus'
+      && !unresolved.days[0].moves[0].code
+      && unresolved.days[0].moves[0].timingEstimated === true,
+    JSON.stringify(unresolved.days[0].moves[0]));
+
   // 4.5 细化兜底：模型自创了候选里没有的车次 → 拽回真实班次
   const o3 = { days: [{ sched: [
     { code: 'G2249', from: 'A站', to: 'B站', s: '08:30', e: '13:20' },
@@ -267,6 +308,19 @@ console.log('== 4. 真实班次（联网检索） ==');
     if (envBackup[k] === undefined) delete process.env[k];
     else process.env[k] = envBackup[k];
   });
+}
+
+{
+  const candidate = { code: 'G100', from: '甲站', to: '乙站', s: '09:00', e: '11:00' };
+  const outline = { days: [{ moves: [{ from: '甲站', to: '乙站', mode: 'train',
+    code: 'G100', startTime: '09:00', endTime: '11:00', schedSource: '12306', sched: [candidate] }] }] };
+  const feeder = { dayIndex: 0, category: 'transport', transportType: 'bus',
+    startLocation: '乙站', endLocation: '丙景区', startTime: '12:00', endTime: '14:00',
+    activity: '下高铁后乘旅游大巴前往丙景区' };
+  const unrelated = { ...feeder, transportType: 'train', startLocation: '丁站', endLocation: '戊站', activity: '乘列车' };
+  const fixed = P.enforceOfficialRailItems(P.enforceRealSchedule([feeder, unrelated], outline), outline);
+  ok('一段官方铁路不能污染下车后的公路接驳', fixed[0].endLocation === '丙景区' && fixed[0].startTime === '12:00');
+  ok('起终点不匹配的其他铁路段不能套用当天唯一候选', fixed[1].startLocation === '丁站' && fixed[1].endTime === '14:00');
 }
 
 console.log(`\n通过 ${pass} 项，失败 ${fail} 项\n`);

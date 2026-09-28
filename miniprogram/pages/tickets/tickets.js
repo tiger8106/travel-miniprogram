@@ -262,15 +262,15 @@ Page({
         count: list.length,
         pending: list.filter((a) => !a.completed).length,
         completed: list.filter((a) => a.completed).length,
-        nextTitle: upcoming ? upcoming.title : '',
-        nextTime: upcoming ? `提醒 ${upcoming.remindFriendly}` : '',
+        nextTitle: def.key === 'hotel' && upcoming ? '请在此分类逐项确认住宿预订' : (upcoming ? upcoming.title : ''),
+        nextTime: def.key === 'hotel' || !upcoming ? '' : `提醒 ${upcoming.remindFriendly}`,
       };
     }).filter((g) => g.count);
 
     // 正在进行：提醒时间已到但事项还没完成（即使跨天也保留，避免漏办）
     // 即将进行：未来 7 天内需要办理的事项
-    const cand = items.filter((a) =>
-      !a.completed && (a.remindAt || a.actionAt) && (a.remindAt || a.actionAt) <= now + SOON_WINDOW);
+    const cand = items.filter((a) => a.type !== 'hotel'
+      && !a.completed && (a.remindAt || a.actionAt) && (a.remindAt || a.actionAt) <= now + SOON_WINDOW);
     // 先按提醒时间，再按板块优先级；逾期事项会优先显示。
     cand.sort((a, b) => ((a.remindAt || a.actionAt) - (b.remindAt || b.actionAt))
       || (groupRank(a.type) - groupRank(b.type)));
@@ -297,6 +297,7 @@ Page({
       groups,
       nowAlarms,
       nowExtra: Math.max(0, cand.length - nowAlarms.length),
+      hotelHint: items.some((a) => a.type === 'hotel' && !a.completed),
     };
   },
 
@@ -362,6 +363,7 @@ Page({
         fireAtDate: this.toDateStr(item.actionAt || item.fireAt),
         fireAtTime: this.toTimeStr(item.actionAt || item.fireAt),
         type: item.type || 'train',
+        bookingInfo: item.bookingInfo || '',
       },
     });
   },
@@ -376,7 +378,8 @@ Page({
         note: '',
         fireAtDate: this.toDateStr(base),
         fireAtTime: this.toTimeStr(base),
-        type: 'train',
+      type: 'train',
+      bookingInfo: '',
       },
     });
   },
@@ -450,6 +453,7 @@ Page({
       // 保存用户选择的本地墙面时刻，时区重算时以此为准
       fireAtStr: `${editForm.fireAtDate} ${editForm.fireAtTime}`,
       type: editForm.type,
+      bookingInfo: String(editForm.bookingInfo || '').slice(0, 160),
     };
   },
 
