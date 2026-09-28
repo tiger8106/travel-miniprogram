@@ -19,7 +19,8 @@ cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 const crypto = require('crypto');
 
 const { generateOutline, buildPlan, dayDiff, collectSegments, applyRealSchedules } = require('./plan');
-const { geocodeBatch, cityTokens } = require('./geocode');
+const { geocodeBatch, cityTokens, searchHotelPoi, searchHotelsNearby } = require('./geocode');
+const { validateOutlineHotels } = require('./hotel-validation');
 const { lookupSchedules, canLookupSchedules, canSearch } = require('./schedule');
 
 const COL_TRIP = 'trips';
@@ -32,7 +33,12 @@ const COL_SCHED = 'schedule_cache';
 const SCHED_TTL_MS = 36 * 3600 * 1000;
 
 // 生成引擎版本（用于确认线上跑的是哪一版）
-const GEN_VERSION = 'v1.9-closure-navigation';
+const GEN_VERSION = 'v2.7-longji-route-audit';
+
+async function generateOutlineWithHotelCheck(input, opts) {
+  const result = await generateOutline(input, opts || {});
+  return validateOutlineHotels(result, input, searchHotelPoi, searchHotelsNearby);
+}
 
 // ---------------------------------------------------------------
 // 后台续跑（用户中途离开小程序也能跑完）
@@ -374,6 +380,9 @@ async function savePlan(openid, plan, tripId, jobId) {
           leadMinutes: old ? alarmLeadOf(old) : leadMinutes,
           remindAt: fireAt - (old ? alarmLeadOf(old) : leadMinutes) * 60 * 1000,
           type: alarmTypeOf(a.type),
+          dayIndex: Number.isInteger(Number(a.dayIndex)) ? Number(a.dayIndex) : undefined,
+          bookingInfo: String(a.bookingInfo || '').slice(0, 160),
+          linkedItemId: String(a.linkedItemId || '').slice(0, 100),
           alarmKey: key,
           source: 'ai',
           completed,
@@ -501,7 +510,7 @@ async function runJobRound(openid, job) {
   //   后台拿到大纲后单独用一整轮（~26s 预算）安心查，查完写回大纲再细化。
   if (!(input.outline && input.outline.days && input.outline.days.length)) {
     try {
-      const res = await generateOutline(payload, {});
+      const res = await generateOutlineWithHotelCheck(payload, {});
       const totalDays = (res.outline && res.outline.days || []).length;
       const now = Date.now();
       await db.collection(COL_JOB).doc(job._id).update({
@@ -596,7 +605,11 @@ async function runJobRound(openid, job) {
         if (left > 6000) {
           const t0 = Date.now();
           const found = await lookupSchedules(segs, left, scheduleCacheAdapter());
-          const stat = applyRealSchedules(input.outline, found);
+          const stat = applyRealSchedules(input.outline, found, input);
+          // 班次校正可能把中途提前返程的日期挪回最后一天，并同步改写
+          // overnight；这一步会清空旧酒店，因此必须在路线最终稳定后再核验一次。
+          await validateOutlineHotels({ outline: input.outline }, input,
+            searchHotelPoi, searchHotelsNearby);
           console.log('[generatePlan] 班次专轮：命中 %d 段 / 换 %d 段，用时 %dms',
             stat ? stat.segments : 0, stat ? stat.replaced : 0, Date.now() - t0);
         }
@@ -1015,7 +1028,7 @@ exports.main = async (event, context) => {
       // 前台大纲**不做联网检索**：大纲 LLM 本身 35-50s，再塞检索必撞 60s 上限
       // → 超时转后台 → 大纲从头重做，一次行程平白多两三分钟。
       // 联网核对班次改由后台任务专轮完成（见 runJobRound），大纲阶段只管快。
-      const res = await generateOutline(event, {});
+      const res = await generateOutlineWithHotelCheck(event, {});
       return {
         code: 0,
         data: {

@@ -12,6 +12,8 @@
 
   <view class="alarm-action-time">办理：{{item.actionFriendly || item.friendly}}</view>
 
+  <view wx:if="{{item.bookingInfo}}" class="alarm-note">关联信息：{{item.bookingInfo}}</view>
+
   <view wx:if="{{item.note}}" class="alarm-note">{{item.note}}</view>
 
   <view class="alarm-actions">

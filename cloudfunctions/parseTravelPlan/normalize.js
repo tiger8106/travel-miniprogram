@@ -86,6 +86,8 @@ const META_PAT = [
   /上游规定|既定交通|规划时间线|时间线以符合|此处特别/,
   // 冒烟实测第三轮：整条 activity 只有一句"错误修正：此处应为乘车时间。根据既定路线"
   /错误修正|错误更正|此处应为|应为乘车|根据既定|既定路线/,
+  // 模型把路线解释和实际交通混在一条里时，按交通条目抢救，不把推理展示给用户。
+  /修正执行逻辑|执行逻辑|修正后的安排/,
 ];
 
 // 整条条目都是"内心独白"的硬特征：命中即认为 activity 根本不是行程描述，
@@ -102,6 +104,7 @@ const META_HARD = [
   /倒叙|逆序|插叙|桥接|bridge/i,
   /上游规定|既定交通|规划时间线|时间线以符合|此处特别/,
   /错误修正|错误更正|此处应为|应为乘车|根据既定|既定路线/,
+  /修正执行逻辑|执行逻辑|修正后的安排/,
 ];
 
 /**
@@ -207,6 +210,7 @@ function sanitizeItems(rawItems) {
         if (start && end && !samePlace(start, end)) {
           return {
             dayIndex: di,
+            itemId: String(it.itemId || '').slice(0, 100),
             startTime: normTime(it.startTime),
             endTime: normTime(it.endTime),
             activity: `从${start}前往${end}`.slice(0, 200),
@@ -214,6 +218,7 @@ function sanitizeItems(rawItems) {
             startLocation: start,
             endLocation: end,
             transportType: it.transportType || '',
+            bookingInfo: String(it.bookingInfo || '').slice(0, 160),
             note: '',
           };
         }
@@ -222,6 +227,7 @@ function sanitizeItems(rawItems) {
 
       return {
         dayIndex: di,
+        itemId: String(it.itemId || '').slice(0, 100),
         startTime: normTime(it.startTime),
         endTime: normTime(it.endTime),
         activity: stripMeta(rawAct).slice(0, 200),
@@ -231,6 +237,7 @@ function sanitizeItems(rawItems) {
         startLocation: start.slice(0, 60),
         endLocation: end.slice(0, 60),
         transportType: it.transportType || '',
+        bookingInfo: String(it.bookingInfo || '').slice(0, 160),
         note: stripMeta(it.note).slice(0, 300),
       };
     })

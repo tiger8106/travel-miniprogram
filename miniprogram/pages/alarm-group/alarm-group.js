@@ -179,6 +179,7 @@ Page({
       editForm: {
         title: '',
         note: '',
+        bookingInfo: '',
         fireAtDate: this.toDateStr(base),
         fireAtTime: this.toTimeStr(base),
         type: this._types[0] || 'other',
@@ -194,6 +195,7 @@ Page({
       editForm: {
         title: item.title || '',
         note: item.note || '',
+        bookingInfo: item.bookingInfo || '',
         fireAtDate: this.toDateStr(item.actionAt || item.fireAt),
         fireAtTime: this.toTimeStr(item.actionAt || item.fireAt),
         type: item.type || (this._types[0] || 'other'),
@@ -262,6 +264,7 @@ Page({
       leadMinutes: alarm.getAdvanceMin(),
       fireAtStr: `${editForm.fireAtDate} ${editForm.fireAtTime}`,
       type: editForm.type,
+      bookingInfo: String(editForm.bookingInfo || '').slice(0, 160),
     };
   },
 

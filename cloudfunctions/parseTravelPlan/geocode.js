@@ -57,7 +57,7 @@ const SUFFIX_RE = /((国家|地质|森林|湿地|海洋|城市|矿山|水利)?(�
 const sleep = (ms) => new Promise((s) => setTimeout(s, ms));
 let lastAt = 0;
 
-function httpGet(url) {
+function httpGet(url, timeoutMs) {
   return new Promise(async (resolve, reject) => {
     try {
       // 简易限速：请求之间至少隔 MIN_GAP 毫秒。高德被 QPS 限时返回 status=0，
@@ -78,7 +78,7 @@ function httpGet(url) {
           }
         });
       });
-      req.setTimeout(REQUEST_TIMEOUT, () => req.destroy(new Error('amap 请求超时')));
+      req.setTimeout(Number(timeoutMs) || REQUEST_TIMEOUT, () => req.destroy(new Error('amap 请求超时')));
       req.on('error', reject);
     } catch (e) {
       reject(e);
@@ -87,11 +87,11 @@ function httpGet(url) {
 }
 
 /** 带重试的请求：status!=='1' 且带 infocode（说明是真高德而非桩）→ 450ms 后重试一次 */
-async function amapGet(url) {
-  let resp = await httpGet(url);
+async function amapGet(url, timeoutMs) {
+  let resp = await httpGet(url, timeoutMs);
   if (resp && resp.status !== '1' && resp.infocode) {
     await sleep(450);
-    resp = await httpGet(url);
+    resp = await httpGet(url, timeoutMs);
   }
   return resp;
 }
@@ -132,6 +132,10 @@ function cityTokens(region) {
  * 挑不到就返回空（让高德自己猜，总比塞个错参数强）。
  */
 function pickCity(region) {
+  // 地址式住宿区可能把城市词嵌在开头（如「成都市春熙路」），先抽取明确的市/县/区，
+  // 避免把「成都市春熙路住宿地」整串当作城市参数传给高德。
+  const addressCities = addrTokens(region).map((x) => x.t).filter((t) => !PROVINCE_NAMES.has(t));
+  if (addressCities.length) return addressCities[0];
   const tokens = cityTokens(region);
   const nonProv = tokens.filter((t) => !PROVINCE_NAMES.has(t));
   return nonProv[0] || tokens[0] || '';
@@ -385,14 +389,14 @@ function geoClassOk(keyword, hay) {
 // ---------------------------------------------------------------- 高德 API
 
 /** POI 关键词搜索（v3/place/text）。citylimit=true 时城市是硬限制，不会串到外省。 */
-async function searchPoi(keywords, city, citylimit, size) {
+async function searchPoi(keywords, city, citylimit, size, timeoutMs) {
   if (!AMAP_KEY || !keywords) return [];
   let url = `${POI_URL}?keywords=${encodeURIComponent(keywords)}&key=${AMAP_KEY}` +
     `&offset=${size || 10}&page=1&output=json&extensions=base`;
   if (city) url += `&city=${encodeURIComponent(city)}`;
   if (city && citylimit) url += '&citylimit=true';
   try {
-    const resp = await amapGet(url);
+    const resp = await amapGet(url, timeoutMs);
     if (resp.status !== '1' || !Array.isArray(resp.pois)) return [];
     return resp.pois.map((p) => {
       const loc = parseLoc(p.location);
@@ -401,6 +405,10 @@ async function searchPoi(keywords, city, citylimit, size) {
         lon: loc.lon,
         lat: loc.lat,
         name: String(p.name || ''),
+        province: String(p.pname || ''),
+        city: String(p.cityname || ''),
+        district: String(p.adname || ''),
+        address: String(p.address || ''),
         hay: [p.pname, p.cityname, p.adname, p.address, p.name].join('|'),
       };
     }).filter(Boolean);
@@ -621,6 +629,152 @@ async function geocodeOne(address, city, deadlineAt) {
   return null;
 }
 
+/** Reject parking POIs and region-only labels that cannot identify a reservable property. */
+function isBookableHotelPoi(row, regions) {
+  const name = String(row && row.name || '').trim();
+  if (!name || /停车场|停车库|停车位|停车楼|泊车|地下车库|停车出入口|停车区域/.test(name)) return false;
+  if (/(?:大堂|前台|餐厅|会议室|宴会厅|健身房|游泳池|出入口|卫生间|充电站)[)）]?$/u.test(name)) return false;
+  if (!/酒店|宾馆|客栈|民宿|饭店|公寓|度假村|旅店|旅馆|招待所/.test(name)) return false;
+  const compact = (value) => String(value || '').replace(/[\s\u3000,，、/()（）·-]/g, '');
+  const locationTerms = [...new Set((regions || []).flatMap((value) =>
+    String(value || '').match(/[\u4e00-\u9fa5A-Za-z0-9]{2,}/g) || []))]
+    .map((term) => term.replace(/(?:省|市|区|县|镇|乡|自治州|地区|住宿片区|酒店片区|经济型|舒适型|品质型)$/g, ''))
+    .filter((term) => term.length >= 2 && !/^(住宿|酒店|宾馆|客栈|民宿|周边|附近|景区|市区|县城)$/.test(term))
+    .sort((a, b) => b.length - a.length);
+  let distinctive = compact(name);
+  locationTerms.forEach((term) => { distinctive = distinctive.split(compact(term)).join(''); });
+  distinctive = distinctive
+    .replace(/(?:经济型|舒适型|品质型|连锁|商务|精品|国际|快捷|高级|豪华|家庭|特色|主题)+/g, '')
+    .replace(/(?:酒店|宾馆|客栈|民宿|饭店|公寓|度假村|旅店|旅馆|招待所)+$/g, '');
+  return distinctive.length >= 2;
+}
+
+/** 只用一次城市限定的 POI 搜索核验住宿名称；命中失败时调用方应展示片区与档次。 */
+async function searchHotelPoi(address, city, timeoutMs) {
+  if (!AMAP_KEY || !address) return null;
+  const query = String(address).trim();
+  const cityName = pickCity(city);
+  const rows = await searchPoi(query, cityName, !!cityName, 10, timeoutMs || 2500);
+  const matches = rows.filter((row) => cityHit(city, row.hay) && nameOk(row.name, query)
+    && isBookableHotelPoi(row, [query, city, row.city, row.district]));
+  if (!matches.length) return null;
+  matches.sort((a, b) => nameScore(b.name, query) - nameScore(a.name, query));
+  return {
+    matchedName: matches[0].name,
+    city: matches[0].city || '',
+    province: matches[0].province || '',
+    district: matches[0].district || '',
+    address: matches[0].address || '',
+  };
+}
+
+/** 搜索具体住宿片区内的真实酒店 POI，给无法核验的模型店名提供可搜索替代项。 */
+async function searchHotelsNearby(region, budget, timeoutMs) {
+  if (!AMAP_KEY) return null;
+  const raw = String(region || '').trim();
+  if (!raw) return null;
+  const regionParts = raw.split(/[\/、，,\s]+/).map((part) => part.trim()).filter(Boolean);
+  const cleanRegionPart = (part) => String(part || '')
+    .replace(/(?:经济型|舒适型|品质型)?(?:住宿片区|酒店片区|住宿|片区|周边|附近|县城|市区|景区|区域)/g, '')
+    .trim();
+  const cityCandidates = [...new Set(regionParts.map((part) => {
+    const cleaned = cleanRegionPart(part);
+    const explicit = addrTokens(cleaned).map((token) => token.t).find((token) => !PROVINCE_NAMES.has(token));
+    if (explicit) return explicit;
+    const picked = String(pickCity(cleaned) || '');
+    // A destination can be written as a compound area without administrative suffixes
+    // (for example, a city followed by a scenic area). Use its leading city root for
+    // the city-scoped query while retaining the remaining words as the area hint.
+    return picked.length >= 5 && !/(?:省|市|自治州|地区|县|区|镇|乡)$/.test(picked)
+      ? [...picked].slice(0, 2).join('') : picked;
+  }).filter(Boolean))];
+  const parens = [...raw.matchAll(/[（(]([^）)]*)[）)]/g)].map((m) => m[1]);
+  let areaSource = String(parens.join(' ') || cleanRegionPart(regionParts[regionParts.length - 1] || raw));
+  if (!parens.length) {
+    const roots = cityCandidates.slice().sort((a, b) => b.length - a.length);
+    const root = roots.find((candidate) => areaSource.startsWith(candidate));
+    if (root) areaSource = areaSource.slice(root.length).replace(/^(?:省|市|自治州|地区|县|区|镇|乡)/, '');
+  }
+  const areaHint = areaSource
+    .replace(/(住宿片区|酒店片区|经济型|舒适型|品质型|片区|周边|附近|县城|市区|景区|住宿|区域)/g, ' ')
+    .replace(/[（）()\/、，,]/g, ' ').replace(/\s+/g, ' ').trim();
+  const economical = /经济/.test(String(budget || ''));
+  const areas = areaHint.split(' ').filter((x) => x.length >= 2).slice(0, 1);
+  const queries = [];
+  areas.forEach((area) => {
+    if (economical) queries.push(`${area}经济型酒店`);
+    queries.push(`${area}酒店`, `${area}客栈`);
+  });
+  cityCandidates.forEach((city) => {
+    if (economical) queries.push(`${city}经济型酒店`);
+    queries.push(`${city}酒店`);
+  });
+  const uniqueQueries = [...new Set(queries)];
+  const lodgingName = /酒店|宾馆|客栈|民宿|饭店|公寓|度假村/;
+  const hotelAreaScore = (row) => {
+    const hay = String(row && row.hay || row && row.name || '').replace(/[\s\u3000（）()]/g, '');
+    return areas.reduce((score, area) => {
+      const term = String(area || '').replace(/[\s\u3000（）()]/g, '');
+      if (!term) return score;
+      if (hay.includes(term)) return score + term.length * 10;
+      // Compound place names often differ slightly between the itinerary and the
+      // POI address (for example, a village name may be paired with its scenic-area
+      // label). Require at least one shared two-character place token in that case.
+      let shared = 0;
+      for (let i = 0; i < term.length - 1; i++) {
+        if (hay.includes(term.slice(i, i + 2))) shared++;
+      }
+      return score + shared * 5;
+    }, 0);
+  };
+  for (const city of cityCandidates) {
+    for (const query of uniqueQueries) {
+      const rows = await searchPoi(query, city, true, 10, timeoutMs || 2500);
+      const matches = rows.filter((row) => lodgingName.test(row.name)
+        && cityHit(city, row.hay)
+        && (!areas.length || hotelAreaScore(row) > 0)
+        && isBookableHotelPoi(row, [raw, ...cityCandidates, ...areas, city, row.city, row.district]));
+      if (!matches.length) continue;
+      matches.sort((a, b) => {
+        return hotelAreaScore(b) - hotelAreaScore(a) || nameScore(b.name, query) - nameScore(a.name, query);
+      });
+      return {
+        matchedName: matches[0].name,
+        city: matches[0].city || '',
+        province: matches[0].province || '',
+        district: matches[0].district || '',
+        address: matches[0].address || '',
+        areaSearch: true,
+        areaMatched: !areas.length || hotelAreaScore(matches[0]) > 0,
+        searchCity: city,
+      };
+    }
+  }
+  // 山区民宿有时没有高德城市级编码（如村寨、景区片区）。这时只接受 POI 自身
+  // 明确含有输入片区词的结果，宁可不显示名称，也不把相邻城市或同名店带进来。
+  if (areas.length) {
+    for (const area of areas) {
+      for (const suffix of ['客栈', '民宿', '酒店']) {
+        const query = `${area}${suffix}`;
+        const rows = await searchPoi(query, '', false, 10, timeoutMs || 2500);
+        const matches = rows.filter((row) => lodgingName.test(row.name)
+          && hotelAreaScore(row) > 0
+          && isBookableHotelPoi(row, [raw, ...cityCandidates, area, row.city, row.district]));
+        if (matches.length) return {
+          matchedName: matches[0].name,
+          province: matches[0].province || '',
+          city: matches[0].city || '',
+          district: matches[0].district || '',
+          address: matches[0].address || '',
+          areaSearch: true,
+          areaMatched: true,
+        };
+      }
+    }
+  }
+  return null;
+}
+
 /**
  * 批量地理编码（并发），返回 Map: address -> {lon, lat, matchedName}
  * @param {Array} addresses 地点名列表
@@ -660,4 +814,4 @@ async function geocodeBatch(addresses, cityOf, opts) {
   return result;
 }
 
-module.exports = { geocodeOne, geocodeBatch, pickCity, cityTokens, stripSuffix, cityHit, selfTokens, selfMatch, addrTokens, nameOk, geoNameOk, geoLevelOk, geoClassOk };
+module.exports = { geocodeOne, geocodeBatch, searchHotelPoi, searchHotelsNearby, isBookableHotelPoi, pickCity, cityTokens, stripSuffix, cityHit, selfTokens, selfMatch, addrTokens, nameOk, geoNameOk, geoLevelOk, geoClassOk };

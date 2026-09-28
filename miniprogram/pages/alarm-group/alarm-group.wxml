@@ -82,6 +82,13 @@
           </view>
         </view>
 
+        <view wx:if="{{editForm.type === 'train' || editForm.type === 'plane' || editForm.type === 'bus' || editForm.type === 'hotel' || editForm.type === 'ticket'}}" class="field">
+          <view class="field-label">🎫 车次 / 酒店 / 门票信息</view>
+          <input class="input-line" placeholder="输入当前车次、酒店名称或门票信息" placeholder-class="ph"
+                 value="{{editForm.bookingInfo}}" data-field="bookingInfo"
+                 bindinput="onEditInput" maxlength="160" />
+        </view>
+
         <view class="field">
           <view class="field-label">🗒️ 备注</view>
           <textarea class="input-area" placeholder="车次、检票口、注意事项等（选填）" placeholder-class="ph"

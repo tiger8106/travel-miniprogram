@@ -183,8 +183,9 @@ function routePairs(segment, stations) {
     if (!sameCity(knownCity, dayCity)) {
       const dayStations = stationsInCity(dayCity, stations);
       if (dayStations.length) {
-        to = from;
-        from = dayStations;
+        // 已识别的一端是出发站、另一端是当天目的地区域里的非铁路地点：
+        // 只把当天区域的铁路站补到“到达端”，不能把方向反过来。
+        to = dayStations;
         repaired = true;
       }
     }
@@ -194,8 +195,9 @@ function routePairs(segment, stations) {
     if (!sameCity(knownCity, dayCity)) {
       const dayStations = stationsInCity(dayCity, stations);
       if (dayStations.length) {
-        from = to;
-        to = dayStations;
+        // 已识别的一端是到达站、另一端是当天出发地区域里的非铁路地点：
+        // 补到“出发端”，保持用户/大纲原来的行进方向。
+        from = dayStations;
         repaired = true;
       }
     }
@@ -332,14 +334,15 @@ async function lookupOfficial(segments, deadlineMs) {
     const key = segmentKey(seg);
     const meta = { attempted: true, official: true, from: '', to: '', repaired: false };
     found.routeMeta.set(key, meta);
-    if (!cookie || !DATE_RE.test(String(seg.date || ''))) {
-      found.set(key, []);
-      return;
-    }
     const pairs = routePairs(seg, stations);
     if (!pairs.length) {
+      meta.unresolvedStations = true;
       found.set(key, []);
       console.warn('[generatePlan.12306] 无法把站点解析为铁路站：%s→%s', seg.from, seg.to);
+      return;
+    }
+    if (!cookie || !DATE_RE.test(String(seg.date || ''))) {
+      found.set(key, []);
       return;
     }
     const results = await Promise.allSettled(pairs.map((pair) =>

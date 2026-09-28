@@ -3,7 +3,7 @@
   <view>
     <view class="time-row">
       <text class="time-icon">{{icon}}</text>
-      <text class="time-text">{{item.startTime || '--:--'}}</text>
+      <text class="time-text">{{item.timeEstimated ? '约 ' : ''}}{{item.displayStartTime || item.startTime || '--:--'}}</text>
       <text wx:if="{{item.endTime}}" class="text-secondary"> → {{item.endTime}}</text>
       <text wx:if="{{item.past}}" class="past-tag">已结束</text>
     </view>
@@ -17,6 +17,7 @@
     </view>
 
     <view wx:if="{{item.note}}" class="note">{{item.note}}</view>
+    <view wx:if="{{item.bookingInfo}}" class="note">预订/票务信息：{{item.bookingInfo}}</view>
     <view wx:if="{{schedTip}}" class="sched-tip">{{schedTip}}</view>
 
     <!-- 导航：独占一行；有中间点时按 段 依次铺开，每段直达目的地（每段独占一行） -->
@@ -24,7 +25,7 @@
       <map-button wx:for="{{navLegs}}" wx:for-item="leg" wx:key="to"
                   startLoc="{{leg.from}}"
                   endLoc="{{leg.to}}"
-                  mode="{{item.transportType || 'car'}}"
+                  mode="{{item.transportType || 'ride'}}"
                   endLat="{{leg.lat}}"
                   endLon="{{leg.lon}}"
                   region="{{region}}"
@@ -112,6 +113,12 @@
           <view class="place-swap" bindtap="onSwapLocation">⇅</view>
         </view>
         <view class="place-add" bindtap="onAddWaypoint">＋ 添加中间点</view>
+      </view>
+
+      <view wx:if="{{item.category === 'hotel' || item.category === 'ticket' || item.category === 'transport'}}" class="field">
+        <view class="field-label">🎫 预订/票务信息（用于与提醒同步）</view>
+        <input class="input-line" placeholder="酒店名称、车次或门票信息" placeholder-class="ph"
+               value="{{editForm.bookingInfo}}" data-field="bookingInfo" bindinput="onInput" maxlength="160" />
       </view>
 
       <!-- 交通方式 -->

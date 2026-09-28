@@ -209,6 +209,10 @@ async function chatWithRetry(messages, a, b) {
  */
 function parseJSONFromText(text) {
   let json = (text || '').trim();
+  // 模型偶尔把换行/制表等原始控制字符直接塞进 JSON 字符串，
+  // JSON.parse 会报 “Bad control character”。这些字符不承载行程语义，
+  // 统一替为空格即可保留内容并继续做后面的截断/逗号抢救。
+  json = json.replace(/[\u0000-\u001F]/g, ' ');
   const md = json.match(/```(?:json)?\s*([\s\S]+?)\s*```/i);
   if (md) json = md[1];
 
@@ -223,6 +227,124 @@ function parseJSONFromText(text) {
     end = json.lastIndexOf('}');
   }
   if (start < 0) throw new Error('文本中没有 JSON 结构');
+
+  const repairMissingCommas = (source) => {
+    let result = '';
+    const stack = [];
+    let changed = false;
+    const addSeparatorIfMissing = (context, next) => {
+      if (!context) return;
+      const afterValue = context.state === 'afterValue';
+      if (!afterValue || next === ',' || next === ']' || next === '}') return;
+      if (context.kind === 'array' && /["[{\-0-9tfn]/.test(next)) {
+        result += ',';
+        context.state = 'valueOrEnd';
+        changed = true;
+      } else if (context.kind === 'object' && next === '"') {
+        result += ',';
+        context.state = 'keyOrEnd';
+        changed = true;
+      }
+    };
+    for (let i = 0; i < source.length; i++) {
+      const ch = source[i];
+      const context = stack[stack.length - 1];
+      if (/\s/.test(ch)) { result += ch; continue; }
+      if (ch === '"') {
+        addSeparatorIfMissing(context, ch);
+        const active = stack[stack.length - 1];
+        if (active && active.kind === 'object') {
+          if (active.state === 'keyOrEnd') active.state = 'colon';
+          else if (active.state === 'value') active.state = 'afterValue';
+        } else if (active && active.kind === 'array') active.state = 'afterValue';
+        let escaped = false;
+        result += ch;
+        for (i++; i < source.length; i++) {
+          const part = source[i];
+          result += part;
+          if (escaped) escaped = false;
+          else if (part === '\\') escaped = true;
+          else if (part === '"') break;
+        }
+        continue;
+      }
+      if (ch === '{' || ch === '[') {
+        addSeparatorIfMissing(context, ch);
+        result += ch;
+        stack.push({ kind: ch === '{' ? 'object' : 'array', state: ch === '{' ? 'keyOrEnd' : 'valueOrEnd' });
+        continue;
+      }
+      if (ch === '}' || ch === ']') {
+        result += ch;
+        stack.pop();
+        const parent = stack[stack.length - 1];
+        if (parent) parent.state = 'afterValue';
+        continue;
+      }
+      if (ch === ',') {
+        result += ch;
+        const active = stack[stack.length - 1];
+        if (active) active.state = active.kind === 'object' ? 'keyOrEnd' : 'valueOrEnd';
+        continue;
+      }
+      if (ch === ':') {
+        result += ch;
+        const active = stack[stack.length - 1];
+        if (active && active.kind === 'object') active.state = 'value';
+        continue;
+      }
+      if (/[\-0-9tfn]/.test(ch)) {
+        addSeparatorIfMissing(context, ch);
+        const active = stack[stack.length - 1];
+        if (active) active.state = 'afterValue';
+      }
+      result += ch;
+    }
+    return changed ? result : source;
+  };
+
+  // LLM 有时会在完整 JSON 后追加一句解释或第二段内容。只截取第一个完整
+  // 顶层结构，避免 lastIndexOf 把尾部文字一并塞进 JSON.parse。
+  const stack = [];
+  let inString = false;
+  let escaped = false;
+  let firstEnd = -1;
+  for (let i = start; i < json.length; i++) {
+    const ch = json[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === '{' || ch === '[') stack.push(ch);
+    else if (ch === '}' || ch === ']') {
+      const expected = ch === '}' ? '{' : '[';
+      if (stack[stack.length - 1] === expected) stack.pop();
+      else break;
+      if (!stack.length) { firstEnd = i; break; }
+    }
+  }
+  if (firstEnd >= start) {
+    const first = json.slice(start, firstEnd + 1).replace(/,(\s*[}\]])/g, '$1');
+    try { return JSON.parse(first); } catch (firstError) {
+      const repaired = repairMissingCommas(first);
+      if (repaired !== first) {
+        try {
+          console.warn('[generatePlan.llm] JSON 字段间缺逗号，已自动补上');
+          return JSON.parse(repaired);
+        } catch (e0) { /* 继续尝试轻量粘连修复与截断抢救 */ }
+      }
+      const gluedFirst = first.replace(/([}\]])\s*(?=[{\[])/g, '$1,');
+      if (gluedFirst !== first) {
+        try {
+          console.warn('[generatePlan.llm] JSON 元素间缺逗号，已自动补上');
+          return JSON.parse(gluedFirst);
+        } catch (e0) { /* 继续使用下面针对截断的抢救逻辑 */ }
+      }
+    }
+  }
 
   const closeChar = isArr ? ']' : '}';
   let body = end > start ? json.slice(start, end + 1) : json.slice(start);

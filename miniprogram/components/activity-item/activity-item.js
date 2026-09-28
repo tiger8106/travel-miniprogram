@@ -165,7 +165,7 @@ Component({
       mapUtil.openAmapNav({
         from: item.startLocation,
         to: item.endLocation,
-        mode: item.transportType || 'car',
+        mode: item.transportType || 'ride',
         title: `${item.startLocation} → ${item.endLocation}`,
         endLat: item.endLat,
         endLon: item.endLon,

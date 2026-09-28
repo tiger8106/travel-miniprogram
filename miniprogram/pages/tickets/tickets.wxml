@@ -56,6 +56,10 @@
       </view>
     </view>
 
+    <view wx:if="{{hotelHint}}" class="card hotel-booking-hint">
+      🏨 酒店可随时提前预订，越早确认越好。请到下方「酒店住宿」分类逐项核对并确定预订。
+    </view>
+
     <!-- ===== 正在进行 / 即将进行（和首页「此刻行程」同一套视觉） ===== -->
     <block wx:if="{{nowAlarms.length}}">
       <view class="card now-card">
@@ -93,7 +97,7 @@
     <view wx:else class="card now-empty">
       <view class="now-empty-icon">🚩</view>
       <view class="now-empty-text">没有正在进行或即将进行的提醒</view>
-      <view class="now-empty-sub">{{alarms.length ? '所有事项都还早，见下方分类待办' : '还没有任何提醒事项'}}</view>
+      <view class="now-empty-sub">{{hotelHint ? '酒店预订请到下方「酒店住宿」分类逐项确认' : (alarms.length ? '所有事项都还早，见下方分类待办' : '还没有任何提醒事项')}}</view>
     </view>
 
     <!-- ===== 分类待办：折叠卡，点击进入分类详情页 ===== -->
@@ -169,6 +173,14 @@
               <text class="chip-icon">{{item.icon}}</text>{{item.label}}
             </view>
           </view>
+        </view>
+
+        <!-- 车次、酒店和门票的当前信息与行程条目共用该字段 -->
+        <view wx:if="{{editForm.type === 'train' || editForm.type === 'plane' || editForm.type === 'bus' || editForm.type === 'hotel' || editForm.type === 'ticket'}}" class="field">
+          <view class="field-label">🎫 车次 / 酒店 / 门票信息</view>
+          <input class="input-line" placeholder="输入当前车次、酒店名称或门票信息" placeholder-class="ph"
+                 value="{{editForm.bookingInfo}}" data-field="bookingInfo"
+                 bindinput="onEditInput" maxlength="160" />
         </view>
 
         <!-- 备注 -->

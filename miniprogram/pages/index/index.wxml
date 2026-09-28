@@ -58,6 +58,10 @@
       </picker>
     </view>
 
+    <view wx:if="{{hotelBookingHint}}" class="card hotel-booking-hint">
+      🏨 酒店可随时提前预订，越早确认越好。请到提醒事项的「酒店住宿」分类逐项核对并预订。
+    </view>
+
     <!-- 此刻行程：正在进行 / 即将进行，点卡片直接导航 -->
     <view wx:if="{{nowItems.length}}" class="card now-card">
       <view class="now-head-bar">

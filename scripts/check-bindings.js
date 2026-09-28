@@ -52,7 +52,7 @@ fs.readdirSync(CF).forEach((dir) => {
   const err = syntaxOk(abs);
   ok(`JS 语法 cloudfunctions/${dir}/index.js`, !err, err || '');
 });
-['generatePlan/plan.js', 'generatePlan/schedule.js', 'generatePlan/rail12306.js'].forEach((rel) => {
+['generatePlan/plan.js', 'generatePlan/schedule.js', 'generatePlan/rail12306.js', 'generatePlan/hotel-validation.js'].forEach((rel) => {
   const err = syntaxOk(path.join(CF, rel));
   ok(`JS 语法 cloudfunctions/${rel}`, !err, err || '');
 });
@@ -245,10 +245,11 @@ ok('截断会留日志（finish_reason=length）', /finish_reason === 'length'/.
 const plannerJs = fs.readFileSync(path.join(MP, 'pages/planner/planner.js'), 'utf8');
 const transportLine = (plannerJs.match(/const TRANSPORT = \[([^\]]*)\]/) || [])[1] || '';
 ok('出行方式含「高铁/动车优先」', /高铁\/动车优先/.test(transportLine), transportLine);
-ok('自驾/包车排在飞机优先前面', (() => {
+ok('自驾出行排在飞机优先前面', (() => {
   const list = transportLine.split(',').map((s) => s.replace(/['"]/g, '').trim());
-  return list.indexOf('自驾/包车') >= 0 && list.indexOf('飞机优先') >= 0
-    && list.indexOf('自驾/包车') < list.indexOf('飞机优先');
+  return list.indexOf('自驾出行') >= 0 && list.indexOf('飞机优先') >= 0
+    && list.indexOf('自驾出行') < list.indexOf('飞机优先')
+    && !list.includes('自驾/包车');
 })(), transportLine);
 ok('后端同时认高铁和动车（railFirst）', /railFirst = \/高铁\|动车\//.test(planJs));
 ok('没有合适高铁时允许走动车', /没有合适的高铁[\s\S]{0,120}?动车/.test(planJs));
@@ -304,21 +305,31 @@ ok('已确认大交通有确定性对齐兜底（车次错时刻/漏排/重复/�
   /function enforceMovesAlignment/.test(planJs)
   && /时刻漂移/.test(planJs) && /wantS != null/.test(planJs)
   && /全天未安排，补一条/.test(planJs));
-ok('细化清洗链按序挂全（对齐→去重→起点→接驳→早餐→禁午睡→晚间→餐次纠偏→闭环→行李→顺延）',
+ok('细化清洗链按序挂全（对齐→去重→起点→接驳→早餐→禁午睡→晚间→餐次纠偏→闭环→边缘顺序→交通偏好→停车→按分钟排序）',
   /items = enforceMovesAlignment\(sanitizeItems/.test(planJs)
     && /items = dedupeTransports\(items\);/.test(planJs)
-    && /items = enforceDayStartLocation\(items, outline\)/.test(planJs)
+    && /items = enforceDayStartLocation\(items, outline, p\)/.test(planJs)
     && /items = enforceOriginAccess\(items, p, outline, roundDays\)/.test(planJs)
     && /items = enforceMorningRoutine\(items, outline\)/.test(planJs)
     && /items = enforceNoMiddayHotel\(items, outline\)/.test(planJs)
-    && /items = enforceEveningPlan\(items, outline\)/.test(planJs)
+    && /items = enforceEveningPlan\(items, outline, p\)/.test(planJs)
     && /items = fixMealLabels\(items, outline\)/.test(planJs)
     && /items = enforceDayClosure\(items, outline, p\)/.test(planJs)
     && /items = enforceLuggageRules\(items, outline\)/.test(planJs)
+    && /items = enforceTripEdgeOrder\(items, p, outline, roundDays\)/.test(planJs)
+    && /items = enforceTransportPreference\(items, p\)/.test(planJs)
+    && /items = removeOptionalRouteDetours\(items\)/.test(planJs)
+    && /items = enforceScenicRouteTiming\(items\)/.test(planJs)
+    && /items = ensureSelfDriveParking\(items, p\)/.test(planJs)
     && /items = fixDayTimeOverlaps\(items\);/.test(planJs));
 ok('细化失败/残缺天有骨架重建（skeletonForEmptyDays，只在非 partial 轮，排除已完成天）',
   /function skeletonForEmptyDays/.test(planJs)
     && /skeletonForEmptyDays\(p, outline, detail\.items, detail\.doneDayIndexes\)/.test(planJs));
+ok('门票闹钟按关联行程校正类型，普通接驳不会伪装成门票放票',
+  /function normalizeBookingAlarmKinds/.test(planJs)
+    && /alarms = normalizeBookingAlarmKinds\(alarms, items, p\)/.test(planJs)
+    && /const textualMode/.test(planJs)
+    && /releaseDate <= today/.test(planJs));
 ok('包车/大巴段宽松匹配，已有同向交通条目时不重复补（isScheduledMove 分流）',
   /function isScheduledMove/.test(planJs) && /已由细化安排（宽松匹配），不补/.test(planJs));
 ok('餐次词按实际时刻纠偏（早上不出现"晚餐"）',
@@ -340,8 +351,10 @@ ok('大纲 prompt：大交通到发站按"下车后接驳最短"选（禁止为�
   /下车（机）后到当天最终景点或今晚住宿地的接驳距离最短/.test(planJs) && /禁止舍近求远/.test(planJs));
 ok('大纲 prompt：市内/短途交通按预算选型基调写进 n 提示',
   /7\.3 \*\*市内\/短途交通按预算选型\*\*/.test(planJs) && /基调写进当天 n 提示/.test(planJs));
-ok('细化 prompt：市内/短途交通按预算选型（经济=步行+轨交优先，打车写预估车费）',
-  /18\. \*\*市内\/短途交通按用户预算/.test(planJs) && /打车约 15-20 元/.test(planJs));
+ok('细化 prompt：预算下公共交通优先，缺少或不便时再打车/包车',
+  /18\. \*\*市内\/短途交通按用户预算/.test(planJs)
+    && /公共交通不便时可打车\/包车/.test(planJs)
+    && /用户已选「自驾出行」/.test(planJs));
 ok('大交通选站：模型自报到站接驳方式+耗时（mv.st），"到站后还得长途打车"判为绕路（通用，不认地名）',
   /"st":"到站后到当天首个目的地的接驳方式与耗时"/.test(planJs)
     && /4\.2 \*\*每段 mv 都要给 st/.test(planJs)
@@ -349,10 +362,15 @@ ok('大交通选站：模型自报到站接驳方式+耗时（mv.st），"到站
     && /function isCarTransfer/.test(planJs)
     && /warnDetourTransfers\(outline\)/.test(planJs));
 ok('绕路段会触发一次通用复核请求（改站交给模型，方式与时刻不变）',
-  /missing\.length \|\| dups\.length \|\| detours\.length/.test(planJs)
-    && /repairOutline\(p, outline, missing, dups, detours, outlineDeadline\)/.test(planJs)
+  /missing\.length \|\| dups\.length \|\| detours\.length \|\| earlyReturns\.length/.test(planJs)
+    && /repairOutline\(p, outline, missing, dups, detours, earlyReturns, outlineDeadline\)/.test(planJs)
     && /到站后还得长途打车才到当天目的地/.test(planJs)
     && /okDetour/.test(planJs));
+ok('返程不提前结束：检测出发地中途住宿并将返程移动到末日',
+  /function prematureOriginDays/.test(planJs)
+    && /function deferPrematureReturn/.test(planJs)
+    && /第 \$\{earlyReturns\.map/.test(planJs)
+    && /回家交通统一安排在行程最后一天/.test(planJs));
 ok('❗代码里不许写死具体地名/车站做特例优化（通用性红线）',
   !/NEAR_STATION_FIXES|fixNearStations/.test(planJs)
     && !/离堆公园|犀浦|峨眉山站/.test(planJs));
@@ -655,7 +673,22 @@ ok('班次缓存 36 小时过期（日期键换了本来就查不到旧缓存）
   /SCHED_TTL_MS = 36 \* 3600 \* 1000/.test(gpIdx));
 
 ok('前台大纲不联网检索（检索塞在大纲尾巴上必撞 60s → 转后台重做一遍）',
-  /generateOutline\(event, \{\}\)/.test(gpIdx) && !/scheduleLookup: makeScheduleLookup/.test(gpIdx));
+  /generateOutlineWithHotelCheck\(event, \{\}\)/.test(gpIdx)
+    && /前台大纲\*\*不做联网检索/.test(gpIdx)
+    && !/scheduleLookup: makeScheduleLookup/.test(gpIdx));
+const hotelValidation = fs.readFileSync(path.join(CF, 'generatePlan/hotel-validation.js'), 'utf8');
+ok('大纲住宿名称经城市 POI 核验，未命中降级成住宿片区与档次',
+  /validateOutlineHotels\(result, input, searchHotelPoi, searchHotelsNearby\)/.test(gpIdx)
+    && /poi\.matchedName/.test(hotelValidation)
+    && /住宿片区/.test(hotelValidation)
+    && /searchHotelsNearby\(city, budget/.test(hotelValidation)
+    && /searchHotelsNearby/.test(fs.readFileSync(path.join(CF, 'generatePlan/geocode.js'), 'utf8')));
+const routeScenarioTest = fs.readFileSync(path.join(ROOT, 'scripts/test-route-scenarios.js'), 'utf8');
+ok('保留两条真实路线回归脚本并逐条检查时间、首末日和非自驾约束',
+  /2026-09-30/.test(routeScenarioTest) && /2026-10-07/.test(routeScenarioTest)
+    && /2026-12-31/.test(routeScenarioTest) && /2027-01-03/.test(routeScenarioTest)
+    && /逐日生成结果/.test(routeScenarioTest) && /未授权的本人驾驶/.test(routeScenarioTest)
+    && /lookupSchedules\(segments, 25000\)/.test(routeScenarioTest));
 
 ok('班次专轮：后台任务拿到大纲后单独一轮联网核对（写回 outline + schedDone）',
   /班次专轮/.test(gpIdx) && /schedDone: true/.test(gpIdx)
@@ -701,7 +734,7 @@ ok('生成中的行程详情只读，完成后恢复编辑',
     && /已生成的内容可以先查看/.test(itinWxml2));
 ok('行程更新接口只允许白名单字段',
   /const textFields = \{ title: 60, summary: 500, region: 300, startDate: 20, endDate: 20 \}/.test(itineraryFn2)
-    && /safePatch\.items = patch\.items\.slice\(0, 500\)/.test(itineraryFn2)
+    && /safePatch\.items = syncHotelReferencesInItems\(cur\.data\.items \|\| \[\], patch\.items\.slice\(0, 500\)\)/.test(itineraryFn2)
     && /行程仍在生成，请完成后再编辑/.test(itineraryFn2));
 ok('生成中的行程禁止删除，避免后台任务写回孤儿数据',
   /cur\.data\.genStatus === 'generating'/.test(itineraryFn2)
