@@ -280,8 +280,7 @@ Page({
       const ongoing = remindAt <= now;
       const gap = remindAt - now;
       let statusText = '待办';
-      if (a.actionAt <= now) statusText = '已逾期';
-      else if (ongoing) statusText = '现在准备';
+      if (ongoing) statusText = '进行中';
       else if (gap < 3600000) statusText = `${Math.max(1, Math.round(gap / 60000))} 分钟后`;
       else if (gap < 86400000) statusText = `${Math.round(gap / 3600000)} 小时后`;
       else statusText = `${Math.round(gap / 86400000)} 天后`;

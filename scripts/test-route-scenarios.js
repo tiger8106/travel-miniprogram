@@ -91,13 +91,13 @@ function offlineFixture(scenario) {
         offlineMove('重庆金童路', '重庆西站', 'ride', '12:00', '12:40'),
         offlineMove('重庆西站', '桂林北站', 'train', '13:30', '17:30'),
       ]),
-      offlineDay('2026-10-01', '阳朔', '阳朔', ['漓江游船', '阳朔自然山水'], [
-        offlineMove('桂林磨盘山码头', '阳朔水东门码头', 'ship', '08:30', '12:30'),
+      offlineDay('2026-10-01', '阳朔', '阳朔', ['漓江四星级游船（磨盘山码头）', '阳朔自然山水'], [
+        Object.assign(offlineMove('桂林磨盘山码头', '阳朔水东门码头', 'ship', '08:30', '12:30'), { note: '四星级游船' }),
       ]),
-      offlineDay('2026-10-02', '龙脊梯田', '金坑大寨', ['龙脊梯田', '西山韶乐', '千层天梯', '金佛顶'], [
+      offlineDay('2026-10-02', '龙脊梯田', '金坑大寨', ['龙脊梯田', '西山韶乐', '千层天梯', '金佛顶日落'], [
         offlineMove('阳朔', '龙脊金坑大寨', 'bus', '08:00', '11:00'),
       ]),
-      offlineDay('2026-10-03', '明仕田园', '明仕田园', ['明仕田园'], [
+      offlineDay('2026-10-03', '明仕田园', '明仕田园', ['西山韶乐日出', '明仕田园'], [
         offlineMove('西山韶乐', '明仕田园', 'bus', '08:00', '11:00'),
       ]),
       offlineDay('2026-10-04', '明仕田园→德天瀑布', '硕龙镇', ['明仕田园', '自然山水'], [
@@ -118,7 +118,7 @@ function offlineFixture(scenario) {
       offlineItem(0, '17:30', '18:00', 'transport', '乘网约车前往桂林住宿地', '桂林北站', '桂林酒店', 'ride'),
       offlineItem(0, '18:00', '19:00', 'hotel', '到酒店放下行李并休息', '桂林酒店', '桂林酒店', ''),
       offlineItem(1, '08:00', '08:30', 'transport', '从桂林酒店前往桂林磨盘山码头', '桂林酒店', '桂林磨盘山码头', 'ride'),
-      offlineItem(1, '08:30', '12:30', 'sight', '乘游船游览漓江精华段，从桂林磨盘山码头到阳朔水东门码头', '桂林磨盘山码头', '阳朔水东门码头', ''),
+      offlineItem(1, '08:30', '12:30', 'sight', '乘坐漓江四星级游船游览精华段，从桂林磨盘山码头到阳朔水东门码头', '桂林磨盘山码头', '阳朔水东门码头', ''),
       offlineItem(1, '12:30', '13:30', 'food', '阳朔当地特色午餐', '阳朔水东门码头', '阳朔水东门码头', ''),
       offlineItem(1, '13:30', '14:00', 'hotel', '到阳朔酒店放行李', '阳朔水东门码头', '阳朔酒店', ''),
       offlineItem(2, '07:00', '08:00', 'food', '在阳朔吃早餐并收拾行李', '阳朔酒店', '阳朔酒店', ''),
@@ -129,11 +129,12 @@ function offlineFixture(scenario) {
       offlineItem(2, '13:00', '13:30', 'transport', '沿景区单向步道前往千层天梯', '西山韶乐', '千层天梯', 'walk'),
       offlineItem(2, '13:30', '15:00', 'sight', '游览龙脊梯田千层天梯（2号观景台）', '千层天梯', '千层天梯', ''),
       offlineItem(2, '15:00', '15:30', 'transport', '沿景区游览方向前往金佛顶', '千层天梯', '金佛顶', 'walk'),
-      offlineItem(2, '15:30', '17:30', 'sight', '游览龙脊梯田金佛顶（3号观景台）', '金佛顶', '金佛顶', ''),
+      offlineItem(2, '15:30', '17:30', 'sight', '游览龙脊梯田金佛顶（3号观景台），观赏金佛顶日落', '金佛顶', '金佛顶', ''),
       offlineItem(2, '17:30', '18:00', 'transport', '从金佛顶返回西山韶乐休息点', '金佛顶', '西山韶乐', 'walk'),
       offlineItem(2, '18:00', '18:30', 'other', '回到西山韶乐休息并整理行李', '西山韶乐', '西山韶乐', ''),
       offlineItem(2, '18:30', '19:30', 'food', '在西山韶乐住宿点享用晚餐', '西山韶乐', '西山韶乐', ''),
-      offlineItem(3, '07:00', '08:00', 'food', '在西山韶乐住宿点吃早餐并收拾行李', '西山韶乐', '西山韶乐', ''),
+      offlineItem(3, '06:00', '06:40', 'sight', '在西山韶乐观赏日出', '西山韶乐', '西山韶乐', ''),
+      offlineItem(3, '06:40', '07:20', 'food', '在西山韶乐住宿点吃早餐并收拾行李', '西山韶乐', '西山韶乐', ''),
       offlineItem(3, '08:00', '11:00', 'transport', '乘旅游大巴从西山韶乐住宿片区前往明仕田园', '西山韶乐', '明仕田园', 'bus'),
       offlineItem(3, '11:00', '14:00', 'sight', '游览明仕田园山水与拍照', '明仕田园', '明仕田园', ''),
       offlineItem(3, '14:00', '15:00', 'food', '在明仕田园附近农家菜馆午餐', '明仕田园', '明仕田园', ''),
@@ -250,6 +251,10 @@ function inspectScenario(scenario, outline, items) {
     issues.push(`${noSelfDrive.length} 条行程出现未授权的本人驾驶文案`);
     noSelfDrive.forEach((item) => console.error(`  驾驶文案条目：第${Number(item.dayIndex || 0) + 1}天 ${fmt(item)}`));
   }
+  const homeScenicTransfers = items.filter((item) => /景区接驳/.test(`${item.activity || ''} ${item.note || ''}`)
+    && (/重庆西站|重庆北站/.test(`${item.startLocation || ''} ${item.activity || ''}`)
+      || P.samePlace(item.endLocation, scenario.input.origin)));
+  if (homeScenicTransfers.length) issues.push('重庆西站返回金童路被错误写成景区接驳');
   if (/高铁|动车/.test(profile.transport)) {
     const outlineFlights = (outline.days || []).flatMap((day) => day.moves || [])
       .filter((move) => /plane|航班|飞机/i.test(String(move.mode || '')));
@@ -434,7 +439,12 @@ function inspectScenario(scenario, outline, items) {
       });
       const visitsGolden = (item) => item.category === 'sight'
         && /金佛顶/.test(String(item.activity || ''))
+        && !/千层天梯|2号天梯|2号观景台/.test(String(item.activity || ''))
         && !/(不绕行|不去|不安排|不前往|不考虑|勿前往|不登|岔路口.*不|明天|次日|后一天|储备精力)/.test(String(item.activity || ''));
+      // “西山韶乐→千层天梯”是合理路线说明，但不能把“前往千层天梯”
+      // 当成已经完成千层天梯游览；必须以独立的实际游览条目判断顺序。
+      const visitsLadder = (item) => /千层天梯|2号天梯/.test(String(item.activity || ''))
+        && !/西山韶乐/.test(String(item.activity || ''));
       for (const rows of longjiRowsByDay.values()) {
         const core = rows.filter((item) => item.category === 'sight'
           && (/千层天梯|2号天梯/.test(String(item.activity || '')) || visitsGolden(item)))
@@ -442,7 +452,7 @@ function inspectScenario(scenario, outline, items) {
         const westRows = rows.filter((item) => item.category === 'sight'
           && /西山韶乐/.test(String(item.activity || '')))
           .sort((a, b) => (toMinutes(a.startTime) ?? 1440) - (toMinutes(b.startTime) ?? 1440));
-        const hasLadder = core.some((item) => /千层天梯|2号天梯/.test(String(item.activity || '')));
+        const hasLadder = core.some(visitsLadder);
         const hasGolden = core.some(visitsGolden);
         const hasMiddleWest = hasLadder && hasGolden && westRows.some((west) => {
           const start = toMinutes(west.startTime);
@@ -458,7 +468,7 @@ function inspectScenario(scenario, outline, items) {
       const sameDayCore = [...longjiRowsByDay.entries()].find(([, rows]) => {
         const visits = rows.filter((item) => item.category === 'sight');
         return visits.some((item) => /西山韶乐/.test(String(item.activity || '')))
-          && visits.some((item) => /千层天梯|2号天梯/.test(String(item.activity || '')))
+          && visits.some(visitsLadder)
           && visits.some(visitsGolden);
       });
       if (!sameDayCore) {
@@ -468,7 +478,7 @@ function inspectScenario(scenario, outline, items) {
           && (/西山韶乐|千层天梯|2号天梯|金佛顶/.test(String(item.activity || ''))))
           .sort((a, b) => (toMinutes(a.startTime) ?? 1440) - (toMinutes(b.startTime) ?? 1440));
         const westAt = orderedCore.findIndex((item) => /西山韶乐/.test(String(item.activity || '')));
-        const ladderAt = orderedCore.findIndex((item) => /千层天梯|2号天梯/.test(String(item.activity || '')));
+        const ladderAt = orderedCore.findIndex(visitsLadder);
         const goldenAt = orderedCore.findIndex(visitsGolden);
         if (!(westAt >= 0 && ladderAt > westAt && goldenAt > ladderAt)) {
           issues.push('龙脊核心路线顺序应为西山韶乐→千层天梯→金佛顶');
@@ -488,8 +498,62 @@ function inspectScenario(scenario, outline, items) {
           && coreEnd - coreStart < declaredMinutes) {
         issues.push('龙脊核心景点的游览时段发生重叠，需调整顺序或删减点位');
       }
+
+      const stayDay = (outline.days || [])[longjiDay] || {};
+      const arrivalEnd = (stayDay.moves || [])
+        .filter((move) => /龙脊|金坑大寨|田头寨/.test(String(move.to || '')) && toMinutes(move.endTime) !== null)
+        .map((move) => toMinutes(move.endTime))
+        .sort((a, b) => b - a)[0];
+      if (arrivalEnd === undefined || arrivalEnd <= 17 * 60 + 30) {
+        const sunset = items.some((item) => Number(item.dayIndex || 0) === longjiDay
+          && /金佛顶/.test(`${item.activity || ''} ${item.note || ''}`)
+          && /日落/.test(`${item.activity || ''} ${item.note || ''}`));
+        if (!sunset) issues.push('龙脊抵达时间允许时，详细时间线缺少金佛顶日落');
+      }
+      const nextDay = (outline.days || [])[longjiDay + 1] || {};
+      const nextDayText = `${nextDay.city || ''} ${nextDay.theme || ''} ${nextDay.note || ''} ${(nextDay.highlights || []).join(' ')} ${(nextDay.moves || []).map((move) => `${move.from || ''} ${move.to || ''}`).join(' ')}`;
+      const nextDeparture = (nextDay.moves || [])
+        .filter((move) => /龙脊|金坑大寨|田头寨|西山韶乐/.test(String(move.from || ''))
+          && !/龙脊|金坑大寨|田头寨|西山韶乐/.test(String(move.to || ''))
+          && toMinutes(move.startTime) !== null)
+        .map((move) => toMinutes(move.startTime))
+        .sort((a, b) => a - b)[0];
+      if (longjiDay + 1 < (outline.days || []).length
+          && /龙脊|金坑大寨|田头寨|千层天梯|西山韶乐|金佛顶/.test(nextDayText)
+          && (nextDeparture === undefined || nextDeparture >= 7 * 60)) {
+        const sunrise = items.some((item) => Number(item.dayIndex || 0) === longjiDay + 1
+          && /西山韶乐/.test(`${item.activity || ''} ${item.note || ''}`)
+          && /日出/.test(`${item.activity || ''} ${item.note || ''}`));
+        if (!sunrise) issues.push('龙脊次日离开时间允许时，详细时间线缺少西山韶乐日出');
+      }
     }
   }
+  // 不能因为酒店备注/“等待登船”里提到四星游船，就把普通缓冲条目
+  // 当作实际船票或船程来要求起点码头；真正的票务/船程条目才需要核对竹江码头。
+  const cruiseRows = items.filter((item) => {
+    const text = `${item.activity || ''} ${item.note || ''} ${item.bookingInfo || ''}`;
+    return /漓江|四星级游船|四星游船/.test(text)
+      && (item.category === 'ticket' || item.transportType === 'ship'
+        || /船票|登船|乘坐[^。；，,]{0,20}游船/.test(String(item.activity || '')));
+  });
+  if (cruiseRows.some((item) => /四星/.test(`${item.activity || ''} ${item.note || ''}`)
+      && /磨盘山/.test(`${item.activity || ''} ${item.note || ''} ${item.startLocation || ''} ${item.endLocation || ''}`))) {
+    issues.push('四星级漓江游船仍出现磨盘山码头');
+  }
+  if (cruiseRows.some((item) => /四星/.test(`${item.activity || ''} ${item.note || ''}`)
+      && !/竹江码头/.test(`${item.activity || ''} ${item.note || ''} ${item.startLocation || ''} ${item.endLocation || ''}`))) {
+    issues.push('四星级漓江游船未明确竹江码头');
+  }
+  const fourStarDays = (outline.days || []).map((day, index) => ({ day, index }))
+    .filter(({ day }) => /(?:四星|4\s*星)/.test(JSON.stringify(day)) && /(?:漓江|游船)/.test(JSON.stringify(day)))
+    .map(({ index }) => index);
+  const oldPierOutlineMoves = (outline.days || []).flatMap((day, dayIndex) =>
+    (day.moves || []).filter((move) => fourStarDays.includes(dayIndex)
+      && /磨盘山/.test(`${move.from || ''} ${move.to || ''} ${move.transfer || ''} ${move.note || ''}`)));
+  if (oldPierOutlineMoves.length) issues.push('四星游船大纲前序交通仍指向磨盘山码头');
+  const oldPierFeeder = items.filter((item) => fourStarDays.includes(Number(item.dayIndex || 0))
+    && /磨盘山/.test(`${item.activity || ''} ${item.note || ''} ${item.startLocation || ''} ${item.endLocation || ''}`));
+  if (oldPierFeeder.length) issues.push('四星游船当天前序接驳仍指向磨盘山码头');
   return { issues, dayReports };
 }
 
@@ -512,8 +576,10 @@ async function runOfflineScenario(scenario) {
     };
   };
   await validateOutlineHotels({ outline: fixture.outline }, scenario.input, hotelSearch, nearbySearch);
+  fixture.outline = P.normalizeLijiangCruiseOutline(fixture.outline);
   fixture.outline = P.enforceOutlineTransportPreference(profile, fixture.outline);
-  let items = P.enforceMovesAlignment(fixture.items, fixture.outline, undefined, profile);
+  let items = P.normalizeLijiangCruiseItems(fixture.items, fixture.outline);
+  items = P.enforceMovesAlignment(items, fixture.outline, undefined, profile);
   items = P.enforceFinalTimelineIntegrity(items, profile, fixture.outline);
   items = P.annotateHotelItems(items, fixture.outline);
   const inspected = inspectScenario(scenario, fixture.outline, items);
@@ -600,7 +666,11 @@ async function runScenario(scenario) {
     if (round === maxRounds) throw new Error(`${scenario.name} 超过 ${maxRounds} 轮仍未完成`);
   }
 
-  const inspected = inspectScenario(scenario, outline, allItems);
+  // 真实生产流程每一轮都会把“已落库旧天 + 本轮新天”交给同一套合并审计。
+  // 测试也要走这一步，否则跨轮生成的同一天补条目会被简单 concat，
+  // 误报重复日出/重复交通，且不能代表最终落库结果。
+  const finalItems = P.auditMergedDetailItems(allItems, outline);
+  const inspected = inspectScenario(scenario, outline, finalItems);
   const issues = inspected.issues;
   const verbose = process.argv.includes('--verbose');
   console.log(`\n--- ${scenario.name} 逐日生成结果（每天检查顺序、缺时、重叠与返程闭环）---`);
@@ -616,6 +686,16 @@ async function runScenario(scenario) {
     }
   });
   const alarms = final && final.alarms || [];
+  const bookingAlarms = alarms.filter((alarm) => ['train', 'plane', 'bus', 'ticket', 'hotel'].includes(alarm.type));
+  const missingUsage = bookingAlarms.filter((alarm) => !String(alarm.usageInfo || '').trim());
+  if (missingUsage.length) issues.push(`${missingUsage.length} 条分类闹钟缺少实际使用日期/时间信息`);
+  const linkedAlarmCounts = new Map();
+  bookingAlarms.forEach((alarm) => {
+    if (!alarm.linkedItemId) return;
+    linkedAlarmCounts.set(String(alarm.linkedItemId), (linkedAlarmCounts.get(String(alarm.linkedItemId)) || 0) + 1);
+  });
+  const duplicateLinked = [...linkedAlarmCounts.entries()].filter(([, count]) => count > 1);
+  if (duplicateLinked.length) issues.push(`${duplicateLinked.length} 个票务/酒店行程条目生成了重复闹钟`);
   const alarmCounts = alarms.reduce((counts, alarm) => {
     counts[alarm.type || 'other'] = (counts[alarm.type || 'other'] || 0) + 1;
     return counts;
@@ -625,7 +705,7 @@ async function runScenario(scenario) {
     && !/门票|购票|放票|竹筏|游船|漂流|缆车|索道|温泉|演出/.test(`${alarm.title || ''} ${alarm.bookingInfo || ''}`));
   if (alarmIssues.length) issues.push(`${alarmIssues.length} 条普通交通被错误归成门票提醒`);
   alarmIssues.forEach((alarm) => {
-    const linked = (allItems || []).find((item) => item.itemId && item.itemId === alarm.linkedItemId);
+    const linked = (finalItems || []).find((item) => item.itemId && item.itemId === alarm.linkedItemId);
     console.error(`  错误门票提醒：「${alarm.title}」关联=${linked ? `${linked.category}/${linked.transportType || ''} ${linked.activity}` : '无行程条目'}`);
   });
   const hotelAlarms = alarms.filter((alarm) => alarm.type === 'hotel');
@@ -634,7 +714,7 @@ async function runScenario(scenario) {
   }
   const verifiedHotels = (outline.days || []).filter((day) => day.hotelPoiVerified).length;
   const reportDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'travel-route-'));
-  fs.writeFileSync(path.join(reportDir, 'result.json'), JSON.stringify({ input, outline, items: allItems, alarms, issues }, null, 2));
+  fs.writeFileSync(path.join(reportDir, 'result.json'), JSON.stringify({ input, outline, items: finalItems, alarms, issues }, null, 2));
   console.log(`完整实测记录：${path.join(reportDir, 'result.json')}`);
   console.log(`\n行前/购票提醒数量：${JSON.stringify(alarmCounts)}；酒店提醒 ${hotelAlarms.length} 条；核验酒店 POI ${verifiedHotels} 家；错误门票分类 ${alarmIssues.length} 条`);
   if (issues.length) {

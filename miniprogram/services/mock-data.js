@@ -272,6 +272,7 @@ const MOCK_ALARMS = [
     title: '抢漓江四星船票（10月3日）',
     ...alarmAt(60),   // 1 小时后
     leadMinutes: 5,
+    usageInfo: '使用时间：2026-10-03 08:30-13:30；漓江四星游船（竹江码头）',
     note: '船票最难抢，每天 11:00、16:00 更新余票',
   },
   {
@@ -279,6 +280,7 @@ const MOCK_ALARMS = [
     title: '订阳朔酒店（10月3-5日）',
     ...alarmAt(120),  // 2 小时后
     leadMinutes: 5,
+    usageInfo: '住宿：2026-10-03 至 2026-10-06；阳朔酒店',
     note: '建议住遇龙河/十里画廊',
   },
   {
@@ -286,6 +288,7 @@ const MOCK_ALARMS = [
     title: '订德天瀑布门票',
     ...alarmAt(180),  // 3 小时后
     leadMinutes: 10,
+    usageInfo: '使用时间：2026-10-06 15:00-17:00；德天跨国瀑布',
     note: '',
   },
   {

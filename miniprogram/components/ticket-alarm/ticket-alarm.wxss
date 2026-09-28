@@ -2,9 +2,9 @@
   margin-bottom: 16rpx;
 }
 
-/* 已过期：整体置灰 */
+/* 提醒时间已到但尚未完成：仍是进行中，不按“过期”置灰 */
 .alarm-past {
-  opacity: 0.5;
+  opacity: 1;
 }
 
 .alarm-completed {
@@ -54,32 +54,72 @@
   line-height: 1.6;
 }
 
+.alarm-usage {
+  margin-top: 14rpx;
+  padding: 14rpx 16rpx;
+  background: #f0f7ff;
+  border-radius: 8rpx;
+  font-size: 25rpx;
+  color: #3478b9;
+  line-height: 1.55;
+}
+
 .alarm-actions {
-  display: flex;
-  justify-content: flex-end;
+  width: 100%;
   margin-top: 16rpx;
 }
 
-.action-btn {
-  padding: 10rpx 24rpx;
+.action-row {
+  display: flex;
+  width: 100%;
+}
+
+.action-cell {
+  flex: 1;
+  min-width: 0;
+  min-height: 52rpx;
+  box-sizing: border-box;
+  margin-right: 12rpx;
   border-radius: 32rpx;
   font-size: 24rpx;
-  margin-left: 16rpx;
+  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background: var(--primary-light);
   color: var(--primary);
 }
 
-.action-btn.primary {
+.action-cell:last-child {
+  margin-right: 0;
+}
+
+.action-icon-row {
+  margin-bottom: 8rpx;
+}
+
+.action-icon-row .action-cell {
+  padding: 8rpx 0;
+  font-size: 30rpx;
+}
+
+.action-text-row .action-cell {
+  padding: 9rpx 2rpx;
+  font-size: 22rpx;
+  white-space: nowrap;
+}
+
+.action-cell.primary {
   background: var(--primary);
   color: #fff;
 }
 
-.action-btn.danger {
+.action-cell.danger {
   background: #ffebee;
   color: var(--danger);
 }
 
-.action-btn.complete {
+.action-cell.complete {
   background: #e8f7ed;
   color: #29964b;
 }

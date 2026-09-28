@@ -100,7 +100,7 @@ function saveFired(map) {
 }
 
 /**
- * 触发闹钟（phase: 'advance' 提前提醒 | 'due' 到点提醒）
+ * 触发闹钟：每条事项只在用户设置的提前时刻提醒一次
  * 只负责震动+弹窗；已触发标记由调用方写入
  */
 function fireAlarm(alarm, phase) {
@@ -123,7 +123,8 @@ function fireAlarm(alarm, phase) {
 }
 
 /**
- * 检查所有闹钟：提前 x 分钟一次 + 到点一次，各只提醒一回
+ * 检查所有闹钟：每条事项只在 fireAt - leadMinutes 的时刻提醒一次，
+ * 不再额外生成/触发“到点”第二条提醒。
  */
 function checkAlarms() {
   const alarms = loadAlarms().map(normalizeAlarm);
@@ -138,19 +139,11 @@ function checkAlarms() {
     const remindAt = alarm.remindAt;
     if (!actionAt || !remindAt) return;
 
-    // 阶段一：按每条事项的 leadMinutes 提前提醒。
-    const advKey = alarm._id + '__adv';
-    if (now >= remindAt && now < actionAt && !fired[advKey]) {
+    // 唯一提醒：按每条事项的 leadMinutes 在提醒时刻触发。
+    const remindKey = alarm._id + '__remind';
+    if (now >= remindAt && !fired[remindKey]) {
       fireAlarm(alarm, 'advance');
-      fired[advKey] = Date.now();
-      changed = true;
-    }
-
-    // 阶段二：到实际办理时刻再提醒一次。
-    const dueKey = alarm._id + '__due';
-    if (now >= actionAt && now <= actionAt + 10 * 60 * 1000 && !fired[dueKey]) {
-      fireAlarm(alarm, 'due');
-      fired[dueKey] = Date.now();
+      fired[remindKey] = Date.now();
       changed = true;
     }
   });

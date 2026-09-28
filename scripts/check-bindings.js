@@ -300,13 +300,14 @@ ok('大纲 prompt 写清"行李随人走"', /行李随人走/.test(planJs));
 ok('细化 prompt 按住宿地判定行李走法（第 16 条）', /16\. \*\*行李处理/.test(planJs) && /sameBase/.test(planJs));
 ok('换住处禁止把行李留在上一家酒店', /禁止写"把大件行李寄存在/.test(planJs));
 ok('行李规则有代码兜底且挂在 sanitize 之后', /function enforceLuggageRules/.test(planJs)
-  && /items = enforceLuggageRules\(items, outline\)/.test(planJs));
+  && /items = enforceLuggageRules\(items, outline, p\)/.test(planJs));
 ok('已确认大交通有确定性对齐兜底（车次错时刻/漏排/重复/起终点错都能拽回）',
   /function enforceMovesAlignment/.test(planJs)
   && /时刻漂移/.test(planJs) && /wantS != null/.test(planJs)
   && /全天未安排，补一条/.test(planJs));
 ok('细化清洗链按序挂全（对齐→去重→起点→接驳→早餐→禁午睡→晚间→餐次纠偏→闭环→边缘顺序→交通偏好→停车→按分钟排序）',
-  /items = enforceMovesAlignment\(sanitizeItems/.test(planJs)
+  /let items = normalizeLijiangCruiseItems\(sanitizeItems/.test(planJs)
+    && /items = enforceMovesAlignment\(items, outline/.test(planJs)
     && /items = dedupeTransports\(items\);/.test(planJs)
     && /items = enforceDayStartLocation\(items, outline, p\)/.test(planJs)
     && /items = enforceOriginAccess\(items, p, outline, roundDays\)/.test(planJs)
@@ -315,7 +316,7 @@ ok('细化清洗链按序挂全（对齐→去重→起点→接驳→早餐→�
     && /items = enforceEveningPlan\(items, outline, p\)/.test(planJs)
     && /items = fixMealLabels\(items, outline\)/.test(planJs)
     && /items = enforceDayClosure\(items, outline, p\)/.test(planJs)
-    && /items = enforceLuggageRules\(items, outline\)/.test(planJs)
+    && /items = enforceLuggageRules\(items, outline, p\)/.test(planJs)
     && /items = enforceTripEdgeOrder\(items, p, outline, roundDays\)/.test(planJs)
     && /items = enforceTransportPreference\(items, p\)/.test(planJs)
     && /items = removeOptionalRouteDetours\(items\)/.test(planJs)

@@ -7,6 +7,69 @@ const codeOf = (row) => (String(row && row.activity || '').match(/\b[A-Z]{1,2}\d
 const rail = (row) => row && row.category === 'transport' && /train|plane|火车|动车|高铁|航班|列车/.test((row.transportType || '') + ' ' + (row.activity || ''));
 const infoOf = (row) => [[row.startLocation, row.endLocation].filter(Boolean).join('→'),
   codeOf(row), [row.startTime, row.endTime].filter(Boolean).join('-')].filter(Boolean).join(' ');
+const typeOf = (row) => {
+  const text = `${row && row.transportType || ''} ${row && row.activity || ''}`;
+  if (row && row.category === 'hotel') return 'hotel';
+  if ((row && row.category === 'ticket') || /门票|预约|船票|游船|竹筏|漂流|索道|缆车/.test(text)) return 'ticket';
+  if (/plane|航班|飞机/.test(text)) return 'plane';
+  if (/train|火车|动车|高铁|列车/.test(text)) return 'train';
+  if (/bus|大巴|班车|直通车/.test(text)) return 'bus';
+  return '';
+};
+const dateShift = (date, offset) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) return '';
+  const d = new Date(`${date}T00:00:00+08:00`);
+  if (isNaN(d.getTime())) return '';
+  d.setUTCDate(d.getUTCDate() + Number(offset || 0));
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+};
+const sameName = (a, b) => {
+  const x = String(a || '').replace(/[\s市县区镇街道酒店民宿客栈宾馆]/g, '');
+  const y = String(b || '').replace(/[\s市县区镇街道酒店民宿客栈宾馆]/g, '');
+  return !!x && !!y && (x === y || x.includes(y) || y.includes(x));
+};
+function dateForItem(row, trip) {
+  const di = Number(row && row.dayIndex || 0);
+  const outlineDay = trip && trip.outline && trip.outline.days && trip.outline.days[di];
+  return String((outlineDay && outlineDay.date) || dateShift(trip && trip.startDate, di) || '').trim();
+}
+function usageInfoForItem(row, trip) {
+  const it = row || {};
+  const type = typeOf(it);
+  const date = dateForItem(it, trip);
+  const time = it.startTime ? `${it.startTime}${it.endTime ? `-${it.endTime}` : ''}` : '时段待核实';
+  if (type === 'hotel') {
+    const hotel = String(it.endLocation || it.bookingInfo || it.activity || '酒店').trim();
+    let lastDay = Number(it.dayIndex || 0);
+    const allItems = Array.isArray(trip && trip.items) ? trip.items : [];
+    for (let i = lastDay + 1; i < (trip && trip.outline && trip.outline.days || []).length; i++) {
+      const outlineDay = trip.outline.days[i] || {};
+      const candidate = outlineDay.hotel || outlineDay.overnight || outlineDay.city;
+      if (candidate && sameName(candidate, hotel)) lastDay = i;
+      else break;
+    }
+    // 没有 outline 的旧行程，按连续同名酒店条目推断住宿区间。
+    if (lastDay === Number(it.dayIndex || 0)) {
+      for (let i = Number(it.dayIndex || 0) + 1; i < 32; i++) {
+        const next = allItems.find((item) => Number(item && item.dayIndex || 0) === i && item.category === 'hotel');
+        if (!next || !sameName(next.endLocation || next.bookingInfo, hotel)) break;
+        lastDay = i;
+      }
+    }
+    const checkout = dateForItem({ dayIndex: lastDay + 1 }, trip) || String(trip && trip.endDate || '').slice(0, 10);
+    return `住宿：${date || '入住日期待核实'} 至 ${checkout || '退房日期待核实'}；${hotel}`.slice(0, 180);
+  }
+  if (type === 'train' || type === 'plane' || type === 'bus') {
+    const route = [it.startLocation, it.endLocation].filter(Boolean).join('→');
+    const code = codeOf(it);
+    return `乘车日期：${date || '日期待核实'}；时间：${time}；${code || '班次待核实'}${route ? `；路线：${route}` : ''}`.slice(0, 180);
+  }
+  if (type === 'ticket') {
+    const name = String(it.activity || it.bookingInfo || it.endLocation || '门票/体验').trim();
+    return `使用时间：${date || '日期待核实'} ${time}；${name}`.slice(0, 180);
+  }
+  return date ? `关联日期：${date}${it.startTime ? ` ${time}` : ''}` : '';
+}
 function replaceLocation(row, field, before, after) {
   if (!before || !after || before === after || row[field] !== before) return;
   row[field] = after;
@@ -95,4 +158,4 @@ function synchronizeTrip(trip, editedItems) {
   });
   return Object.assign({ items }, outline ? { outline } : {});
 }
-module.exports = { synchronizeTrip };
+module.exports = { synchronizeTrip, usageInfoForItem };

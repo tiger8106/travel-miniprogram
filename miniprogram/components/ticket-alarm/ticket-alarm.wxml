@@ -12,15 +12,26 @@
 
   <view class="alarm-action-time">办理：{{item.actionFriendly || item.friendly}}</view>
 
+  <view wx:if="{{item.usageInfo}}" class="alarm-usage">{{item.usageInfo}}</view>
+
   <view wx:if="{{item.bookingInfo}}" class="alarm-note">关联信息：{{item.bookingInfo}}</view>
 
   <view wx:if="{{item.note}}" class="alarm-note">{{item.note}}</view>
 
-  <view class="alarm-actions">
-    <view class="action-btn primary" bindtap="onTapCalendar">📅 日历</view>
-    <view wx:if="{{devMode}}" class="action-btn" bindtap="onTapTest">🔔 测试</view>
-    <view class="action-btn complete" bindtap="onTapComplete">{{item.completed ? '↩ 恢复待办' : '✓ 已完成'}}</view>
-    <view class="action-btn" bindtap="onTapEdit">✏️ 编辑</view>
-    <view class="action-btn danger" bindtap="onTapDelete">🗑 删除</view>
+  <view class="alarm-actions {{devMode ? 'actions-with-test' : ''}}">
+    <view class="action-row action-icon-row">
+      <view class="action-cell primary" bindtap="onTapCalendar"><text class="action-icon">📅</text></view>
+      <view wx:if="{{devMode}}" class="action-cell" bindtap="onTapTest"><text class="action-icon">🔔</text></view>
+      <view class="action-cell complete" bindtap="onTapComplete"><text class="action-icon">{{item.completed ? '↩' : '✓'}}</text></view>
+      <view class="action-cell" bindtap="onTapEdit"><text class="action-icon">✏️</text></view>
+      <view class="action-cell danger" bindtap="onTapDelete"><text class="action-icon">🗑</text></view>
+    </view>
+    <view class="action-row action-text-row">
+      <view class="action-cell primary" bindtap="onTapCalendar">日历</view>
+      <view wx:if="{{devMode}}" class="action-cell" bindtap="onTapTest">测试</view>
+      <view class="action-cell complete" bindtap="onTapComplete">{{item.completed ? '恢复待办' : '已完成'}}</view>
+      <view class="action-cell" bindtap="onTapEdit">编辑</view>
+      <view class="action-cell danger" bindtap="onTapDelete">删除</view>
+    </view>
   </view>
 </view>
