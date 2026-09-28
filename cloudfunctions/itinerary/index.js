@@ -5,8 +5,8 @@ const cloud = require('wx-server-sdk');
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
 const COL = 'trips';
-const ITINERARY_VERSION = 'v1.3-booking-dependencies';
-const { synchronizeTrip } = require('./booking-sync');
+const ITINERARY_VERSION = 'v1.4-booking-usage-sync';
+const { synchronizeTrip, usageInfoForItem } = require('./booking-sync');
 
 function bookingTypeForItem(item) {
   const it = item || {};
@@ -93,7 +93,7 @@ function syncHotelReferencesInItems(oldItems, newItems) {
   });
 }
 
-async function syncTripItemBookings(db, openid, tripId, oldItems, newItems) {
+async function syncTripItemBookings(db, openid, tripId, oldItems, newItems, trip) {
   const alarmsRes = await db.collection('ticket_alarms').where({ _openid: openid, tripId }).limit(500).get();
   const alarms = alarmsRes.data || [];
   const oldRows = Array.isArray(oldItems) ? oldItems : [];
@@ -128,6 +128,7 @@ async function syncTripItemBookings(db, openid, tripId, oldItems, newItems) {
       updates.push(() => db.collection('ticket_alarms').doc(alarm._id).update({ data: {
         title,
         bookingInfo: after.slice(0, 160),
+        usageInfo: usageInfoForItem(next, Object.assign({}, trip || {}, { items: nextRows })).slice(0, 180),
         linkedItemId: String(next.itemId || key).slice(0, 100),
         dayIndex: Number(next.dayIndex || 0),
         alarmKey,
@@ -248,7 +249,7 @@ async function update(db, openid, { tripId, patch }) {
   await db.collection(COL).doc(tripId).update({ data: safePatch });
   if (patch.items !== undefined) {
     try {
-      await syncTripItemBookings(db, openid, tripId, cur.data.items || [], safePatch.items);
+      await syncTripItemBookings(db, openid, tripId, cur.data.items || [], safePatch.items, Object.assign({}, cur.data, { items: safePatch.items }));
     } catch (e) {
       console.error('[itinerary] 行程已保存，但关联待办同步失败:', e.message);
     }

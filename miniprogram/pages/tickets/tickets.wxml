@@ -85,6 +85,7 @@
                 <text class="now-day">{{item.typeLabel}}</text>
               </view>
               <view class="now-title-text">{{item.title}}</view>
+              <view wx:if="{{item.usageInfo}}" class="now-usage">{{item.usageInfo}}</view>
               <view class="now-action-time">办理时间：{{item.actionFriendly}}</view>
               <view wx:if="{{item.note}}" class="now-note">{{item.note}}</view>
               <view class="now-complete" data-idx="{{index}}" catchtap="onToggleComplete">✓ 标记已完成</view>

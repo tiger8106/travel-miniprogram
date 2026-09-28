@@ -15,6 +15,13 @@
   padding: 8rpx 24rpx;
 }
 
+.now-usage {
+  margin-top: 8rpx;
+  color: #3478b9;
+  font-size: 23rpx;
+  line-height: 1.5;
+}
+
 .settings-row {
   display: flex;
   align-items: center;

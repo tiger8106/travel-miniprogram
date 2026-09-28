@@ -19,7 +19,7 @@ const COL_TASK = 'parse_tasks';
 const GEOCODE_DEADLINE_MS = 35 * 1000;
 
 // 解析引擎版本：返回给前端展示，用于确认线上跑的是不是最新代码
-const PARSE_VERSION = 'v4.1-normalize-sync';
+const PARSE_VERSION = 'v4.2-alarm-usage';
 const DEFAULT_ALARM_LEAD_MINUTES = 5;
 
 function alarmType(type) {
@@ -32,8 +32,41 @@ function alarmKey(a) {
   return `${alarmType(a && a.type)}|${date}|${title.slice(0, 100)}`;
 }
 
+// 上传攻略中的原文或 LLM 结果可能同时写“提前准备”和“到点办理”。
+// 它们描述的是同一件事，最终只保留实际办理时刻那一条，由 leadMinutes 统一计算提醒时刻。
+function dedupeAlarmRecords(list) {
+  const groups = new Map();
+  const clean = (value) => String(value || '')
+    .replace(/(?:提前\s*\d+\s*分钟|提前准备|准备|即将到点|到点提醒|开抢|预计开售|预计开放预约\/购票|立即查看并(?:预约|购买)|开始盯|关注|查询|预约|购票|购买|预订|抢票|抢)/g, '')
+    .replace(/[\s\u3000：:（）()【】\[\]，,；;→⇒>—-]/g, '')
+    .trim();
+  (list || []).forEach((alarm) => {
+    if (!alarm) return;
+    const item = Object.assign({}, alarm);
+    const identity = item.linkedItemId
+      ? `linked|${item.linkedItemId}`
+      : `text|${alarmType(item.type)}|${Number(item.dayIndex || 0)}|${clean(item.bookingInfo || item.title)}`;
+    const previous = groups.get(identity);
+    if (!previous) {
+      groups.set(identity, item);
+      return;
+    }
+    const winner = Number(item.fireAt || 0) >= Number(previous.fireAt || 0) ? item : previous;
+    const loser = winner === item ? previous : item;
+    winner.note = [winner.note, loser.note]
+      .filter(Boolean)
+      .filter((value, index, values) => values.indexOf(value) === index)
+      .join('；')
+      .slice(0, 500);
+    winner.bookingInfo = winner.bookingInfo || loser.bookingInfo || '';
+    winner.linkedItemId = winner.linkedItemId || loser.linkedItemId || '';
+    groups.set(identity, winner);
+  });
+  return [...groups.values()];
+}
+
 function prepareAlarmRecords(list, openid, tripId, now) {
-  return (list || []).map((a) => {
+  return dedupeAlarmRecords(list).map((a) => {
     const fireAt = Number(a.fireAt) || 0;
     const n = Number(a.leadMinutes);
     const leadMinutes = isFinite(n) && n > 0 ? Math.max(1, Math.min(60, Math.round(n))) : DEFAULT_ALARM_LEAD_MINUTES;
@@ -123,12 +156,12 @@ function cleanAlarms(rawAlarms, openid, now) {
 
   // 去重：同一时刻 + 相同标题（忽略空格差异）只保留一条
   const seenAlarm = new Set();
-  return alarms.filter((a) => {
+  return dedupeAlarmRecords(alarms.filter((a) => {
     const key = a.fireAt + '|' + a.title.replace(/\s+/g, '');
     if (seenAlarm.has(key)) return false;
     seenAlarm.add(key);
     return true;
-  });
+  }));
 }
 
 exports.main = async (event, context) => {

@@ -6,8 +6,8 @@ cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
 const COL = 'ticket_alarms';
 const COL_TRIP = 'trips';
-const ALARM_VERSION = 'v1.4-booking-dependencies';
-const { synchronizeTrip } = require('./booking-sync');
+const ALARM_VERSION = 'v1.5-single-reminder-usage';
+const { synchronizeTrip, usageInfoForItem } = require('./booking-sync');
 const {
   DEFAULT_LEAD_MINUTES,
   clampLead,
@@ -198,6 +198,7 @@ async function save(db, openid, { tripId, alarms }) {
         type: normalizeType(a.type),
         dayIndex: Number.isInteger(Number(a.dayIndex)) ? Number(a.dayIndex) : undefined,
         bookingInfo: String(a.bookingInfo || '').slice(0, 160),
+        usageInfo: String(a.usageInfo || '').slice(0, 180),
         linkedItemId: String(a.linkedItemId || '').slice(0, 100),
         source: 'manual',
         notified: false,
@@ -223,9 +224,28 @@ async function list(db, openid, tripId) {
     .orderBy('fireAt', 'asc')
     .limit(200)
     .get();
+  const tripRes = tripId ? await db.collection(COL_TRIP).doc(tripId).get().catch(() => null) : null;
+  const trip = tripRes && tripRes.data;
   return {
     code: 0,
-    data: (res.data || []).map((a) => normalizeAlarm(a, DEFAULT_LEAD_MINUTES)),
+    data: (res.data || []).map((a) => {
+      const tripItems = trip && Array.isArray(trip.items) ? trip.items : [];
+      let linked = a.linkedItemId
+        ? tripItems.find((item) => String(item && item.itemId || '') === String(a.linkedItemId))
+        : null;
+      if (!linked) {
+        const sameDay = tripItems.filter((item) => Number(item && item.dayIndex || 0) === Number(a.dayIndex || 0)
+          && bookingTypeForItem(item) === a.type);
+        const bookingText = String(a.bookingInfo || '').trim();
+        const textMatches = bookingText
+          ? sameDay.filter((item) => `${item.activity || ''} ${item.bookingInfo || ''} ${item.startLocation || ''} ${item.endLocation || ''}`.includes(bookingText))
+          : [];
+        linked = textMatches.length === 1 ? textMatches[0] : (sameDay.length === 1 ? sameDay[0] : null);
+      }
+      const usageInfo = String(a.usageInfo || '').trim()
+        || (linked ? usageInfoForItem(linked, trip) : '');
+      return normalizeAlarm(Object.assign({}, a, usageInfo ? { usageInfo } : {}), DEFAULT_LEAD_MINUTES);
+    }),
   };
 }
 
@@ -265,6 +285,7 @@ async function update(db, openid, { alarmId, patch }) {
   if (patch.title !== undefined) safePatch.title = String(patch.title).slice(0, 100);
   if (patch.note !== undefined) safePatch.note = String(patch.note).slice(0, 500);
   if (patch.bookingInfo !== undefined) safePatch.bookingInfo = String(patch.bookingInfo).trim().slice(0, 160);
+  if (patch.usageInfo !== undefined) safePatch.usageInfo = String(patch.usageInfo).trim().slice(0, 180);
   if (patch.dayIndex !== undefined && Number.isInteger(Number(patch.dayIndex))) safePatch.dayIndex = Number(patch.dayIndex);
   if (patch.linkedItemId !== undefined) safePatch.linkedItemId = String(patch.linkedItemId).slice(0, 100);
   if (patch.type !== undefined) safePatch.type = normalizeType(patch.type);
@@ -304,6 +325,8 @@ async function update(db, openid, { alarmId, patch }) {
       if (linkedItem) {
         safePatch.linkedItemId = String(linkedItem.itemId || current.linkedItemId || '').slice(0, 100);
         safePatch.dayIndex = Number(linkedItem.dayIndex || 0);
+        const trip = await db.collection(COL_TRIP).doc(current.tripId).get().catch(() => null);
+        if (trip && trip.data) safePatch.usageInfo = usageInfoForItem(linkedItem, Object.assign({}, trip.data, { items: trip.data.items || [] })).slice(0, 180);
       }
       if (patch.bookingInfo !== undefined && patch.title === undefined) {
         safePatch.title = updateBookingTitle(current.title, String(current.bookingInfo || ''), safePatch.bookingInfo, nextType);

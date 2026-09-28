@@ -27,7 +27,7 @@ Component({
           hotel: '🏨', bus: '🚌', other: '⏰',
         })[item.type] || '⏰',
         statusLabel: ({
-          completed: '已完成', past: '已逾期', soon: '即将提醒', future: '未来', unknown: '未知',
+          completed: '已完成', past: '进行中', soon: '即将提醒', future: '未来', unknown: '未知',
         })[item.status] || '未知',
       });
     },
