@@ -3,10 +3,11 @@
 // 当 services/api.js 里 USE_MOCK = false 时启用本文件
 const { callFn, uploadFile, downloadFile } = require('../utils/request');
 const config = require('../config');
+const alarm = require('../utils/alarm');
 
 // 攻略解析
 async function parseTravelPlan(fileID) {
-  return callFn('parseTravelPlan', { fileID });
+  return callFn('parseTravelPlan', { fileID, leadMinutes: alarm.getAdvanceMin() });
 }
 
 // 攻略分步解析：云函数 60s 上限调不高，把解析拆成六步由前端编排——
@@ -14,7 +15,7 @@ async function parseTravelPlan(fileID) {
 // → infer（清洗+反推待办）→ geocode（地图定位，循环到完）→ commit（入库）。
 // 每步都远小于 60s，失败可从断点重试。
 async function parseTravelPlanStep(payload) {
-  return callFn('parseTravelPlan', payload);
+  return callFn('parseTravelPlan', Object.assign({ leadMinutes: alarm.getAdvanceMin() }, payload));
 }
 
 // 实时地理编码：地点名 → { lon, lat }

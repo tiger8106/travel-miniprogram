@@ -28,7 +28,10 @@ fs.readFileSync(envPath, 'utf-8').split('\n').forEach((line) => {
   process.env[m[1]] = v;
 });
 
+// 只调用闹钟文案纯函数时给小程序 API 一个最小桩，避免测试依赖开发者工具。
+global.wx = global.wx || { getStorageSync: () => 5 };
 const P = require('../cloudfunctions/generatePlan/plan.js');
+const alarmView = require('../miniprogram/utils/alarm.js');
 const G = require('../cloudfunctions/generatePlan/geocode.js');
 const { validateOutlineHotels } = require('../cloudfunctions/generatePlan/hotel-validation.js');
 const { parseJSONFromText } = require('../cloudfunctions/generatePlan/llm.js');
@@ -53,6 +56,17 @@ console.log('============================================');
 // 1. 天数计算：9-30 ~ 10-07 = 8 天（与参考攻略一致）
 ok(dayDiff('2026-09-30', '2026-10-07') === 8, 'dayDiff 9-30~10-07 = 8 天', dayDiff('2026-09-30', '2026-10-07'));
 ok(dayDiff('2026-10-01', '2026-10-01') === 1, '同一天 = 1 天');
+ok(/2026-10-03/.test(alarmView.alarmKeyInfoOf({
+  usageInfo: '使用时间：2026-10-03 08:30-13:30；漓江游船',
+  note: '这里是很长的生成说明，不应该在弹窗里完整展示。',
+})), '闹钟展示优先保留票务使用时间摘要');
+ok(alarmView.alarmPopupContent({
+  title: '抢漓江游船票', actionAt: Date.now() + 3600000,
+  usageInfo: '使用时间：2026-10-03 08:30-13:30；漓江游船',
+  note: '这是很长的备注，弹窗不应整段塞满文字。',
+}, 'advance').split('\n').length <= 4
+  && !alarmView.alarmPopupContent({ title: '抢票', actionAt: Date.now() + 3600000, note: '这是很长的备注，弹窗不应整段塞满文字。' }, 'advance').includes('弹窗不应整段塞满文字'),
+  '闹钟弹窗只显示标题、提醒时间和关键摘要');
 const trailingJson = parseJSONFromText('模型结果：{"t":"路线 } 说明","ds":[{"d":"2026-12-31"}]} 以上是行程大纲。');
 ok(trailingJson.t === '路线 } 说明' && trailingJson.ds[0].d === '2026-12-31',
   '完整 JSON 后追加解释文字时仍能提取首个结构（字符串里的括号不影响解析）', JSON.stringify(trailingJson));
@@ -223,6 +237,18 @@ const typedBookingAlarms = P.normalizeBookingAlarmKinds([
   ok(duplicateSunriseItems.filter((item) => /西山韶乐/.test(item.activity || '') && /日出/.test(item.activity || '')).length === 1
     && duplicateSunriseItems[0].startTime === '06:20',
   '龙脊日出补齐按天去重并保持在当天时间线的正确位置');
+  const solarSunset = P.ensureLongjiSunsetDetail([
+    { dayIndex: 0, category: 'sight', activity: '游览金佛顶', startTime: '15:30', endTime: '17:30' },
+    { dayIndex: 0, category: 'food', activity: '晚餐', startTime: '17:40', endTime: '18:40' },
+  ], { days: [{ date: '2026-10-03', overnight: '金坑大寨', highlights: ['金佛顶日落'] }] });
+  const sunsetRow = solarSunset.find((item) => /金佛顶/.test(item.activity || ''));
+  const sunsetAt = P.longjiSolarMinute('2026-10-03', true);
+  ok(sunsetRow && /日落/.test(sunsetRow.activity || '')
+    && Math.abs(P.toMin(sunsetRow.startTime) - (sunsetAt - 30)) <= 1
+    && solarSunset.every((item) => item === sunsetRow
+      || P.toMin(item.endTime) <= P.toMin(sunsetRow.startTime)
+      || P.toMin(item.startTime) >= P.toMin(sunsetRow.endTime)),
+  '龙脊日落按太阳时刻落到金佛顶，前后活动不重叠', JSON.stringify({ sunsetAt, sunsetRow, rows: solarSunset }));
   const cruiseOutline = P.normalizeLijiangCruiseOutline({ days: [{ city: '阳朔', overnight: '阳朔', highlights: ['漓江四星级游船（磨盘山码头）'], moves: [{ mode: 'ship', from: '磨盘山码头', to: '阳朔', note: '四星级游船' }] }] });
   ok(cruiseOutline.days[0].moves[0].from === '竹江码头'
     && !/四星[^；。]*磨盘山/.test(JSON.stringify(cruiseOutline)),
@@ -245,6 +271,13 @@ const typedBookingAlarms = P.normalizeBookingAlarmKinds([
   ], cruiseOutline);
   ok(cruiseDayItems.every((item) => !/磨盘山/.test(`${item.activity || ''} ${item.startLocation || ''} ${item.endLocation || ''}`)),
     '四星游船当天的前序接驳也同步改到竹江码头');
+  const threeStarCruise = P.normalizeLijiangCruiseOutline({ days: [{ city: '阳朔', overnight: '阳朔', highlights: ['漓江三星级游船'], moves: [
+    { mode: 'ship', from: '阳朔', to: '桂林', note: '三星级游船' },
+  ] }] });
+  ok(threeStarCruise.days[0].moves[0].from === '桂林'
+    && threeStarCruise.days[0].moves[0].to === '阳朔'
+    && /三星级.*桂林出发.*阳朔到达/.test(threeStarCruise.days[0].moves[0].note || ''),
+  '三星级游船方向统一为桂林出发到阳朔');
   const pierContextOutline = { days: [{ city: '阳朔', overnight: '阳朔', highlights: ['漓江游船'], moves: [
     { mode: 'ship', from: '竹江码头', to: '阳朔龙头山码头', startTime: '16:45', endTime: '19:45' },
   ] }] };
@@ -258,15 +291,114 @@ const typedBookingAlarms = P.normalizeBookingAlarmKinds([
     { moves: [{ mode: 'ship', from: '磨盘山码头', to: '阳朔水东门码头' }] },
   ] }, [{ dayIndex: 0, category: 'sight', activity: '乘坐漓江四星游船', startLocation: '竹江码头', endLocation: '阳朔水东门码头' }]);
   ok(syncedCruise.days[0].moves[0].from === '竹江码头', '详细阶段确认四星竹江后会同步回大纲游船段');
+  const inferredCruiseOutline = { days: [{ city: '阳朔', overnight: '阳朔西街',
+    highlights: ['漓江游船（九马画山）'], moves: [
+      { mode: 'ride', from: '龙脊梯田', to: '桂林磨盘山码头' },
+    ] }] };
+  const inferredCruiseItems = P.normalizeLijiangCruiseItems([
+    { dayIndex: 0, category: 'transport', transportType: 'ride', activity: '前往桂林磨盘山码头',
+      startLocation: '龙脊梯田', endLocation: '桂林磨盘山码头' },
+    { dayIndex: 0, category: 'ticket', activity: '抵达桂林竹江码头，确认四星级漓江游船',
+      startLocation: '竹江码头', endLocation: '' },
+    { dayIndex: 0, category: 'sight', transportType: 'plane', activity: '漓江游船航行至阳朔龙头山码头',
+      startLocation: '桂林磨盘山码头', endLocation: '阳朔龙头山码头' },
+  ], inferredCruiseOutline);
+  P.syncLijiangCruiseOutlineFromItems(inferredCruiseOutline, inferredCruiseItems);
+  const inferredCruise = inferredCruiseItems.find((item) => item.category === 'sight');
+  ok(inferredCruise && inferredCruise.transportType === 'ship'
+    && inferredCruise.startLocation === '竹江码头'
+    && /竹江码头/.test(inferredCruiseItems[0].endLocation || '')
+    && inferredCruiseOutline.days[0].moves[0].to === '竹江码头',
+  '同日票务/船段明确竹江时，磨盘山接驳、船段起点和交通类型一起校正');
+  const overnightMoveOutline = { days: [
+    { city: '明仕田园', overnight: '南宁', note: '下午乘车返回南宁', moves: [
+      { from: '德天瀑布', to: '明仕田园', mode: 'bus', startTime: '09:00', endTime: '10:00' },
+    ] },
+    { city: '南宁', overnight: '返程', moves: [] },
+  ] };
+  P.ensureOvernightMoveContinuity(overnightMoveOutline, normalizeInput({ transport: '高铁/动车优先' }));
+  const overnightRows = P.enforceOvernightArrivalItems([
+    { dayIndex: 0, startTime: '10:00', endTime: '12:00', category: 'sight',
+      activity: '游览明仕田园', startLocation: '明仕田园', endLocation: '明仕田园' },
+    { dayIndex: 0, startTime: '18:30', endTime: '19:30', category: 'food',
+      activity: '晚餐：南宁老友粉', startLocation: '壮族民居博物园', endLocation: '晚餐：南宁老友粉' },
+    { dayIndex: 0, startTime: '22:00', endTime: '22:30', category: 'hotel',
+      activity: '前往同上办理入住', startLocation: '明仕田园', endLocation: '同上' },
+  ].concat({ dayIndex: 0, startTime: '15:00', endTime: '18:00', category: 'transport',
+    activity: '乘旅游专线或大巴从明仕田园前往南宁', startLocation: '明仕田园', endLocation: '南宁', outlineMove: true }),
+  overnightMoveOutline, normalizeInput({ transport: '高铁/动车优先' }));
+  ok(overnightRows.every((item) => !/同上/.test(`${item.activity || ''} ${item.endLocation || ''}`))
+    && !overnightRows.some((item) => item.category === 'food' && item.startTime === '18:30')
+    && overnightRows.some((item) => item.category === 'hotel' && /南宁/.test(item.endLocation || '')),
+  '跨区离场后删除旧片区晚间活动，并把入住接到抵达南宁之后');
   const coreRoute = P.ensureLongjiDetailRoute([
     { dayIndex: 0, category: 'sight', startTime: '13:00', endTime: '14:30', activity: '游览千层天梯', startLocation: '千层天梯', endLocation: '千层天梯' },
     { dayIndex: 0, category: 'sight', startTime: '14:30', endTime: '16:00', activity: '游览金佛顶', startLocation: '金佛顶', endLocation: '金佛顶' },
   ], { days: [{ city: '龙脊梯田', overnight: '金坑大寨', highlights: ['西山韶乐', '千层天梯', '金佛顶'] }] });
   ok(coreRoute.some((item) => item.category === 'sight' && /西山韶乐/.test(item.activity)),
     '龙脊三点同日但漏写西山韶乐时会补核心游览项');
+  const duplicateLongjiCore = P.repairLongjiCoreTimeline([
+    { dayIndex: 0, category: 'sight', startTime: '13:00', endTime: '14:20', activity: '游览西山韶乐观景台' },
+    { dayIndex: 0, category: 'sight', startTime: '14:20', endTime: '16:00', activity: '游览千层天梯观景台' },
+    { dayIndex: 0, category: 'sight', startTime: '16:00', endTime: '17:00', activity: '在金佛顶观景台拍照' },
+    { dayIndex: 0, category: 'sight', startTime: '17:00', endTime: '18:00', activity: '从千层天梯上行至金佛顶观赏日落' },
+  ], { days: [{ city: '龙脊梯田', overnight: '金坑大寨', highlights: ['西山韶乐', '千层天梯', '金佛顶日落'] }] });
+  const duplicateGolden = duplicateLongjiCore.filter((item) => item.category === 'sight'
+    && /金佛顶/.test(item.activity || '') && !/不去|不安排|次日/.test(item.activity || ''));
+  ok(duplicateGolden.length === 1
+    && duplicateGolden[0].startTime === '17:00'
+    && !duplicateLongjiCore.some((item) => /金佛顶/.test(item.activity || '')
+      && /千层天梯/.test(item.activity || '') && item.startTime !== '17:00'),
+  '龙脊同日重复金佛顶合并为一段，并保留带日落的连续路线', JSON.stringify(duplicateLongjiCore));
+  const combinedLadderWithDirectGolden = P.repairLongjiCoreTimeline([
+    { dayIndex: 0, category: 'sight', startTime: '11:00', endTime: '12:00', activity: '游览西山韶乐观景台' },
+    { dayIndex: 0, category: 'sight', startTime: '16:30', endTime: '17:30', activity: '游览千层天梯观景台，沿单向步道前往金佛顶' },
+    { dayIndex: 0, category: 'sight', startTime: '17:57', endTime: '18:47', activity: '游览金佛顶观景台，预留观景与日落时间' },
+  ], { days: [{ city: '龙脊梯田', overnight: '金坑大寨', highlights: ['西山韶乐', '千层天梯', '金佛顶日落'] }] });
+  ok(combinedLadderWithDirectGolden.filter((item) => item.category === 'sight'
+    && /金佛顶/.test(item.activity || '')).length === 1
+    && combinedLadderWithDirectGolden.some((item) => /千层天梯/.test(item.activity || '')
+      && !/金佛顶/.test(item.activity || '')),
+  '龙脊千层天梯段含“前往金佛顶”时，独立金佛顶段仍只展示一次', JSON.stringify(combinedLadderWithDirectGolden));
+  const lateSunsetWait = P.repairLongjiCoreTimeline([
+    { dayIndex: 0, category: 'sight', startTime: '13:00', endTime: '14:00', activity: '游览西山韶乐观景台' },
+    { dayIndex: 0, category: 'sight', startTime: '14:10', endTime: '16:00', activity: '游览千层天梯观景台' },
+    { dayIndex: 0, category: 'sight', startTime: '17:57', endTime: '18:47', activity: '游览金佛顶观景台，预留观景与日落时间' },
+    { dayIndex: 0, category: 'other', startTime: '19:00', endTime: '20:00', activity: '从金佛顶下山返回西山韶乐附近民宿区域' },
+    { dayIndex: 0, category: 'food', startTime: '22:27', endTime: '23:57', activity: '在民宿附近享用晚餐' },
+    { dayIndex: 0, category: 'other', startTime: '23:57', endTime: '23:59', activity: '在金佛顶观景区域休息，等待日落' },
+  ], { days: [{ city: '龙脊梯田', overnight: '金坑大寨', highlights: ['西山韶乐', '千层天梯', '金佛顶日落'] }] });
+  ok(!lateSunsetWait.some((item) => /等待日落/.test(item.activity || '') && item.startTime === '23:57')
+    && lateSunsetWait.some((item) => item.category === 'food' && item.startTime === '20:07'),
+  '龙脊日落结束后的过期等待会删除，并把晚餐前移到合理时段', JSON.stringify(lateSunsetWait));
+  const protectedHighlightRows = P.removeUnplannedIntercityRows([
+    { dayIndex: 0, category: 'transport', startTime: '08:00', endTime: '09:00',
+      activity: '从明仕田园前往德天跨国瀑布景区', startLocation: '明仕田园', endLocation: '德天跨国瀑布景区' },
+    { dayIndex: 0, category: 'sight', startTime: '09:00', endTime: '12:00',
+      activity: '游览德天跨国瀑布，拍照打卡', startLocation: '明仕田园', endLocation: '德天跨国瀑布' },
+    { dayIndex: 0, category: 'transport', startTime: '12:00', endTime: '13:00',
+      activity: '模型误生成从南宁前往德天跨国瀑布', startLocation: '南宁', endLocation: '德天跨国瀑布景区' },
+  ], { days: [{ city: '德天瀑布', overnight: '硕龙镇', highlights: ['德天跨国瀑布'], moves: [
+    { from: '明仕田园', to: '德天跨国瀑布景区', mode: 'bus' },
+  ] }] });
+  ok(protectedHighlightRows.some((item) => item.category === 'sight' && /德天跨国瀑布/.test(item.activity || '')),
+    '大纲明确的景点游览项不会被错误跨城段的附带清理误删', JSON.stringify(protectedHighlightRows));
+  const cleanCruise = P.normalizeLijiangCruiseItems([
+    { dayIndex: 0, category: 'sight', transportType: 'ship',
+      activity: '在20元人民币背景图内，在兴坪古镇内，乘坐漓江四星级游船游览漓江',
+      startLocation: '竹江码头', endLocation: '阳朔龙头山码头', startTime: '09:00', endTime: '13:00' },
+    { dayIndex: 0, category: 'transport', activity: '从兴坪古镇前往阳朔县城',
+      startLocation: '兴坪古镇', endLocation: '阳朔县城', startTime: '16:30', endTime: '17:30' },
+  ], { days: [{ city: '阳朔', overnight: '阳朔', highlights: ['漓江四星级游船'], moves: [
+    { mode: 'ship', from: '竹江码头', to: '阳朔龙头山码头' },
+  ] }] });
+  ok(cleanCruise.length === 1
+    && !/在20元人民币背景图内|在兴坪古镇内/.test(cleanCruise[0].activity || ''),
+  '漓江船已抵阳朔后删除兴坪重复接驳，并清理船上景观前缀', JSON.stringify(cleanCruise));
   const luggageOutline = { days: [
     { city: '阳朔', overnight: '阳朔酒店' },
     { city: '南宁', overnight: '南宁酒店' },
+    { city: '返程', overnight: '返程' },
   ] };
   const luggageItems = [
     { dayIndex: 1, startTime: '08:00', endTime: '09:00', category: 'sight', activity: '遇龙河竹筏游览', startLocation: '阳朔酒店', endLocation: '遇龙河', note: '' },
@@ -561,6 +693,7 @@ const lugOutline = {
   days: [
     { date: '2026-10-01', city: '桂林', overnight: '桂林市区（两江四湖片区）' },
     { date: '2026-10-02', city: '阳朔', overnight: '阳朔' },
+    { date: '2026-10-03', city: '南宁', overnight: '南宁' },
   ],
 };
 const lug = (items) => P.enforceLuggageRules(
@@ -622,12 +755,182 @@ ok(r7.every((it) => !/取回寄存的行李/.test(it.note || '')),
   '否定句里的"寄存"（不寄存/严禁寄存/不可寄存/不能寄存）不算寄存，不冒出取回提醒',
   JSON.stringify(r7.map((it) => it.note)));
 
+const stalePickup = P.enforceLuggageRules([
+  { dayIndex: 1, startTime: '07:30', endTime: '08:00', activity: '退房，携带全部大件行李前往下一站', category: 'hotel', startLocation: '明仕民宿' },
+  { dayIndex: 1, startTime: '08:00', endTime: '09:30', activity: '前往德天瀑布', category: 'transport', startLocation: '明仕民宿', endLocation: '德天瀑布游客中心' },
+  { dayIndex: 1, startTime: '13:30', endTime: '14:00', activity: '取回在大新县明仕田园附近寄存的行李（若未寄存则忽略此步），前往车站', category: 'other', startLocation: '德天瀑布游客中心', endLocation: '车站' },
+], { days: [{ overnight: '明仕田园' }, { overnight: '南宁' }] }, normalizeInput({ extra: '' }));
+ok(!stalePickup.some((it) => /取回[^。；;]*寄存|明仕田园附近寄存/.test(`${it.activity || ''} ${it.note || ''}`)),
+  '没有真实寄存记录时，跨日“取回某地寄存行李”会改成随身携带，不制造回头路', JSON.stringify(stalePickup));
+
 let r8 = lug([
   { dayIndex: 0, startTime: '07:30', endTime: '08:00', activity: '大件行李留在酒店房间或寄存前台，轻装出发', category: 'hotel' },
   { dayIndex: 0, startTime: '09:00', endTime: '12:00', activity: '前往都江堰景区', category: 'transport' },
 ]);
 ok(!/取回寄存的行李/.test(r8[1].note || ''),
   '行李寄在本家酒店且今晚回同一家 → 不多嘴喊"取回"（川西冒烟实锤）', r8[1].note);
+
+const luggageStateOutline = { days: [
+  { overnight: '阳朔酒店', city: '阳朔' },
+  { overnight: '阳朔酒店', city: '阳朔' },
+  { overnight: '南宁酒店', city: '南宁' },
+] };
+const luggageState = P.enforceLuggageRules([
+  { dayIndex: 1, startTime: '08:00', endTime: '08:20', category: 'transport', activity: '带小包前往景区', startLocation: '阳朔酒店', endLocation: '遇龙河' },
+  { dayIndex: 1, startTime: '18:00', endTime: '18:30', category: 'hotel', activity: '返回阳朔酒店放下大件行李并休息', startLocation: '遇龙河', endLocation: '阳朔酒店' },
+  { dayIndex: 2, startTime: '08:00', endTime: '08:20', category: 'hotel', activity: '退房，把大件行李寄存在阳朔酒店前台', startLocation: '阳朔酒店', endLocation: '阳朔酒店' },
+  { dayIndex: 2, startTime: '08:30', endTime: '12:00', category: 'transport', activity: '前往南宁', startLocation: '阳朔酒店', endLocation: '南宁酒店' },
+], luggageStateOutline, normalizeInput({ extra: '' }));
+ok(!/放下大件行李|寄存/.test(luggageState.find((it) => it.dayIndex === 1 && it.category === 'hotel').activity || ''),
+  '连住同一酒店晚上返回时不重复生成“放下大件行李”', JSON.stringify(luggageState));
+ok(!/寄存/.test(luggageState.find((it) => it.dayIndex === 2 && it.category === 'hotel').activity || '')
+  && /退房请带走全部行李/.test(luggageState.find((it) => it.dayIndex === 2 && it.category === 'hotel').note || '')
+  && !luggageState.some((it) => /取回寄存的行李/.test(it.note || '')),
+  '不会把最后离开的旧酒店寄存写成要回头取，也不会与带走行李矛盾', JSON.stringify(luggageState));
+const newHotelDrop = P.enforceLuggageRules([
+  { dayIndex: 2, startTime: '12:00', endTime: '12:30', category: 'hotel', activity: '抵达南宁酒店办理入住并放下行李', startLocation: '阳朔', endLocation: '南宁酒店' },
+], luggageStateOutline, normalizeInput({ extra: '' }));
+ok(!/退房请带走全部行李|取回寄存的行李/.test(newHotelDrop[0].note || ''),
+  '抵达新酒店放行李不被误判成旧酒店寄存', newHotelDrop[0].note);
+const returnDayLocker = P.enforceLuggageRules([
+  { dayIndex: 0, startTime: '10:40', endTime: '11:10', category: 'ticket',
+    activity: '在景区游客中心办理入园手续，并在储物柜寄存随身背包，购票进入景区', note: '' },
+], { days: [{ overnight: '返程' }] }, normalizeInput({ extra: '' }));
+ok(returnDayLocker.every((item) => !/暂存|存放|存包|储物柜/.test(`${item.activity || ''} ${item.note || ''}`)
+    && /不安排寄存/.test(item.note || '')
+    && !/寄存/.test(item.activity || '')),
+  '返程日不保留景区储物柜/寄存背包描述', JSON.stringify(returnDayLocker));
+const countyStationNotHotel = P.enforceLuggageRules([
+  { dayIndex: 1, startTime: '07:30', endTime: '08:30', category: 'food',
+    activity: '早餐后退房并寄存大件行李于前台，前往景区',
+    startLocation: '旧住宿地', endLocation: '旧住宿地' },
+  { dayIndex: 1, startTime: '08:30', endTime: '09:30', category: 'transport',
+    activity: '前往山地景区', startLocation: '旧住宿地', endLocation: '山地景区' },
+  { dayIndex: 1, startTime: '14:30', endTime: '15:00', category: 'transport',
+    activity: '前往县城客运站', startLocation: '山地景区', endLocation: '同县客运站' },
+  { dayIndex: 1, startTime: '15:00', endTime: '15:30', category: 'transport',
+    activity: '在景区取回寄存物品（如有），前往同县客运站',
+    startLocation: '山地景区', endLocation: '同县客运站',
+    note: '游玩结束后返回旧住宿地取回寄存的行李，再按后续行程前往下一站' },
+], { days: [
+  { overnight: '旧住宿地' },
+  { overnight: '新城市酒店' },
+  { overnight: '返程' },
+] }, normalizeInput({ extra: '' }));
+ok(countyStationNotHotel.every((item) => !/寄存大件行李于前台|取回|返回旧住宿地/.test(`${item.activity || ''} ${item.note || ''}`))
+    && countyStationNotHotel.some((item) => /携带全部大件行李/.test(`${item.activity || ''} ${item.note || ''}`)),
+  '同县客运站不被误认为旧酒店，换城后寄存必须改成随身携带', JSON.stringify(countyStationNotHotel));
+const finalDayStationStorage = P.enforceLuggageRules([
+  { dayIndex: 1, startTime: '08:30', endTime: '10:30', category: 'sight',
+    activity: '退房，将大件行李临时寄存在大新县（明仕田园片区）酒店前台，随后轻装游玩',
+    note: '早上离开大新县（明仕田园片区）前将大件行李临时寄存在酒店前台，轻装游玩；下午离开前返回取回',
+    startLocation: '大新美丽乡村客栈', endLocation: '明仕田园' },
+  { dayIndex: 1, startTime: '13:00', endTime: '16:00', category: 'transport',
+    activity: '乘大巴从大新汽车站前往南宁东站',
+    note: '离开前先返回大新县（明仕田园片区）取回寄存的行李，再前往南宁东站',
+    startLocation: '大新汽车站', endLocation: '南宁东站' },
+], { days: [
+  { overnight: '大新县（明仕田园片区）' },
+  { overnight: '南宁市区' },
+] }, normalizeInput({ extra: '' }));
+ok(finalDayStationStorage.every((item) => !/寄存|返回大新县|返回取回|轻装游玩/.test(`${item.activity || ''} ${item.note || ''}`))
+    && finalDayStationStorage.some((item) => /携带全部大件行李/.test(`${item.activity || ''} ${item.note || ''}`)),
+  '不会把最后离店后前往客运站误判成回酒店取行李', JSON.stringify(finalDayStationStorage));
+const contradictoryCarry = P.enforceLuggageRules([
+  { dayIndex: 1, startTime: '07:30', endTime: '08:15', category: 'food',
+    activity: '早餐后将大件行李随身携带出发，仅携带轻便随身物品出发', note: '' },
+  { dayIndex: 1, startTime: '08:15', endTime: '10:15', category: 'transport',
+    activity: '前往阳朔站', startLocation: '桂林酒店', endLocation: '阳朔站', note: '' },
+], { days: [{ overnight: '桂林酒店' }, { overnight: '阳朔酒店' }] }, normalizeInput({ extra: '' }));
+ok(contradictoryCarry.every((item) => !/(仅携带|只带)轻便随身物品/.test(`${item.activity || ''} ${item.note || ''}`))
+    && contradictoryCarry.some((item) => /大件行李随身携带|携带全部大件行李/.test(`${item.activity || ''} ${item.note || ''}`)),
+  '换城日不同时出现携带大件行李与仅带小包的矛盾文案', JSON.stringify(contradictoryCarry));
+const falseStorageNarrative = P.enforceLuggageRules([
+  { dayIndex: 1, startTime: '07:30', endTime: '08:15', category: 'food',
+    activity: '早餐后退房并整理行李，携带全部大件行李出发',
+    note: '大件行李留存在酒店，下午去阳朔前需返回取回。',
+    startLocation: '桂林酒店', endLocation: '桂林酒店' },
+  { dayIndex: 1, startTime: '08:15', endTime: '12:00', category: 'transport',
+    activity: '乘船前往阳朔', startLocation: '桂林酒店', endLocation: '阳朔酒店' },
+], { days: [{ overnight: '桂林酒店' }, { overnight: '阳朔酒店' }] }, normalizeInput({ extra: '' }));
+ok(falseStorageNarrative.every((item) => !/留存在酒店|返回取回|返回取件/.test(`${item.activity || ''} ${item.note || ''}`))
+    && falseStorageNarrative.some((item) => /携带全部大件行李/.test(`${item.activity || ''} ${item.note || ''}`)),
+  '换城日没有回旧酒店闭环时，清理拆散的寄存/取件叙事并保留随身携带', JSON.stringify(falseStorageNarrative));
+const sameStayPickupNoise = P.enforceLuggageRules([
+  { dayIndex: 1, startTime: '21:00', endTime: '21:30', category: 'hotel',
+    activity: '回到阳朔酒店办理入住续住手续并休息',
+    note: '取回携带全部大件行李，结束今日行程。', startLocation: '阳朔西街', endLocation: '阳朔酒店' },
+], { days: [{ overnight: '阳朔酒店' }, { overnight: '阳朔酒店' }] }, normalizeInput({ extra: '' }));
+ok(/返回阳朔酒店休息/.test(sameStayPickupNoise[0].activity)
+    && !/办理入住|取回携带|大件行李/.test(`${sameStayPickupNoise[0].activity} ${sameStayPickupNoise[0].note || ''}`),
+  '同一酒店连住时，回酒店不再显示放下/取回大件行李', JSON.stringify(sameStayPickupNoise));
+const legitimateSunriseStorage = P.enforceLuggageRules([
+  { dayIndex: 1, startTime: '06:00', endTime: '07:00', category: 'other',
+    activity: '整理随身小包，大件行李留房，前往观景台看日出',
+    startLocation: '龙脊梯田金坑大寨民宿', endLocation: '西山韶乐观景台' },
+  { dayIndex: 1, startTime: '07:10', endTime: '07:40', category: 'other',
+    activity: '返回民宿取回大件行李并退房',
+    startLocation: '西山韶乐观景台', endLocation: '龙脊梯田金坑大寨民宿' },
+  { dayIndex: 1, startTime: '08:00', endTime: '11:00', category: 'transport',
+    activity: '携带大件行李前往桂林',
+    startLocation: '龙脊梯田金坑大寨民宿', endLocation: '桂林' },
+], { days: [{ overnight: '桂林酒店' }, { overnight: '龙脊梯田金坑大寨民宿' }, { overnight: '桂林酒店' }] }, normalizeInput({ extra: '' }));
+ok(legitimateSunriseStorage.some((item) => /大件行李留房/.test(item.activity || ''))
+    && legitimateSunriseStorage.some((item) => /返回民宿取回大件行李/.test(item.activity || '')),
+  '龙脊日出后返回原住宿地取行李的合法闭环不被清洗', JSON.stringify(legitimateSunriseStorage));
+const anchoredRail = P.enforceScheduledMoveTimeline([
+  { dayIndex: 0, startTime: '08:00', endTime: '12:00', category: 'sight',
+    activity: '游览遇龙河', startLocation: '阳朔酒店', endLocation: '遇龙河' },
+  { dayIndex: 0, startTime: '19:54', endTime: '21:56', category: 'ticket',
+    activity: '在阳朔站候车，准备乘坐 D8266 次列车', startLocation: '', endLocation: '' },
+  { dayIndex: 0, startTime: '13:32', endTime: '16:54', category: 'transport', transportType: 'train',
+    outlineMove: true, activity: '乘 D8266 次列车从阳朔前往南宁', startLocation: '阳朔', endLocation: '南宁' },
+  { dayIndex: 0, startTime: '17:00', endTime: '18:00', category: 'food',
+    activity: '返回阳朔西街午餐', startLocation: '南宁', endLocation: '阳朔西街' },
+  { dayIndex: 0, startTime: '21:56', endTime: '23:26', category: 'transport', transportType: 'ride',
+    activity: '从十里画廊前往南宁', startLocation: '十里画廊', endLocation: '南宁' },
+  { dayIndex: 0, startTime: '23:30', endTime: '23:59', category: 'transport', transportType: 'bus',
+    activity: '从南宁前往大新', startLocation: '南宁', endLocation: '大新' },
+], { days: [{ moves: [{ from: '阳朔', to: '南宁', mode: 'train', code: 'D8266', startTime: '13:32', endTime: '16:54' }] }] });
+ok(!anchoredRail.some((item) => /返回阳朔|十里画廊前往南宁/.test(item.activity || ''))
+    && anchoredRail.some((item) => /候车/.test(item.activity || '') && P.toMin(item.endTime) < 13 * 60 + 32)
+    && anchoredRail.some((item) => item.startLocation === '南宁' && item.endLocation === '大新'
+      && P.toMin(item.startTime) >= 16 * 60 + 54),
+  '中间日城际车次作为时间锚点，清理车后旧城回折并前移候车', JSON.stringify(anchoredRail));
+const anchoredSurface = P.enforceScheduledMoveTimeline([
+  { dayIndex: 0, startTime: '10:00', endTime: '12:00', category: 'sight',
+    activity: '游览旧住宿地景点', startLocation: '旧住宿地', endLocation: '旧住宿地景点' },
+  { dayIndex: 0, startTime: '15:30', endTime: '17:30', category: 'transport', transportType: 'ride',
+    outlineMove: true, activity: '乘旅游大巴前往新住宿片区', startLocation: '旧住宿地', endLocation: '新住宿片区' },
+  { dayIndex: 0, startTime: '19:40', endTime: '20:40', category: 'sight',
+    activity: '返回旧住宿地继续游览', startLocation: '', endLocation: '' },
+  { dayIndex: 0, startTime: '23:20', endTime: '23:50', category: 'hotel',
+    activity: '抵达新住宿片区酒店办理入住', startLocation: '新住宿片区', endLocation: '新住宿片区酒店' },
+], { days: [{ moves: [
+  { from: '旧住宿地', to: '新住宿片区', mode: 'ride', startTime: '15:30', endTime: '17:30' },
+] }] });
+ok(!anchoredSurface.some((item) => /返回旧住宿地继续游览/.test(item.activity || ''))
+    && anchoredSurface.some((item) => item.category === 'hotel'
+      && item.startTime === '17:40' && item.endTime === '18:10'),
+  '有明确时刻的跨城大巴/包车同样作为时间锚点，清理到达后的旧地点回折',
+  JSON.stringify(anchoredSurface));
+
+const returnPrepP = normalizeInput({
+  origin: '重庆市金童路', dest: '南宁', startDate: '2026-10-07', endDate: '2026-10-07',
+  startTime: '07:30', endTime: '16:00', transport: '高铁/动车优先',
+});
+const returnPrep = P.enforceReturnDeparturePreparation([
+  { dayIndex: 0, startTime: '07:30', endTime: '08:15', category: 'food', activity: '从青秀区酒店出发吃早餐', startLocation: '青秀区酒店', endLocation: '' },
+  { dayIndex: 0, startTime: '08:15', endTime: '08:40', category: 'transport', activity: '打车前往广西壮族自治区博物馆', startLocation: '青秀区酒店', endLocation: '广西壮族自治区博物馆', transportType: 'ride' },
+  { dayIndex: 0, startTime: '08:40', endTime: '09:00', category: 'other', activity: '在广西壮族自治区博物馆寄存大件行李', startLocation: '', endLocation: '' },
+  { dayIndex: 0, startTime: '09:13', endTime: '14:30', category: 'transport', activity: '乘坐 G3476 次高铁从南宁东前往重庆西', startLocation: '南宁东', endLocation: '重庆西', transportType: 'train', outlineMove: true },
+], returnPrepP, { days: [{ city: '南宁→重庆', overnight: '返程', moves: [
+  { from: '南宁东', to: '重庆西', mode: 'train', code: 'G3476', startTime: '09:13', endTime: '14:30' },
+] }] });
+ok(!returnPrep.some((it) => /博物馆|寄存大件/.test(`${it.activity || ''} ${it.note || ''}`))
+  && returnPrep.some((it) => it.category === 'transport' && it.endLocation === '南宁东'
+    && !/景区接驳/.test(it.activity || '') && P.toMin(it.endTime) <= 9 * 60 + 5),
+  '返程早班高铁前删除来不及的博物馆寄存，并补普通进站接驳', JSON.stringify(returnPrep));
 
 // 5g. 同天时间重叠兜底：LLM 偶尔排出"上一条没结束下一条就开始了"
 const overlapped = P.fixDayTimeOverlaps([
@@ -839,6 +1142,38 @@ const prematureHotelItems = P.normalizeGeneratedLodging([
 ok(!prematureHotelItems.some((it) => it.startTime === '07:30')
   && prematureHotelItems.some((it) => it.startTime === '17:30'),
   '已安排晚间抵达的酒店入住条目不再被错误放到当天清晨', JSON.stringify(prematureHotelItems.map((it) => it.startTime)));
+const futureHotelOutline = { days: [
+  { city: '德天瀑布', overnight: '硕龙镇', hotel: '德天瀑布住宿地' },
+  { city: '明仕田园→南宁', overnight: '南宁市区', hotel: '南宁朝阳广场酒店', moves: [
+    { from: '明仕田园', to: '南宁东站', mode: 'bus', startTime: '14:00', endTime: '17:00' },
+  ] },
+] };
+const futureHotelRows = P.normalizeGeneratedLodging([
+  { dayIndex: 1, startTime: '07:30', endTime: '08:15', category: 'other',
+    activity: '退房并整理行李，携带全部大件行李前往南宁朝阳广场酒店',
+    startLocation: '德天瀑布住宿地', endLocation: '南宁朝阳广场酒店' },
+  { dayIndex: 1, startTime: '08:15', endTime: '08:30', category: 'transport',
+    activity: '步行至德天景区出口', startLocation: '南宁朝阳广场酒店', endLocation: '德天景区出口', transportType: 'walk' },
+  { dayIndex: 1, startTime: '08:30', endTime: '09:30', category: 'transport',
+    activity: '乘专线前往明仕田园', startLocation: '德天景区', endLocation: '明仕田园', transportType: 'bus' },
+  { dayIndex: 1, startTime: '14:00', endTime: '17:00', category: 'transport',
+    activity: '乘旅游专线返回南宁东站', startLocation: '明仕田园', endLocation: '南宁东站', transportType: 'bus' },
+  { dayIndex: 1, startTime: '18:00', endTime: '19:00', category: 'food',
+    activity: '在崇左市区餐馆享用晚餐', startLocation: '德天瀑布住宿地', endLocation: '崇左市区餐馆' },
+], futureHotelOutline);
+ok(futureHotelRows[0].endLocation === '德天瀑布住宿地'
+  && futureHotelRows[1].startLocation === '德天瀑布住宿地'
+  && futureHotelRows[3].startLocation === '明仕田园'
+  && futureHotelRows[4].startLocation === '南宁朝阳广场酒店',
+  '跨城抵达前不提前入住今晚酒店，抵达后活动从新住宿地接续', JSON.stringify(futureHotelRows));
+const selfLoopCheckout = P.enforceLuggageRules([{
+  dayIndex: 1, startTime: '07:30', endTime: '08:15', category: 'food',
+  activity: '在德天瀑布住宿地吃早餐。退房并整理行李，携带全部大件行李前往德天瀑布住宿地',
+  startLocation: '德天瀑布住宿地', endLocation: '德天瀑布住宿地',
+}], futureHotelOutline, normalizeInput({ extra: '' }));
+ok(!/携带全部大件行李前往德天瀑布住宿地/.test(selfLoopCheckout[0].activity)
+  && /携带全部大件行李出发/.test(selfLoopCheckout[0].activity),
+  '换城退房不生成“携带行李前往同一酒店”的住宿自环', JSON.stringify(selfLoopCheckout[0]));
 const breakfastHotelItem = P.normalizeGeneratedLodging([{
   dayIndex: 1, startTime: '07:30', endTime: '08:15', activity: '在成都酒店享用早餐，退房并整理行李',
   category: 'hotel', startLocation: '成都春熙路酒店', endLocation: '理县古尔沟黄金林酒店',
@@ -1050,6 +1385,19 @@ const unavailableAligned = P.enforceMovesAlignment([
 ], unavailableOutline);
 ok(unavailableAligned[0].startTime === '11:00' && unavailableAligned[0].endTime === '11:30',
   '官方无候选时保留占位时刻，不凭空改成 00:00', JSON.stringify(unavailableAligned[0]));
+const unavailableBusOutline = { days: [{ moves: [{
+  from: '阳朔站', to: '大新南站', mode: 'train', code: '',
+  startTime: '08:00', endTime: '12:00', scheduleRequired: true,
+}] }] };
+const unavailableBusItems = P.stripUnverifiedSchedules([
+  { dayIndex: 0, startTime: '08:00', endTime: '12:00', category: 'transport',
+    activity: '乘列车从阳朔站前往大新南站', startLocation: '阳朔站', endLocation: '大新南站', transportType: 'train' },
+], unavailableBusOutline);
+ok(unavailableBusOutline.days[0].moves[0].mode === 'train'
+  && unavailableBusItems[0].transportType === 'train'
+  && unavailableBusItems[0].scheduleRequired
+  && /班次待确认/.test(unavailableBusItems[0].activity || ''),
+  '铁路查询无结果时保留偏好并注明待核验，不凭空改成长途大巴', JSON.stringify({ outline: unavailableBusOutline, items: unavailableBusItems }));
 const boatNoChip = P.enforceMovesAlignment([{
   dayIndex: 0, startTime: '09:00', endTime: '13:00', category: 'sight',
   activity: '乘四星船游览漓江，从桂林磨盘山码头到阳朔龙头山码头',
@@ -1161,22 +1509,35 @@ ok(brokenDetailChain.length === 3
 
 const uncoveredHighlights = P.ensureDetailHighlightCoverage([
   { dayIndex: 0, startTime: '10:00', endTime: '12:00', category: 'sight',
-    activity: '游览青城前山并参观天师洞', startLocation: '', endLocation: '', transportType: '' },
+    activity: '游览青城前山并参观天师洞', startLocation: '青城山前山入口', endLocation: '', transportType: '' },
   { dayIndex: 1, startTime: '10:00', endTime: '12:00', category: 'sight',
-    activity: '游览龙王海', startLocation: '', endLocation: '', transportType: '' },
+    activity: '游览龙王海', startLocation: '毕棚沟景区龙王海', endLocation: '', transportType: '' },
 ], { days: [
   { highlights: ['青城山'] },
   { highlights: ['毕棚沟'] },
 ] });
-ok(uncoveredHighlights[0].activity.includes('青城山')
-  && uncoveredHighlights[1].activity.includes('毕棚沟'),
+ok(`${uncoveredHighlights[0].activity} ${uncoveredHighlights[0].startLocation}`.includes('青城山')
+  && `${uncoveredHighlights[1].activity} ${uncoveredHighlights[1].startLocation}`.includes('毕棚沟'),
   '详细游览条目自动落地大纲点名的青城山、毕棚沟', JSON.stringify(uncoveredHighlights));
 const noteOnlyHighlight = P.ensureDetailHighlightCoverage([
   { dayIndex: 0, startTime: '10:00', endTime: '11:00', category: 'sight',
     activity: '游览磐羊湖', note: '毕棚沟景区适合拍照', startLocation: '磐羊湖站', endLocation: '' },
 ], { days: [{ highlights: ['毕棚沟景区'] }] });
-ok(noteOnlyHighlight[0].activity.includes('毕棚沟景区'),
-  '景点名称只出现在备注时不算已游览，须补到真实游览条目', JSON.stringify(noteOnlyHighlight));
+ok(!noteOnlyHighlight[0].activity.includes('毕棚沟景区'),
+  '景点名称只出现在备注且无地点证据时，不伪造已游览覆盖', JSON.stringify(noteOnlyHighlight));
+const recoveredScenicTransport = P.ensureDetailHighlightCoverage([
+  { dayIndex: 0, startTime: '10:00', endTime: '10:30', category: 'ticket',
+    activity: '在前山入口购买门票', startLocation: '', endLocation: '前山景区' },
+  { dayIndex: 0, startTime: '10:30', endTime: '13:30', category: 'transport', transportType: 'bus',
+    outlineMove: true, activity: '乘旅游专线前往另一个车站', startLocation: '前山站', endLocation: '另一个车站' },
+  { dayIndex: 0, startTime: '13:40', endTime: '14:20', category: 'transport',
+    activity: '前往返程车站', startLocation: '前山景区出口', endLocation: '铁路站' },
+], { days: [{ highlights: ['前山景区'] }] });
+ok(recoveredScenicTransport.some((item) => item.category === 'sight'
+    && /游览前山景区/.test(item.activity || '')
+    && item.startLocation === '前山景区' && item.endLocation === '前山景区'),
+  '景区已有门票但被异常长交通覆盖时，回收为实际景区游览段',
+  JSON.stringify(recoveredScenicTransport));
 
 // 终点回填：餐饮标题式写法（广西攻略实测：「晚餐：刘姐啤酒鱼」没导航）
 const backfill = sanitizeItems([
@@ -1373,7 +1734,7 @@ llm.chatWithRetry = async (messages) => {
     '允许作为备选的打车仍保留为司机接送');
   const rentedMotorRows = P.enforceTransportPreference([
     { dayIndex: 0, category: 'other', startLocation: '阳朔西街', endLocation: '阳朔电动车租赁点', activity: '步行至租电动车点，租赁两辆电动摩托车用于全天骑行游览' },
-    { dayIndex: 0, category: 'transport', startLocation: '阳朔电动车租赁点', endLocation: '遇龙河水厄底码头', activity: '骑电动车前往遇龙河水厄底码头', transportType: 'ride' },
+    { dayIndex: 0, category: 'transport', startLocation: '阳朔电动车租赁点', endLocation: '遇龙河水厄底码头', activity: '骑电动摩托车前往遇龙河水厄底码头', transportType: 'ride' },
   ], publicP);
   ok(rentedMotorRows.length === 1 && !/租电动车|骑电动车|摩托车/.test(rentedMotorRows[0].activity)
     && rentedMotorRows[0].transportType === 'ride'
@@ -1381,7 +1742,7 @@ llm.chatWithRetry = async (messages) => {
     '未选自驾时移除电摩租赁，并把骑行路段改为公共交通/司机接送', JSON.stringify(rentedMotorRows));
   const rentedMotorNote = P.enforceTransportPreference([{
     dayIndex: 0, category: 'sight', startTime: '15:00', endTime: '16:00',
-    activity: '沿明仕绿道步行拍照', note: '也可租电动车沿路游玩，注意安全。',
+    activity: '沿明仕绿道步行拍照', note: '也可租电动摩托车沿路游玩，注意安全。',
   }], publicP);
   ok(!/租电动车|电动摩托车|摩托车/.test(rentedMotorNote[0].note)
     && /公共交通|景区接驳/.test(rentedMotorNote[0].note),
@@ -1637,6 +1998,18 @@ llm.chatWithRetry = async (messages) => {
   ok(outlineBacktrack.days[0].moves.length === 1
     && outlineBacktrack.days[0].moves[0].to === '重庆西站',
     '大纲清理 A→B→A 后又从 A 出发的即时折返', JSON.stringify(outlineBacktrack));
+  const collapsedReturnAccess = P.normalizeGeneratedOutlineMoveChains({ days: [{ moves: [
+    { from: '外地枢纽', to: '景区站', mode: 'train' },
+    { from: '景区站', to: '错误车站', mode: 'bus', autoConnector: true, timingEstimated: true },
+    { from: '错误车站', to: '错误车站', mode: 'bus', timingEstimated: true },
+    { from: '错误车站', to: '外地枢纽', mode: 'bus', railReturnAccess: true },
+    { from: '外地枢纽', to: '出发地车站', mode: 'train' },
+  ] }] });
+  ok(collapsedReturnAccess.days[0].moves.length === 3
+    && collapsedReturnAccess.days[0].moves[1].from === '景区站'
+    && collapsedReturnAccess.days[0].moves[1].to === '外地枢纽',
+  '返程铁路前的自动接驳链折叠到真实景区起点，并清除同站伪交通',
+  JSON.stringify(collapsedReturnAccess));
 
   const staleOrigins = P.reconcileTransportOrigins([
     { dayIndex: 1, startTime: '08:30', endTime: '12:30', category: 'transport', startLocation: '阳朔汽车站', endLocation: '大新汽车站', activity: '乘大巴前往大新' },
@@ -1663,6 +2036,11 @@ llm.chatWithRetry = async (messages) => {
   ]);
   ok(zeroDistance.length === 1 && /环游/.test(zeroDistance[0].activity),
     '移除同名起终点的无效交通，保留明确的环线观光', JSON.stringify(zeroDistance));
+  const stationVicinity = P.removeZeroDistanceTransports([
+    { dayIndex: 0, category: 'transport', activity: '从车站周边餐饮店前往车站', startLocation: '崇左南站周边餐饮店', endLocation: '崇左南站' },
+  ]);
+  ok(stationVicinity.length === 0,
+    '车站周边餐饮点到同一车站不生成无效的零距离交通', JSON.stringify(stationVicinity));
 
   console.log('\n—— 酒店 POI 必须可订且有具体名称 ——');
   ok(!G.isBookableHotelPoi({ name: '南宁沃顿国际大酒店(南湖地铁站店)北门地上停车场' }, ['南宁']),
@@ -1762,6 +2140,65 @@ llm.chatWithRetry = async (messages) => {
   ok(splitTransfer.length === 2 && splitTransfer.some((it) => it.endLocation === '毕棚沟景区游客中心')
     && splitTransfer.some((it) => it.startLocation === '毕棚沟景区游客中心'),
     '多段接驳链覆盖时移除冲突的直达交通', JSON.stringify(splitTransfer));
+  const luggageTransferChain = P.removeRedundantDirectTransports([
+    { dayIndex: 0, startTime: '14:00', endTime: '14:30', category: 'other',
+      startLocation: '毕棚沟游客中心', endLocation: '理县古尔沟镇', activity: '返回古尔沟取回寄存的大件行李' },
+    { dayIndex: 0, startTime: '14:30', endTime: '18:00', category: 'transport', transportType: 'car',
+      startLocation: '理县古尔沟镇', endLocation: '都江堰市灌县古城', activity: '携带行李前往都江堰' },
+    { dayIndex: 0, startTime: '18:00', endTime: '21:00', category: 'transport', transportType: 'bus',
+      outlineMove: true, startLocation: '毕棚沟景区', endLocation: '都江堰市区', activity: '乘旅游专线从毕棚沟景区前往都江堰市区' },
+  ]);
+  ok(luggageTransferChain.length === 2 && !luggageTransferChain.some((it) => it.startTime === '18:00'),
+    '取行李 other 行与后续交通组成完整链路时，删除重复的景区直达段', JSON.stringify(luggageTransferChain));
+  const overnightHotel = P.ensureOvernightHotelItems([
+    { dayIndex: 0, startTime: '13:46', endTime: '18:05', category: 'transport', transportType: 'train',
+      startLocation: '重庆西', endLocation: '桂林北', activity: '乘列车前往桂林北' },
+  ], { days: [
+    { overnight: '桂林市中心', hotel: '桂林中心真实酒店' },
+    { overnight: '返程' },
+  ] }, normalizeInput({ transport: '高铁/动车优先' }));
+  ok(overnightHotel.some((it) => it.category === 'hotel' && /桂林中心真实酒店/.test(it.endLocation || '')
+    && P.toMin(it.startTime) >= 18 * 60),
+    '跨城抵达住宿片区后自动补入住落点', JSON.stringify(overnightHotel));
+  const repairedLateHotel = P.ensureOvernightHotelItems([
+    { dayIndex: 0, startTime: '21:05', endTime: '23:59', category: 'transport', transportType: 'bus',
+      startLocation: '南宁西站', endLocation: '南宁', activity: '乘大巴从南宁西站前往南宁住宿片区' },
+    { dayIndex: 0, startTime: '23:59', endTime: '23:59', category: 'hotel',
+      startLocation: '南宁', endLocation: '南宁真实酒店', activity: '前往南宁真实酒店办理入住' },
+  ], { days: [{ overnight: '南宁', hotel: '南宁真实酒店' }, { overnight: '返程' }] },
+  normalizeInput({ transport: '高铁/动车优先' }));
+  const repairedLateHotelRow = repairedLateHotel.find((it) => it.category === 'hotel');
+  ok(repairedLateHotelRow && P.toMin(repairedLateHotelRow.endTime) > P.toMin(repairedLateHotelRow.startTime)
+    && repairedLateHotelRow.startTime === '23:44'
+    && repairedLateHotel.find((it) => it.category === 'transport').endTime === '23:34',
+    '抵达过晚时修复 23:59 零时长入住并为酒店让出最小时间窗口', JSON.stringify(repairedLateHotel));
+  const repairedLongjiInterlude = P.repairLongjiCoreTimeline([
+    { dayIndex: 0, startTime: '11:40', endTime: '12:00', category: 'hotel',
+      startLocation: '龙脊住宿地', endLocation: '龙脊西山韶乐民宿', activity: '前往民宿办理入住，放下行李' },
+    { dayIndex: 0, startTime: '13:40', endTime: '14:40', category: 'sight',
+      startLocation: '龙脊住宿地', endLocation: '西山韶乐观景台', activity: '游览西山韶乐观景台' },
+    { dayIndex: 0, startTime: '14:40', endTime: '16:10', category: 'sight',
+      startLocation: '西山韶乐观景台', endLocation: '千层天梯观景台', activity: '游览千层天梯观景台' },
+    { dayIndex: 0, startTime: '17:30', endTime: '17:57', category: 'sight',
+      startLocation: '金佛顶观景台', endLocation: '龙脊西山韶乐民宿', activity: '前往民宿办理入住，放下行李' },
+    { dayIndex: 0, startTime: '17:57', endTime: '18:47', category: 'sight',
+      startLocation: '千层天梯观景台', endLocation: '金佛顶观景台', activity: '在金佛顶观景台观赏日落' },
+  ], { days: [{ city: '龙脊梯田', overnight: '龙脊住宿地', hotel: '龙脊西山韶乐民宿',
+    highlights: ['西山韶乐', '千层天梯', '金佛顶'] }] });
+  ok(!repairedLongjiInterlude.some((it) => /办理入住/.test(it.activity || '')
+    && P.toMin(it.startTime) >= 16 * 60 && P.toMin(it.startTime) < 17 * 60 + 57),
+    '龙脊核心路线中间的错误入住段被移除，不在千层天梯与金佛顶之间折返',
+  JSON.stringify(repairedLongjiInterlude));
+  const orphanAfterHotel = P.removeOrphanTransportRows([
+    { dayIndex: 0, startTime: '18:30', endTime: '19:00', category: 'hotel',
+      startLocation: '成都东站', endLocation: '成都市锦江区某酒店', activity: '办理入住并放下行李' },
+    { dayIndex: 0, startTime: '20:00', endTime: '20:15', category: 'transport', transportType: 'ride',
+      startLocation: '成都市青羊区奎星楼街', endLocation: '成都市锦江区某酒店', activity: '打车返回酒店' },
+    { dayIndex: 0, startTime: '20:15', endTime: '21:05', category: 'transport', transportType: 'bus',
+      startLocation: '成都东客站', endLocation: '太升南路', activity: '乘地铁前往太升南路' },
+  ], { days: [{ overnight: '成都市锦江区某酒店' }] });
+  ok(orphanAfterHotel.length === 1 && orphanAfterHotel[0].category === 'hotel',
+    '入住后没有前置活动的异地交通不再保留为孤立错序条目', JSON.stringify(orphanAfterHotel));
   const hotelAfterCruise = P.removeRedundantDirectTransports([
     { dayIndex: 0, startTime: '09:00', endTime: '13:00', category: 'transport', transportType: 'ship',
       startLocation: '竹江码头', endLocation: '阳朔龙头山码头', activity: '乘四星游船抵达阳朔龙头山码头' },
@@ -2116,17 +2553,24 @@ return (async () => {
   let slowest = 0;
   let rounds = 0;
   const allItems = [];
-  for (let r = 0; r < 6; r++) {
+  for (let r = 0; r < 12; r++) {
     const rt = Date.now();
     // attempts 要跟着回传，否则失败的天不会被重试（与前端续跑逻辑保持一致）
     plan = await P.buildPlan(INPUT, Object.assign({}, INPUT, phase1), {
       doneDayIndexes: plan && plan.doneDayIndexes,
       attempts: plan && plan.attempts,
+      reviewItems: plan && plan.doneDayIndexes.length >= phase1.outline.days.length ? allItems : undefined,
     });
     const cost = (Date.now() - rt) / 1000;
     slowest = Math.max(slowest, cost);
     rounds = r + 1;
+    const freshDays = new Set(plan.items.map((item) => Number(item.dayIndex || 0)));
+    for (let i = allItems.length - 1; i >= 0; i--) {
+      if (freshDays.has(Number(allItems[i].dayIndex || 0))) allItems.splice(i, 1);
+    }
     allItems.push(...plan.items);
+    const stored = P.auditMergedDetailItems(allItems, phase1.outline, INPUT);
+    allItems.splice(0, allItems.length, ...stored);
     if (!plan.partial) break;
   }
   ok(slowest < 60, `阶段二单次最长耗时 ${slowest.toFixed(1)}s < 云函数 60s 上限（共 ${rounds} 轮续跑）`);

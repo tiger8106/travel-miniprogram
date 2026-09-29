@@ -8,7 +8,7 @@
  * 三条铁律：
  *   1. 用户填的出发/到家时间与真实班次冲突时，保留班次时刻，改提示人几点出门
  *   2. 时间线重叠时，交通条目不让路也不顺延，让景点/用餐条目先收尾
- *   3. 班次时刻必须落在 5 分钟刻度上（真实运行图没有 08:37 发车）
+ *   3. 未核验估算窗口可规整刻度；官方运行图的分钟必须原样保留
  */
 
 const P = require('../cloudfunctions/generatePlan/plan.js');
@@ -71,6 +71,10 @@ function ok(name, cond, extra) {
   ok('火车发车规整到 5 分刻度', r.days[0].moves[0].startTime === '08:35', r.days[0].moves[0].startTime);
   ok('火车到达规整到 5 分刻度', r.days[0].moves[0].endTime === '14:25', r.days[0].moves[0].endTime);
   ok('包车/自驾不参与规整', r.days[1].moves[0].startTime === '09:03', r.days[1].moves[0].startTime);
+  const official = P.snapScheduleMinutes({ days: [{ moves: [{ from: '甲站', to: '乙站', mode: 'train',
+    code: 'G123', startTime: '08:37', endTime: '14:23', schedSource: '12306' }] }] });
+  ok('官方运行图不因非5分钟刻度而被修改', official.days[0].moves[0].startTime === '08:37'
+    && official.days[0].moves[0].endTime === '14:23');
 }
 
 // ---------- 4. 时间线重叠：交通不让路，让别的条目先收尾 ----------
@@ -257,9 +261,10 @@ console.log('== 4. 真实班次（联网检索） ==');
     attempted: true, official: true,
   }]]);
   P.applyRealSchedules(unavailable, noOfficial);
-  ok('12306 没有当天候选时清空模型车次和精确时刻',
+  ok('未取得未来官方班次时清空车次，时段明确标为估算且要求再次查询',
     unavailable.days[0].moves[0].code === ''
-      && unavailable.days[0].moves[0].startTime === ''
+      && unavailable.days[0].moves[0].timingEstimated === true
+      && unavailable.days[0].moves[0].scheduleRequired === true
       && unavailable.days[0].moves[0].schedSource === 'official-unavailable',
     JSON.stringify(unavailable.days[0].moves[0]));
 
@@ -271,11 +276,19 @@ console.log('== 4. 真实班次（联网检索） ==');
   const unresolvedLookup = new Map([[unresolvedKey, []]]);
   unresolvedLookup.routeMeta = new Map([[unresolvedKey, { attempted: true, official: true, unresolvedStations: true }]]);
   P.applyRealSchedules(unresolved, unresolvedLookup);
-  ok('铁路站点无法解析时降级为待核实的大巴/专线，不保留虚构列车',
-    unresolved.days[0].moves[0].mode === 'bus'
+  ok('铁路站点无法解析时不擅自改为大巴，清除虚构车次并要求重新确认站名',
+    unresolved.days[0].moves[0].mode === 'train'
       && !unresolved.days[0].moves[0].code
-      && unresolved.days[0].moves[0].timingEstimated === true,
+      && unresolved.days[0].moves[0].timingEstimated === true
+      && unresolved.days[0].moves[0].scheduleRequired === true
+      && /站名待确认/.test(unresolved.days[0].moves[0].transfer),
     JSON.stringify(unresolved.days[0].moves[0]));
+  const invalid = unresolved.days[0].moves[0];
+  const { executionIssues } = require('../cloudfunctions/generatePlan/execution-review');
+  ok('未确认铁路站名不能通过最终执行复核', executionIssues([{
+    category: 'transport', transportType: invalid.mode, activity: '乘动车前往目的地',
+    startTime: invalid.startTime, endTime: invalid.endTime, startLocation: invalid.from, endLocation: invalid.to,
+  }], {}).includes('铁路上车/下车点没有明确车站'));
 
   // 4.5 细化兜底：模型自创了候选里没有的车次 → 拽回真实班次
   const o3 = { days: [{ sched: [

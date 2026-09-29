@@ -22,6 +22,7 @@ fs.readFileSync(envPath, 'utf-8').split('\n').forEach((line) => {
 
 const { callLLM } = require('../cloudfunctions/parseTravelPlan/llm');
 const { parseCnTime, tsToCnDateTimeStr } = require('../cloudfunctions/parseTravelPlan/cn-time');
+const rules = require('./parse-alarm-test-harness')();
 
 // 用真实文档文本（清理提取时混入的 XML 残片）
 const docPath = path.resolve(__dirname, '..', '.docx-text.txt');
@@ -39,14 +40,8 @@ console.log(`文档文本 ${rawText.length} 字符`);
   console.log(`LLM 耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s，items ${r.items.length} 条\n`);
 
   // 复刻 index.js 清洗：fireAt → 时间戳 + fireAtStr
-  const alarms = (r.alarms || [])
-    .map((a) => {
-      if (!a || !(a.title || '').trim()) return null;
-      const ts = typeof a.fireAt === 'number' ? a.fireAt : parseCnTime(a.fireAt);
-      if (!ts || isNaN(ts)) return null;
-      return { title: String(a.title).trim(), fireAt: ts, fireAtStr: tsToCnDateTimeStr(ts), note: a.note || '', type: a.type || 'other' };
-    })
-    .filter(Boolean);
+  const alarms = rules.prepareAlarmRecords(rules.cleanAlarms(r.alarms, 'test-user', Date.now(), rawText),
+    'test-user', 'test-trip', Date.now(), 12);
 
   console.log('=== 清洗后闹钟列表 ===');
   alarms.forEach((a) => console.log(`${a.fireAtStr}  [${a.type}]  ${a.title}${a.note ? '  (' + a.note.slice(0, 26) + ')' : ''}`));
@@ -75,10 +70,15 @@ console.log(`文档文本 ${rawText.length} 字符`);
   // 模糊日期不应生成（酒店 9月15日起）
   check('无 9月15日 的模糊酒店闹钟', alarms.every((a) => !a.fireAtStr.startsWith('2026-09-15')),
     alarms.filter((a) => a.fireAtStr.startsWith('2026-09-15')).map((a) => a.fireAtStr + a.title).join(' | '));
+  check('直通车日期范围不被编成固定抢票时间', !alarms.some((a) => a.type === 'bus'
+    && a.fireAtStr.startsWith('2026-09-22')));
 
   // 去重
   const keys = alarms.map((a) => a.fireAt + '|' + a.title.replace(/\s+/g, ''));
   check('无重复（同时刻同标题）', new Set(keys).size === keys.length);
+  check('所有提醒严格使用用户设置的提前12分钟', alarms.every((a) =>
+    a.leadMinutes === 12 && a.remindAt === a.fireAt - 12 * 60000));
+  check('同一车次没有提前准备/到点两个独立提醒', alarms.filter((a) => /G2249/.test(a.title)).length === 1);
 
   console.log(failed ? `\n${failed} 项校验失败` : '\n闹钟提取校验全部通过 ✓');
   process.exit(failed ? 1 : 0);

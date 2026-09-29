@@ -9,7 +9,7 @@ const COL = 'ticket_alarms';
 const DEFAULT_LEAD_MINUTES = 5;
 
 // 诊断标记：改一次升一次，用来确认线上跑的是不是最新代码
-const DEPLOY_TAG = 'v5-single-reminder';
+const DEPLOY_TAG = 'v7-compact-single-reminder';
 
 function leadOf(alarm) {
   const n = Number(alarm && alarm.leadMinutes);
@@ -30,6 +30,14 @@ function notifyAtOf(alarm) {
 
 function isCompleted(alarm) {
   return !!(alarm && (alarm.completed === true || alarm.status === 'completed'));
+}
+
+function compactNote(alarmOrNote) {
+  const alarm = alarmOrNote && typeof alarmOrNote === 'object' ? alarmOrNote : { note: alarmOrNote };
+  const source = String(alarm.usageInfo || alarm.bookingInfo || alarm.note || '')
+    .replace(/[\r\n\u3000]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+  const first = source.split(/[；;。]/).map((x) => x.trim()).find(Boolean) || source;
+  return first.slice(0, 20) || '点击查看详情';
 }
 
 exports.main = async (event, context) => {
@@ -100,7 +108,7 @@ async function sendTestNow({ title, note, fireAt, templateId, layout, probe }) {
     title: String(title || '行程提醒').slice(0, 20),
     date: formatDate(ts),
     time: formatTime(ts),
-    note: String(note || '点击查看详情').slice(0, 20),
+    note: compactNote(note),
   };
 
   const ordered = [];
@@ -241,7 +249,7 @@ async function pollAndPush() {
           title: String(alarm.title || '行程提醒').slice(0, 20),
           date: formatDate(actionAt),
           time: formatTime(actionAt),
-          note: String(`提前 ${leadMinutes} 分钟提醒${alarm.note ? '；' + alarm.note : ''}`).slice(0, 20),
+          note: compactNote(alarm),
         };
         await cloud.openapi.subscribeMessage.send({
           touser: alarm._openid,
