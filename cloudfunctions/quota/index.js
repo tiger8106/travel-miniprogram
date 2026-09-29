@@ -125,11 +125,26 @@ async function addLog(openid, bizKey, action, extra) {
 // 对外信息
 // ============================================================
 
+/**
+ * 特权用户判定：管理员（admin / super）+ 被管理员授权「不限量」的用户。
+ *
+ * 为什么要单独一层而不是改 rules.js：
+ *   现有的扣费规则（会员→赠送→次卡）是跑通了的，动它有回归风险。
+ *   特权只在**进规则的门口**放行：不检查余额、不扣数、不计次。
+ *   rights 字段由 admin 云函数写入（users.role / users.unlimited），本函数只读。
+ */
+function isPrivileged(u) {
+  return !!u && (u.role === 'admin' || u.role === 'super' || u.unlimited === true);
+}
+
+/** 特权账号对外展示的额度信息（给一个明确的大数，避免前端再判 null） */
+const PRIVILEGED_TOTAL = 999999;
+
 function publicInfo(u, ts) {
   const x = R.normalizeUser(u);
   const av = R.available(x, ts);
   const st = R.todayStat(x, ts);
-  return {
+  const info = {
     quota: Math.max(0, x.quota),
     gift: R.giftLeft(x, ts),
     giftExpireAt: x.giftExpireAt,
@@ -143,7 +158,11 @@ function publicInfo(u, ts) {
     inviteRewarded: x.inviteRewarded,
     inviteCap: R.LIMITS.inviteCap,
     totalGen: x.totalGen,
+    role: u && u.role ? u.role : '',
+    unlimited: isPrivileged(u),
   };
+  if (isPrivileged(u)) info.total = PRIVILEGED_TOTAL;
+  return info;
 }
 
 function goodsInfo() {
@@ -171,6 +190,13 @@ async function actionInfo(openid) {
 async function actionCheck(openid, event) {
   const u = await ensureUser(openid);
   const scene = String(event.scene || 'plan');
+  // 特权用户（管理员 / 被授权不限量）：不看余额直接放行
+  if (isPrivileged(u)) {
+    return {
+      code: 0,
+      data: Object.assign({ ok: true, scene, needPay: false, msg: '' }, publicInfo(u, Date.now())),
+    };
+  }
   const r = R.canConsume(u, Date.now(), scene);
   return {
     code: 0,
@@ -190,6 +216,11 @@ async function actionConsume(openid, event) {
 
   const u = await ensureUser(openid);
   const scene = String(event.scene || 'plan');
+  // 特权用户：不扣任何人/任何池子的额度，但仍写一条流水，保证幂等与统计口径一致
+  if (isPrivileged(u)) {
+    await addLog(openid, bizKey, 'consume', { scene, source: 'privileged', tripId: event.tripId || '' });
+    return { code: 0, data: { ok: true, source: 'privileged', left: PRIVILEGED_TOTAL } };
+  }
   const can = R.canConsume(u, Date.now(), scene);
   if (!can.ok) {
     return { code: can.needPay ? -2 : -3, msg: can.msg, data: { needPay: !!can.needPay } };
@@ -219,6 +250,8 @@ async function actionRefund(openid, event, trusted) {
 async function actionHit(openid, event) {
   const scene = String(event.scene || 'outline');
   const u = await ensureUser(openid);
+  // 特权用户：刷新建议/换大纲方案不限次数，也不计流水
+  if (isPrivileged(u)) return { code: 0, data: { ok: true, left: PRIVILEGED_TOTAL } };
   const can = R.canHit(u, Date.now(), scene);
   if (!can.ok) return { code: -3, msg: can.msg, data: { ok: false } };
   const { patch } = R.applyHit(u, Date.now(), scene);

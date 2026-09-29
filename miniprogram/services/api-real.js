@@ -149,6 +149,71 @@ async function downloadFromCloud(fileID) {
   return downloadFile(fileID);
 }
 
+// ============================================================
+// 管理后台（admin 云函数）
+// 说明：页面入口本身只对管理员可见，普通用户看不到也点不到。
+//      这些接口在云端还会再验一次管理员身份，前端显示隐藏不是安全边界。
+// ============================================================
+
+/** 当前账号的身份与平台概况 */
+function adminWhoami() {
+  return callFn('admin', { action: 'whoami' });
+}
+
+/** 用一次性认领码成为超级管理员 */
+function adminClaim(code) {
+  return callFn('admin', { action: 'claim', code });
+}
+
+/** 按微信号 / 昵称找用户（管理员） */
+function adminSearchUsers(keyword) {
+  return callFn('admin', { action: 'searchUsers', keyword });
+}
+
+/** 授权 / 取消授权「不限量使用」 */
+function adminSetUnlimited(userId, enable) {
+  return callFn('admin', { action: 'setUnlimited', userId, enable: enable !== false });
+}
+
+/** 管理员名单 */
+function adminListStaff() {
+  return callFn('admin', { action: 'listStaff' });
+}
+
+/** 增/撤管理员（仅超级管理员） */
+function adminSetAdmin(userId, isAdmin) {
+  return callFn('admin', { action: 'setAdmin', userId, isAdmin: isAdmin !== false });
+}
+
+/** 可配置项清单（敏感值已脱敏） */
+function adminGetConfig() {
+  return callFn('admin', { action: 'getConfig' });
+}
+
+/** 保存配置 patch（只传改动的项；清空 = 交还给环境变量） */
+function adminSaveConfig(patch) {
+  return callFn('admin', { action: 'saveConfig', patch });
+}
+
+/** 操作日志 */
+function adminAuditList() {
+  return callFn('admin', { action: 'auditList' });
+}
+
+/** 清空操作日志（仅超级管理员） */
+function adminClearAudit() {
+  return callFn('admin', { action: 'clearAudit' });
+}
+
+/** 连通性自检 */
+function adminTestLlm() {
+  return callFn('admin', { action: 'testLlm' });
+}
+
+function adminTestAmap() {
+  return callFn('admin', { action: 'testAmap' });
+}
+
 module.exports = {
   parseTravelPlan,
   parseTravelPlanStep,
@@ -177,4 +242,16 @@ module.exports = {
   dismissGen,
   uploadDoc,
   downloadFromCloud,
+  adminWhoami,
+  adminClaim,
+  adminSearchUsers,
+  adminSetUnlimited,
+  adminListStaff,
+  adminSetAdmin,
+  adminGetConfig,
+  adminSaveConfig,
+  adminAuditList,
+  adminClearAudit,
+  adminTestLlm,
+  adminTestAmap,
 };

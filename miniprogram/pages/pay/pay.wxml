@@ -59,10 +59,6 @@
       <text class="sync-text">付了钱额度没到账？</text>
       <text class="sync-btn" bindtap="onSync">刷新额度</text>
     </view>
-    <view class="sync-row" wx:if="{{devMode}}" bindtap="onDevGrant">
-      <text class="sync-text">🔧 开发者补测试额度（每次 +3，云端开关控制）</text>
-      <text class="sync-btn">补 3 次</text>
-    </view>
   </view>
 
   <!-- 邀请 -->
