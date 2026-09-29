@@ -102,6 +102,18 @@
 .sync-text { font-size: 24rpx; color: #888; }
 .sync-btn { font-size: 24rpx; color: #2b7bfa; font-weight: 600; }
 
+/* ---------- 订单中心入口 ---------- */
+.orders-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 20rpx;
+  padding-top: 20rpx;
+  border-top: 1rpx solid #f0f0f0;
+}
+.orders-text { font-size: 28rpx; color: #222; font-weight: 600; }
+.orders-arrow { font-size: 30rpx; color: #bbb; }
+
 /* ---------- 邀请 ---------- */
 .invite-code-row {
   display: flex;

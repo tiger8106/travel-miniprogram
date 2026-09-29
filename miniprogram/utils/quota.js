@@ -169,6 +169,20 @@ async function pay(goodsId) {
   return { ok: false, pending: true, msg: (r.data && r.data.msg) || '支付成功，额度稍后自动到账' };
 }
 
+/**
+ * 我的订单列表（订单中心页用）
+ * 只读展示用，出错返回空数组（订单页会显示空态，不挡路）
+ */
+async function orderList() {
+  try {
+    const d = await callFn('virtualPay', { action: 'orderList' });
+    return (d && d.list) || [];
+  } catch (e) {
+    console.warn('[quota] 订单列表读取失败:', e.message);
+    return [];
+  }
+}
+
 /** 手动补发：付了钱但额度没到账时点「刷新」用它 */
 async function syncOrders() {
   const r = await callFnKeepCode('virtualPay', { action: 'sync' });
@@ -196,5 +210,5 @@ async function bindInvite(code) {
 
 module.exports = {
   info, ensure, ensureOrPay, guideToPay, clear,
-  pay, syncOrders, inviteInfo, bindInvite,
+  pay, syncOrders, orderList, inviteInfo, bindInvite,
 };

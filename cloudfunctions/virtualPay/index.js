@@ -397,6 +397,38 @@ async function actionSync(openid) {
 }
 
 /**
+ * 我的订单（订单中心列表页用）
+ * 只返回本人订单（loadOrderByOpenid 已按 _openid 过滤 + 时间倒序），
+ * 且只给展示需要的字段，不吐 payInfo / 签名等内部数据。
+ */
+async function actionOrderList(openid) {
+  const list = await loadOrderByOpenid(openid);
+  const money = (fen) => {
+    const n = Number(fen || 0);
+    return `¥${(n / 100).toFixed(n % 100 === 0 ? 0 : 2)}`;
+  };
+  return {
+    code: 0,
+    data: {
+      list: (list || []).map((o) => {
+        const g = R.goodsById(o.goodsId);
+        return {
+          outTradeNo: String(o.outTradeNo || ''),
+          goodsId: String(o.goodsId || ''),
+          goodsName: (g && g.name) || String(o.goodsId || '虚拟商品'),
+          goodsDesc: (g && g.desc) || '',
+          amount: money(o.price),
+          status: String(o.status || 'created'),   // created 未支付 / paid 已支付待发货 / delivered 已到账
+          createdAt: Number(o.createdAt || 0),
+          paidAt: Number(o.paidAt || 0),
+          deliveredAt: Number(o.deliveredAt || 0),
+        };
+      }),
+    },
+  };
+}
+
+/**
  * 米大师发货回调（后台配的回调地址指向本函数）
  * 宽容解析：只认订单号 + 金额对得上就发货，幂等（已发过的不再发）。
  */
@@ -477,6 +509,7 @@ exports.main = async (event, context) => {
     if (action === 'createOrder') return await actionCreateOrder(openid, event);
     if (action === 'confirm') return await actionConfirm(openid, event);
     if (action === 'sync') return await actionSync(openid);
+    if (action === 'orderList') return await actionOrderList(openid);
     if (action === 'notify') return await actionNotify(event.body || event.rawBody || event);
     return { code: -1, msg: `未知 action：${action}` };
   } catch (e) {
