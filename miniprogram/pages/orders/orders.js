@@ -10,11 +10,12 @@
 const quota = require('../../utils/quota');
 const auth = require('../../utils/auth');
 
-const STATUS_TEXT = { delivered: '已到账', paid: '处理中', created: '待支付' };
+const STATUS_TEXT = { delivered: '已到账', paid: '处理中', created: '待支付', cancelled: '已取消' };
 const STATUS_HINT = {
   delivered: '额度已到账，可以直接去生成行程了',
   paid: '支付已成功，额度正在发放（一般几分钟内到账）',
   created: '这笔订单没有完成支付，不会扣费',
+  cancelled: '这笔订单已取消，不会扣费',
 };
 
 function pad(n) { return String(n).padStart(2, '0'); }
@@ -127,15 +128,15 @@ Page({
     }
   },
 
-  /** 删除订单（云端只允许删「待支付」的，已支付的会拒绝并给出原因） */
-  async onDelete(e) {
+  /** 取消订单（云端只允许取消「待支付」的，已支付/已到账的会拒绝并给出原因） */
+  async onCancel(e) {
     const no = e.currentTarget.dataset.no;
     if (!no) return;
     const r = await new Promise((resolve) => {
       wx.showModal({
-        title: '删除订单',
-        content: '这笔订单还没支付，删掉就没了。也可以直接「继续支付」买完它。',
-        confirmText: '删除',
+        title: '取消订单',
+        content: '这笔订单还没支付，不会产生扣费。取消后它会从列表里移除。也可以直接「继续支付」买完它。',
+        confirmText: '取消订单',
         confirmColor: '#e64340',
         cancelText: '再想想',
         success: (res) => resolve(res),
@@ -144,14 +145,14 @@ Page({
     });
     if (!r.confirm) return;
 
-    wx.showLoading({ title: '删除中…', mask: true });
+    wx.showLoading({ title: '取消中…', mask: true });
     try {
-      await quota.deleteOrder(no);
+      await quota.cancelOrder(no);
       wx.hideLoading();
-      wx.showToast({ title: '已删除', icon: 'success' });
+      wx.showToast({ title: '订单已取消', icon: 'success' });
     } catch (err) {
       wx.hideLoading();
-      wx.showModal({ title: '删不掉', content: (err && err.message) || '删除失败', showCancel: false });
+      wx.showModal({ title: '取消不了', content: (err && err.message) || '取消失败', showCancel: false });
     }
     this.refresh();
   },

@@ -73,10 +73,10 @@ async function loadOrder(outTradeNo) {
   return (res.data && res.data[0]) || null;
 }
 
-async function loadOrderByOpenid(openid) {
+async function loadOrderByOpenid(openid, limit) {
   await ensureColl(COL_ORDER);
   const res = await db.collection(COL_ORDER)
-    .where({ _openid: openid }).orderBy('createdAt', 'desc').limit(20).get();
+    .where({ _openid: openid }).orderBy('createdAt', 'desc').limit(limit || 20).get();
   return res.data || [];
 }
 
@@ -382,6 +382,7 @@ async function actionRepay(openid, event) {
   if (!order || order._openid !== openid) return { code: -1, msg: '订单不存在' };
   if (order.status === 'delivered') return { code: -2, msg: '这笔订单已经到账了，不用再付' };
   if (order.status === 'paid') return { code: -2, msg: '这笔订单已支付，额度发放中，点「同步订单」即可' };
+  if (order.status === 'cancelled') return { code: -2, msg: '这笔订单已取消，请回到付费页重新下单' };
 
   const g = R.goodsById(order.goodsId);
   if (!g) return { code: -3, msg: '商品已下架，请回到付费页重新购买' };
@@ -405,20 +406,24 @@ async function actionRepay(openid, event) {
 }
 
 /**
- * 删除订单：只允许删自己「待支付」的订单
- * 已支付/已到账的不给删——虚拟支付订单是对账和售后的唯一凭据，删了说不清。
+ * 取消订单：只允许取消自己「待支付」的订单
+ *
+ * 为什么是「取消」而不是「删除」：只把状态置为 cancelled、保留记录，
+ * 不物理删除——万一用户说"我付过钱"，订单还在就能查证；真删了就说不清了。
+ * 已支付 / 已到账的不给取消：那是对账和售后的凭据。
  */
-async function actionDeleteOrder(openid, event) {
+async function actionCancelOrder(openid, event) {
   const outTradeNo = String(event.outTradeNo || '');
   if (!outTradeNo) return { code: -1, msg: '缺少订单号' };
 
   const order = await loadOrder(outTradeNo);
   if (!order || order._openid !== openid) return { code: -1, msg: '订单不存在' };
+  if (order.status === 'cancelled') return { code: 0, data: { ok: true, duplicated: true, outTradeNo } };
   if (order.status !== 'created') {
-    return { code: -2, msg: '已支付的订单不能删除（用于对账和售后）' };
+    return { code: -2, msg: '已支付 / 已到账的订单不能取消（用于对账和售后）' };
   }
 
-  await db.collection(COL_ORDER).doc(order._id).remove();
+  await updateOrder(order._id, { status: 'cancelled', cancelledAt: Date.now() });
   return { code: 0, data: { ok: true, outTradeNo } };
 }
 
@@ -479,7 +484,9 @@ async function actionSync(openid) {
  * 且只给展示需要的字段，不吐 payInfo / 签名等内部数据。
  */
 async function actionOrderList(openid) {
-  const list = await loadOrderByOpenid(openid);
+  // 多取一些再剔除已取消的，保证列表页还能凑满 20 条有效记录
+  const all = await loadOrderByOpenid(openid, 50);
+  const list = (all || []).filter((o) => o.status !== 'cancelled').slice(0, 20);
   const money = (fen) => {
     const n = Number(fen || 0);
     return `¥${(n / 100).toFixed(n % 100 === 0 ? 0 : 2)}`;
@@ -588,7 +595,7 @@ exports.main = async (event, context) => {
     if (action === 'sync') return await actionSync(openid);
     if (action === 'orderList') return await actionOrderList(openid);
     if (action === 'repay') return await actionRepay(openid, event);
-    if (action === 'deleteOrder') return await actionDeleteOrder(openid, event);
+    if (action === 'cancelOrder') return await actionCancelOrder(openid, event);
     if (action === 'notify') return await actionNotify(event.body || event.rawBody || event);
     return { code: -1, msg: `未知 action：${action}` };
   } catch (e) {

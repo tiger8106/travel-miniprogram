@@ -203,10 +203,10 @@ async function payAgain(outTradeNo) {
   return confirmOrder(order.outTradeNo);
 }
 
-/** 删除订单（云端只允许删自己「待支付」的订单，已支付的不给删） */
-async function deleteOrder(outTradeNo) {
-  const r = await callFnKeepCode('virtualPay', { action: 'deleteOrder', outTradeNo });
-  if (r.code !== 0) throw new Error(r.msg || '删除失败');
+/** 取消订单（云端只允许取消自己「待支付」的订单；已支付/已到账的会拒绝） */
+async function cancelOrder(outTradeNo) {
+  const r = await callFnKeepCode('virtualPay', { action: 'cancelOrder', outTradeNo });
+  if (r.code !== 0) throw new Error(r.msg || '取消失败');
   return true;
 }
 
@@ -251,5 +251,5 @@ async function bindInvite(code) {
 
 module.exports = {
   info, ensure, ensureOrPay, guideToPay, clear,
-  pay, payAgain, deleteOrder, syncOrders, orderList, inviteInfo, bindInvite,
+  pay, payAgain, cancelOrder, syncOrders, orderList, inviteInfo, bindInvite,
 };

@@ -596,15 +596,20 @@ ok('订单中心：订单页已创建并在 app.json 注册，付费页有入口
     && /onTapOrders/.test(payPageJs) && /onTapOrders/.test(payPageWxml));
 
 // 继续支付必须复用**原订单号**重新签名（新开单号会留两条单、对不上账）；
-// 删除只能删自己「待支付」的订单，已支付的不给删（对账/售后凭据）
+// 取消订单 = 软取消（置 cancelled 保留记录），只允许本人待支付订单
 ok('订单中心：待支付订单可继续支付（复用原单号 repay）',
   /action === 'repay'/.test(payIdx) && /buildPayParams\(g, outTradeNo/.test(payIdx)
     && /quota\.payAgain\(/.test(ordersPageJs) && /onPayAgain/.test(ordersPageJs));
-ok('订单中心：删除订单仅允许本人待支付订单（已支付不给删）',
-  /action === 'deleteOrder'/.test(payIdx)
+ok('订单中心：取消订单仅允许本人待支付，且软取消保留记录（不物理删除）',
+  /action === 'cancelOrder'/.test(payIdx)
     && /order\._openid !== openid/.test(payIdx)
     && /order\.status !== 'created'/.test(payIdx)
-    && /已支付的订单不能删除/.test(payIdx));
+    && /status: 'cancelled'/.test(payIdx)
+    && /quota\.cancelOrder\(/.test(ordersPageJs) && /onCancel/.test(ordersPageJs)
+    && !/\.remove\(\)/.test(payIdx.slice(payIdx.indexOf('actionCancelOrder'), payIdx.indexOf('actionConfirm'))));
+ok('订单中心：已取消的订单不出现在列表，且不能再被续付',
+  /status !== 'cancelled'/.test(payIdx)
+    && /order\.status === 'cancelled'/.test(payIdx) && /已取消，请回到付费页重新下单/.test(payIdx));
 
 ok('付费页已注册且展示计费说明（避免"为什么又扣钱"的投诉）',
   /pages\/pay\/pay/.test(appJson2) && /计费说明/.test(payPageWxml)
