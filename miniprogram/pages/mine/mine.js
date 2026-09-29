@@ -235,23 +235,8 @@ Page({
   },
 
   onTapAbout() {
-    // 连点 5 次「关于」→ 开启开发者功能；再连点 5 次 → 关闭（体验版真机自查用）
-    const now = Date.now();
-    if (!this._aboutTapTs || now - this._aboutTapTs > 1500) this._aboutTaps = 0;
-    this._aboutTapTs = now;
-    this._aboutTaps = (this._aboutTaps || 0) + 1;
-    if (this._aboutTaps >= 5) {
-      this._aboutTaps = 0;
-      if (env.isDevToolsUnlocked()) {
-        env.lockDevTools();
-        wx.showToast({ title: '开发者功能已关闭', icon: 'none' });
-      } else {
-        const hours = env.unlockDevTools();
-        wx.showToast({ title: `开发者功能已开启 ${hours} 小时`, icon: 'none' });
-      }
-      return;
-    }
-
+    // 上线清理（2026-09-29）：原「连点 5 次解锁开发者功能」的隐藏入口已删除，
+    // 点「关于」就是单纯弹关于。需要调试入口时改 config.SHOW_DEV_TOOLS 重新编译。
     wx.showModal({
       title: '关于',
       content: `${config.APP_NAME} v${config.APP_VERSION}\n${config.APP_BRAND}\n\n运行环境：${env.envLabel()}`,
