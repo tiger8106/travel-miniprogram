@@ -585,6 +585,16 @@ ok('前端：支付走云函数下单（签名不出后端）',
     && /wx\.requestVirtualPayment/.test(quotaUtil)
     && /signData: order\.signData/.test(quotaUtil));
 
+// 订单中心（提审要求：含虚拟支付的小程序必须提供订单列表页）
+// 三件套缺一不可：云函数 orderList action / 页面存在且已在 app.json 注册 / 付费页有入口
+const ordersPageJs = fs.readFileSync(path.join(MP, 'pages/orders/orders.js'), 'utf8');
+ok('订单中心：云函数提供 orderList 且只返回本人订单',
+  /action === 'orderList'/.test(payIdx) && /loadOrderByOpenid/.test(payIdx));
+ok('订单中心：订单页已创建并在 app.json 注册，付费页有入口',
+  /quota\.orderList\(\)/.test(ordersPageJs)
+    && /pages\/orders\/orders/.test(appJson2)
+    && /onTapOrders/.test(payPageJs) && /onTapOrders/.test(payPageWxml));
+
 ok('付费页已注册且展示计费说明（避免"为什么又扣钱"的投诉）',
   /pages\/pay\/pay/.test(appJson2) && /计费说明/.test(payPageWxml)
     && /一次完整攻略 = 1 次额度/.test(payPageWxml));

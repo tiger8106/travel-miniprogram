@@ -59,6 +59,11 @@
       <text class="sync-text">付了钱额度没到账？</text>
       <text class="sync-btn" bindtap="onSync">刷新额度</text>
     </view>
+    <!-- 订单中心入口：提审时填的「小程序订单中心 path」指向这里 -->
+    <view class="orders-row" wx:if="{{loggedIn}}" bindtap="onTapOrders">
+      <text class="orders-text">🧾 我的订单</text>
+      <text class="orders-arrow">›</text>
+    </view>
   </view>
 
   <!-- 邀请 -->

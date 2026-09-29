@@ -185,6 +185,11 @@ Page({
     }
   },
 
+  /** 去订单中心（我的订单） */
+  onTapOrders() {
+    wx.navigateTo({ url: '/pages/orders/orders' });
+  },
+
   async onLogin() {
     const ok = await auth.ensureLogin('查看额度');
     if (ok) this.refresh();

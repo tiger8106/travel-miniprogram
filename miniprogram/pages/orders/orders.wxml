@@ -1,0 +1,63 @@
+<view class="container">
+
+  <!-- 未登录 -->
+  <view class="card" wx:if="{{!loggedIn}}">
+    <view class="empty">
+      <view class="empty-title">登录后查看订单</view>
+      <view class="empty-sub">订单按微信账号隔离，只看得到自己的购买记录</view>
+      <view class="btn-primary" bindtap="onLogin">微信登录</view>
+    </view>
+  </view>
+
+  <block wx:else>
+    <!-- 处理中提醒：付了钱额度没到，给一条明确出路 -->
+    <view class="card pending-card" wx:if="{{pendingCount}}">
+      <view class="pending-title">有 {{pendingCount}} 笔订单在「处理中」</view>
+      <view class="pending-desc">支付已成功，额度还没发放完成。点一下就能同步到账，不会重复扣款。</view>
+      <view class="btn-sync {{syncing ? 'btn-sync-off' : ''}}" bindtap="onSync">
+        {{syncing ? '同步中…' : '同步订单'}}
+      </view>
+    </view>
+
+    <!-- 订单列表 -->
+    <view class="card" wx:if="{{list.length}}">
+      <view class="card-title">🧾 购买记录</view>
+      <view class="order" wx:for="{{list}}" wx:key="outTradeNo">
+        <view class="order-top">
+          <view class="order-main">
+            <view class="order-name">{{item.goodsName}}</view>
+            <view class="order-desc" wx:if="{{item.goodsDesc}}">{{item.goodsDesc}}</view>
+          </view>
+          <view class="order-amount">{{item.amount}}</view>
+        </view>
+        <view class="order-bottom">
+          <view class="order-time">
+            <text>{{item.createdText}}</text>
+            <text class="order-delivered" wx:if="{{item.deliveredText}}"> · {{item.deliveredText}}</text>
+          </view>
+          <view class="order-status st-{{item.status}}">{{item.statusText}}</view>
+        </view>
+        <view class="order-no">订单号 {{item.outTradeNo}}</view>
+      </view>
+    </view>
+
+    <!-- 空态 -->
+    <view class="card" wx:if="{{!loading && !list.length}}">
+      <view class="empty">
+        <view class="empty-title">还没有购买记录</view>
+        <view class="empty-sub">新用户注册送 3 次，用完再来买也不迟</view>
+        <view class="btn-primary" bindtap="onGoPay">去看看套餐</view>
+      </view>
+    </view>
+
+    <!-- 说明 -->
+    <view class="card">
+      <view class="card-title">📋 说明</view>
+      <view class="rule-item">· 已到账：额度或会员已生效，可直接用于生成行程</view>
+      <view class="rule-item">· 处理中：钱已付、额度发放中，一般几分钟内到账</view>
+      <view class="rule-item">· 待支付：订单未完成支付，不会产生扣费</view>
+      <view class="rule-item">· 虚拟商品，到账后不支持退款；购买记录只保留最近 20 笔</view>
+    </view>
+  </block>
+
+</view>
