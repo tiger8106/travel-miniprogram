@@ -140,16 +140,6 @@ Page({
     outlineTitle: '',
     outlineSummary: '',
     outlineDays: [],
-    itemH: 0,                     // 每天卡片高度（px，拖动排序用）
-    areaH: 0,                     // 列表内容总高度（n × itemH）
-    listH: 0,                     // 可视区高度（超出才滚动）
-    // 拖动排序状态：长按才开始拖，拖动中卡片悬浮置顶并显示参考线
-    dragging: false,
-    dragIdx: -1,
-    dragShift: 0,                 // 拖动卡片的纵向位移（px）
-    guideTop: 0,                  // 参考线位置（px）
-    manualOffset: 0,              // 拖动中"假装滚动"的手动偏移（px，见下方说明）
-    scrollTop: 0,                 // 松手时把手动偏移同步成真实滚动位置
     dayForm: null,                // 正在编辑的那一天（null = 抽屉关闭）
     dayFormIdx: -1,
   },
@@ -158,14 +148,6 @@ Page({
     this._offAuth = auth.watch(this, {});
     // 兴趣偏好从本地恢复：上次 ✕ 掉的不再出现，没删的（选没选都算）全保留
     this.setData({ interestItems: loadInterests() });
-    // 拖动排序用：卡片高度固定 240rpx，换算成 px
-    const info = (wx.getWindowInfo && wx.getWindowInfo()) || {};
-    const winW = info.windowWidth || 375;
-    const winH = info.windowHeight || 667;
-    this._itemH = Math.round((winW / 750) * 240);
-    // 列表可视区：屏幕减去上方卡片和底部按钮，给滚动留出空间
-    this._listMaxH = Math.max(280, Math.round(winH - 330));
-    this.setData({ itemH: this._itemH });
     this.updateDaysText();
     this.updateEtaTexts();
   },
@@ -181,7 +163,6 @@ Page({
     if (this._offGen) { this._offGen(); this._offGen = null; }
     this._left = true;
     this.stopTicker();
-    this.resetEdge();   // 清掉拖动自动滚动的定时器
   },
 
   // ---------- 生成计时器 ----------
@@ -473,10 +454,7 @@ Page({
       const days = (res.outline && res.outline.days) || [];
       const outlineDays = days.map((d, i) => ({
         idx: i,
-        // 稳定 uid：movable-view 的 wx:key 必须用它。若用 idx 当 key，
-        // 重排后组件按 key 复用、内容换家，表现为"松手卡片又弹回去"。
         uid: 'd' + i,
-        __src: i,               // 对应 outline.days 的下标，拖动排序后据此重排
         date: d.d || d.date || '',
         theme: d.t || d.theme || '',
         city: d.city || '',
@@ -487,9 +465,7 @@ Page({
           return p.filter(Boolean).join(' ');
         }).join('；'),
         highlights: (d.hl || d.highlights || []).join(' · '),
-        y: i * this._itemH,
       }));
-      const areaH = outlineDays.length * this._itemH;
       this.stopTicker();
       this.setData({
         step: 'outline',
@@ -499,8 +475,6 @@ Page({
         outlineTitle: res.title || '我的行程',
         outlineSummary: res.summary || '',
         outlineDays,
-        areaH,
-        listH: Math.min(areaH, this._listMaxH),
         title: res.title,
         summary: res.summary,
       });
@@ -539,6 +513,11 @@ Page({
       const result = await genrunner.start(this._input);
       if (!result || !result.tripId) {
         throw new Error((result && result.error) || '后台生成没有产出行程，请重试');
+      }
+      if (result.partial) {
+        this.stopTicker(); this.setData({ generating: false, genTip: '' });
+        wx.showToast({ title: '仍在后台生成，可到首页查看进度', icon: 'none' });
+        return;
       }
       app.globalData.currentTripId = result.tripId;
       homeCache.clear();
@@ -666,200 +645,6 @@ Page({
     this.setData({ outline: Object.assign({}, outline, { days }) });
   },
 
-  // ---------- 大纲：拖动排序 ----------
-  //
-  // 交互约定（2026-09-24 重做）：
-  //   · 长按进入拖动，拖动卡缩小 + 半透明，悬浮置顶
-  //   · 蓝色参考线永远贴在"拖动卡中心最近的缝隙"上——线在哪，松手就落到哪
-  //   · 落点 = 有几张"其他"卡片的中心在拖动卡中心上方（中心对中心）。
-  //     旧版按"卡片顶边"算落点、插入时又没扣除"先删掉自己"的下标前移，
-  //     导致线在第 2、3 天中间，松手却落到第 3 天后面（Tiger 截图实锤）
-  //   · 参考线能到最顶上（第 1 天之前）和最底下（最后一天之后）
-  //   · 拖动卡贴在可视区上/下边缘超过 1 秒 → 列表自动滚动，远处的天能拖过去
-  //
-  // 为什么自动滚动要手动算偏移（manualOffset）而不是设 scroll-top：
-  //   拖动中 scroll-y 是关的（不然手指一动页面跟着滚），scroll-top 设了不生效。
-  //   改成给所有卡片 top 叠加手动偏移来"假装滚动"，松手时再把真实
-  //   scroll-top 一次性同步过去，视觉上无缝衔接。
-
-  onDayScroll(e) {
-    this._scrollTop = e.detail.scrollTop || 0;
-  },
-
-  // 长按卡片进入拖动模式（避免上下滑页面时误拖）
-  onDayLongPress(e) {
-    if (this.data.generating) return;
-    const idx = Number(e.currentTarget.dataset.idx);
-    const t = (e.touches && e.touches[0]) || (e.changedTouches && e.changedTouches[0]);
-    this._dragStartY = t ? t.clientY : 0;
-    this._lastClientY = this._dragStartY;
-    this._dragTarget = idx;
-    this._frozenScroll = this._scrollTop || 0;
-    this._manualOff = 0;
-    this._edgeDir = 0;
-    this._edgeSince = 0;
-    // 列表可视区位置（边缘自动滚动要用），异步拿，拿不到就只是没有自动滚动
-    this._scrollRect = null;
-    wx.createSelectorQuery().in(this).select('.day-scroll').boundingClientRect((r) => {
-      this._scrollRect = r || null;
-    }).exec();
-    this.setData({
-      dragging: true,
-      dragIdx: idx,
-      dragShift: 0,
-      manualOffset: 0,
-      guideTop: idx * (this._itemH || 0),
-    });
-    wx.vibrateShort && wx.vibrateShort({ type: 'medium' });
-  },
-
-  // 拖动中：卡片跟着手指走，实时算落点画参考线 + 侦测边缘自动滚动
-  onDayTouchMove(e) {
-    if (!this.data.dragging) return;
-    const t = (e.touches && e.touches[0]) || {};
-    if (typeof t.clientY !== 'number') return;
-    this._lastClientY = t.clientY;
-    this.updateDrag();
-    this.watchEdge();
-  },
-
-  // 根据手指当前位置重算拖动卡位移与参考线位置
-  updateDrag() {
-    const idx = this.data.dragIdx;
-    const n = this.data.outlineDays.length;
-    const h = this._itemH || 1;
-    // 位移限制在列表内，拖不出界
-    let dy = this._lastClientY - this._dragStartY;
-    dy = Math.max(-idx * h, Math.min((n - 1 - idx) * h, dy));
-
-    // 落点 = 有几张"其他"卡片的中心在拖动卡中心上方
-    const center = idx * h + dy + h / 2;
-    let target = 0;
-    for (let i = 0; i < n; i++) {
-      if (i !== idx && (i + 0.5) * h < center) target++;
-    }
-    target = Math.max(0, Math.min(n - 1, target));
-    // 参考线画在"落点对应的缝隙"上：落点在自己之后 → 线在下标 target+1 的
-    // 顶边（其他卡没动，那个位置才是用户看到的缝隙）；在之前/原位 → target 的顶边
-    const guide = (target > idx ? target + 1 : target) * h;
-
-    const shift = Math.round(dy);
-    if (shift === this.data.dragShift && target === this._dragTarget) return; // 节流
-    this._dragTarget = target;
-    this.setData({ dragShift: shift, guideTop: guide });
-  },
-
-  // 边缘侦测：拖动卡在可视区上/下边缘停住超过 1 秒 → 开始自动滚动
-  watchEdge() {
-    const rect = this._scrollRect;
-    if (!rect) return;
-    const maxScroll = Math.max(0, this.data.areaH - (rect.height || this.data.listH));
-    if (maxScroll <= 0) return; // 列表没超出可视区，没什么可滚的
-    const EDGE = 56; // px：手指进入上下 56px 范围算"贴边"
-    const y = this._lastClientY;
-    let dir = 0;
-    if (y < rect.top + EDGE) dir = -1;
-    else if (y > rect.top + rect.height - EDGE) dir = 1;
-
-    if (!dir) { this.resetEdge(); return; }
-    if (this._edgeDir !== dir) {
-      this.resetEdge();
-      this._edgeDir = dir;
-      this._edgeSince = Date.now();
-      return;
-    }
-    if (!this._autoTimer && Date.now() - this._edgeSince > 1000) {
-      this._autoTimer = setInterval(() => this.autoScrollStep(), 40);
-    }
-  },
-
-  resetEdge() {
-    this._edgeDir = 0;
-    this._edgeSince = 0;
-    if (this._autoTimer) { clearInterval(this._autoTimer); this._autoTimer = null; }
-  },
-
-  // 自动滚动：内容每次挪 10px（约 250px/s），拖动卡通过补位移保持贴在手指下
-  autoScrollStep() {
-    const dir = this._edgeDir;
-    if (!dir || !this.data.dragging) { this.resetEdge(); return; }
-    const rect = this._scrollRect || { height: this.data.listH };
-    const maxScroll = Math.max(0, this.data.areaH - (rect.height || this.data.listH));
-    // 手动偏移可调范围：滚到顶 = -frozen，滚到底 = maxScroll - frozen
-    const lo = -this._frozenScroll;
-    const hi = maxScroll - this._frozenScroll;
-    const next = Math.max(lo, Math.min(hi, this._manualOff + dir * 10));
-    const applied = next - this._manualOff;
-    if (!applied) { this.resetEdge(); return; } // 已经滚到头/尾了
-    this._manualOff = next;
-    // 内容滚了 applied、手指没动 → 拖动卡位移同步补上，才能继续贴在手指下
-    this._dragStartY -= applied;
-    this.setData({ manualOffset: next });
-    this.updateDrag();
-  },
-
-  // 松手：落到参考线所在位置
-  onDayTouchEnd() {
-    if (!this.data.dragging) return;
-    this.resetEdge();
-    const idx = this.data.dragIdx;
-    const target = typeof this._dragTarget === 'number' ? this._dragTarget : idx;
-    // 把"假装滚动"的偏移同步成真实滚动位置（值不变时 scroll-view 不会跳，视觉无缝）
-    const maxScroll = Math.max(0, this.data.areaH - this.data.listH);
-    const finalScroll = Math.max(0, Math.min(maxScroll, this._frozenScroll + this._manualOff));
-    this._manualOff = 0;
-    this.setData({
-      dragging: false, dragIdx: -1, dragShift: 0,
-      manualOffset: 0, scrollTop: finalScroll,
-    });
-    this._scrollTop = finalScroll;
-    this._dragTarget = null;
-    if (target === idx) return;   // 没换位置
-    const list = this.data.outlineDays.slice();
-    const moved = list.splice(idx, 1)[0];
-    list.splice(target, 0, moved);
-    this.applyDayOrder(list);
-    wx.vibrateShort && wx.vibrateShort({ type: 'light' });
-  },
-
-  // 重排后统一刷新：序号 / 日期 / 纵坐标 / 云函数用的 outline
-  applyDayOrder(list) {
-    const h = this._itemH || 1;
-
-    // ① 先按"旧 __src"重排云函数用的 outline.days：
-    //    list 里每项的 __src 还是"重排前"的下标，用它去旧 outline.days 里取内容。
-    //    （必须先做这步再重置 __src，顺序反了 outline 会保持旧顺序不变
-    //      ——"拖完生成的攻略还是按拖动前的顺序"就是这么来的）
-    const outline = this.data.outline;
-    const srcDays = (outline && outline.days) || [];
-    let newDays = null;
-    if (srcDays.length === list.length) {
-      newDays = list.map((d, i) => {
-        const src = srcDays[d.__src == null ? d.idx : d.__src];
-        const date = plusDays(this.data.startDate, i);
-        return src ? Object.assign({}, src, { d: date, date }) : null;
-      }).filter(Boolean);
-    }
-
-    // ② 再重建渲染用的大纲：序号 / 日期（连续重排）/ 纵坐标，
-    //    __src 重置成当前下标（outline.days 已与新顺序一致，下次拖动才不会拿错天）
-    const outlineDays = list.map((d, i) => Object.assign({}, d, {
-      idx: i,
-      __src: i,
-      date: plusDays(this.data.startDate, i),
-      y: i * h,
-    }));
-    const endDate = outlineDays.length ? outlineDays[outlineDays.length - 1].date : this.data.startDate;
-
-    this.setData({
-      outlineDays,
-      areaH: outlineDays.length * h,
-      endDate,
-      endRange: pickRange(endDate),
-      endVal: pickVal(endDate),
-      outline: newDays ? Object.assign({}, outline, { days: newDays }) : outline,
-    }, () => { this.updateDaysText(); this.updateEtaTexts(outlineDays.length); });
-  },
 
   // ---------- 阶段二：展开逐天详情并入库 ----------
   //
@@ -883,14 +668,14 @@ Page({
     const t0 = Date.now();
     this.startTicker('正在细化每天的安排', eta.estimate('detail', totalDays));
 
-    // 订阅进度：续跑时把"已细化 x/y 天"刷到遮罩上，并明确告诉用户可以走了
+    // 只统计已完成检查并保存的日期，不显示未经复核的候选天数。
     let toldCanLeave = false;
     this._offGen = genrunner.subscribe((s) => {
       if (!s || s.status !== 'running') return;
       const p = s.progress || {};
       const done = p.done || 0;
       if (p.total) {
-        const action = p.stage === 'review' ? '已复核' : '已细化';
+        const action = '已检查并保存';
         this.setTipExtra(toldCanLeave ? `${action} ${Math.min(done, p.total)}/${p.total} 天`
           : `${action} ${Math.min(done, p.total)}/${p.total} 天（可离开，后台继续）`);
         this.setEst((Date.now() - t0) + eta.estimate('detail', Math.max(0, p.total - done)));
@@ -903,6 +688,12 @@ Page({
 
     try {
       const result = await genrunner.start(base);
+      if (result.partial) {
+        if (this._offGen) { this._offGen(); this._offGen = null; }
+        this.stopTicker(); this.setData({ generating: false, genTip: '' });
+        wx.showToast({ title: '仍在后台生成，可到首页查看进度', icon: 'none' });
+        return;
+      }
       if (this._offGen) { this._offGen(); this._offGen = null; }
       this.stopTicker();
       // 记下真实耗时（含续跑的每一轮），下次预估就按这个来

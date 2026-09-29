@@ -47,7 +47,7 @@ const { validateOutlineHotels } = require('../cloudfunctions/generatePlan/hotel-
     assert(empty.partial); assert.deepEqual(empty.doneDayIndexes, [0]);
     assert.equal(JSON.stringify(acceptedOutline.days[0]), savedDay, '失败续跑不能重排已通过日期大纲');
   } finally { L.chatWithRetry = original; }
-  // 同批其他日期成功也不能用骨架伪造重试耗尽的日期。
+  // 用户要求优先完成：重试耗尽按大纲补全，但必须明确标为待确认，不冒称通过。
   try {
     L.chatWithRetry = async () => JSON.stringify([room]);
     const failedOutline = { days: [
@@ -56,9 +56,12 @@ const { validateOutlineHotels } = require('../cloudfunctions/generatePlan/hotel-
     ] };
     const mixed = await P.buildPlan({ origin: '用户家', startDate: '2026-12-20', endDate: '2026-12-21' },
       { outline: failedOutline }, { attempts: { 1: 3 } });
-    assert(mixed.partial); assert(mixed.reviewError.includes('第2天'));
-    assert(mixed.items.length && mixed.items.every((item) => Number(item.dayIndex || 0) === 0));
-    assert.deepEqual(mixed.gaveUpDayIndexes, [1]);
+    assert(mixed.partial); assert(!mixed.reviewError);
+    assert(mixed.items.some((item) => Number(item.dayIndex || 0) === 0));
+    const fallback = mixed.items.filter((item) => Number(item.dayIndex || 0) === 1);
+    assert(fallback.length && fallback.every((item) => item.executionReviewStatus === 'needs_confirmation'));
+    assert(fallback.some((item) => /待确认/.test(item.note)));
+    assert.deepEqual(mixed.gaveUpDayIndexes, []);
   } finally { L.chatWithRetry = original; }
   const result = { outline: { days: [{ city: '甲城市', overnight: '甲城市', hotel: '晨光酒店' }, { overnight: '返程' }] } };
   await validateOutlineHotels(result, {}, async () => ({ matchedName: '晨光酒店', city: '甲城市', district: '乙县', address: '乙县中心路8号' }), async () => null);

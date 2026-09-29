@@ -35,6 +35,8 @@ const jsFiles = [
   'components/ticket-alarm/ticket-alarm.js',
   'components/map-button/map-button.js',
   'pages/planner/planner.js',
+  'pages/mytrips/mytrips.js',
+  'utils/genrunner.js',
   'utils/eta.js',
   'utils/cloud.js',
   'utils/request.js',
@@ -53,7 +55,7 @@ fs.readdirSync(CF).forEach((dir) => {
   ok(`JS 语法 cloudfunctions/${dir}/index.js`, !err, err || '');
 });
 ['generatePlan/plan.js', 'generatePlan/schedule.js', 'generatePlan/rail12306.js', 'generatePlan/hotel-validation.js',
-  'generatePlan/execution-review.js', 'generatePlan/route-evidence.js', 'generatePlan/solar-time.js'].forEach((rel) => {
+  'generatePlan/execution-review.js', 'generatePlan/publication.js', 'generatePlan/route-evidence.js', 'generatePlan/solar-time.js'].forEach((rel) => {
   const err = syntaxOk(path.join(CF, rel));
   ok(`JS 语法 cloudfunctions/${rel}`, !err, err || '');
 });
@@ -81,6 +83,9 @@ checkPair('components/ticket-alarm/ticket-alarm.wxml', 'components/ticket-alarm/
 checkPair('pages/tickets/tickets.wxml', 'pages/tickets/tickets.js');
 checkPair('pages/pay/pay.wxml', 'pages/pay/pay.js');
 checkPair('pages/mine/mine.wxml', 'pages/mine/mine.js');
+checkPair('pages/planner/planner.wxml', 'pages/planner/planner.js');
+checkPair('pages/mytrips/mytrips.wxml', 'pages/mytrips/mytrips.js');
+checkPair('pages/index/index.wxml', 'pages/index/index.js');
 
 // ---------- ③ 残留 & 关键改动检查 ----------
 const actWxml = fs.readFileSync(path.join(MP, 'components/activity-item/activity-item.wxml'), 'utf8');
@@ -746,6 +751,19 @@ ok('闹钟保存先校验行程归属且更新字段白名单化',
     && /safePatch\.fireAtStr/.test(alarmFn2));
 ok('退出登录清理本地快照，避免账号切换串数据',
   /require\('\.\/homecache'\)\.clearAll/.test(auth2));
+
+ok('失败生成提示可单独清除，删除行程同步清任务和本地状态',
+  /dismissJob/.test(genIndex2) && /catchtap="onDismissGen"/.test(fs.readFileSync(path.join(MP, 'pages/mytrips/mytrips.wxml'), 'utf8'))
+    && /dismissed: true/.test(itineraryFn2) && /forgetTrip/.test(genrunnerJs));
+ok('大纲只按日期展示，不再绑定长按拖动或重排日期',
+  !/bindlongpress|onDayTouch|manualOffset|drag-guide/.test(fs.readFileSync(path.join(MP, 'pages/planner/planner.wxml'), 'utf8'))
+    && !/onDayLongPress|applyDayOrder/.test(plannerJs));
+ok('候选隔离，进度以整天检查后的实际发布内容为准',
+  /publicationState/.test(genIndex2) && /genDraftItems/.test(genIndex2) && /delete out.genDraftItems/.test(itineraryFn2)
+    && /publication.progress.done < publication.progress.total/.test(genIndex2));
+ok('局部重复失败带警示收尾，已发布日期保留、不终止整单',
+  /finalizeWithWarnings/.test(planJs) && /needs_confirmation/.test(fs.readFileSync(path.join(CF, 'generatePlan/execution-review.js'), 'utf8'))
+    && /preservePublishedDays: true/.test(genIndex2) && /finalizePending/.test(genIndex2));
 
 console.log(failed ? `\n${failed} 项失败 ✗` : '\n全部通过 ✓');
 process.exit(failed ? 1 : 0);

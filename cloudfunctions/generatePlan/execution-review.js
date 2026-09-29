@@ -20,14 +20,15 @@ function collectMealNames(rows, knownNames = []) {
 }
 
 // 并行复核时，下一天不能依赖上一天尚未写入的餐饮结果。合并后再检查一次。
-function invalidateRepeatedMeals(days, rows, extra = '') {
+function invalidateRepeatedMeals(days, rows, extra = '', publishedDays = new Set()) {
   const changed = new Set();
   days.forEach((day, di) => {
     const current = rows.filter((row) => Number(row.dayIndex || 0) === di);
     if (!current.length) return;
     const names = collectMealNames(current, day.meals || []);
     day.executionMealNames = names;
-    if (!di || !current.every((row) => row.executionReview === REVIEW_VERSION)) return;
+    if (!di || publishedDays.has(di) || current.some((row) => row.executionReviewStatus === 'needs_confirmation')
+      || !current.every((row) => row.executionReview === REVIEW_VERSION)) return;
     const previous = rows.filter((row) => Number(row.dayIndex || 0) === di - 1);
     const repeats = names.filter((name) => collectMealNames(previous, (days[di - 1] || {}).meals || []).includes(name)
       && !positiveInstructions(extra).includes(name));
@@ -47,6 +48,7 @@ function invalidateUnsafeAcceptedDays(profile, outline, rows, selfDriveAllowed) 
   days.forEach((day, di) => {
     const current = rows.filter((row) => Number(row.dayIndex || 0) === di);
     if (!current.length || !current.every((row) => row.executionReview === REVIEW_VERSION)) return;
+    if (current.some((row) => row.executionReviewStatus === 'needs_confirmation')) return;
     const previous = days[di - 1] || {};
     const proofs = [...(day.executionNetworkFacts || []), ...(day.executionRoadFacts || []), ...(day.executionTransitFacts || [])];
     const context = {
@@ -891,6 +893,7 @@ function acceptExecutionRows(rows, dayIndex, day, context) {
     if (fact) { row.schedSource = '12306'; row.outlineMove = true; }
     if ((context.solar || []).some((entry) => entry.startTime === row.startTime && entry.endTime === row.endTime)) row.timingLocked = true;
     row.executionReview = REVIEW_VERSION;
+    row.executionReviewStatus = 'passed';
   });
   syncAcceptedMoves(day, rows);
   delete day.executionReviewIssues; delete day.executionCandidate;
@@ -901,6 +904,38 @@ function acceptExecutionRows(rows, dayIndex, day, context) {
   day.executionMealNames = collectMealNames(rows, day.meals || []);
   console.log('[generatePlan.review] 第%d天执行复核通过，%d条', dayIndex + 1, rows.length);
   return rows;
+}
+
+function finalizeWithWarnings(rows, dayIndex, day, issues, context = {}) {
+  context = Object.assign({}, context, { solar: context.solar || rows.filter((row) => row.timingLocked) });
+  const result = normalizeReviewRows(rows, dayIndex, context);
+  if (!result.length) return result;
+  const warnings = [...new Set([...(issues || []), ...executionIssues(result, context)]
+    .map((message) => String(message).replace(/请调整.*$/, '请核实后调整')))].slice(0, 6);
+  if (!warnings.length) warnings.push('此日运营资料暂未完成核验，请出行前确认交通、开放时间和接驳。');
+  result.forEach((row) => {
+    row.executionReview = REVIEW_VERSION; // 已完成处理，不表示事实已核实。
+    row.executionReviewStatus = 'needs_confirmation';
+    row.city = day.city || '';
+    if ((context.official || []).some((fact) => sameEndpoint(fact.startLocation, row.startLocation)
+      && sameEndpoint(fact.endLocation, row.endLocation) && fact.startTime === row.startTime && fact.endTime === row.endTime)) {
+      row.schedSource = '12306'; row.outlineMove = true;
+    }
+    if (context.solar.some((fact) => fact.startTime === row.startTime && fact.endTime === row.endTime)) row.timingLocked = true;
+  });
+  warnings.forEach((warning) => {
+    const match = /索引(\d+)/.exec(warning);
+    const target = match && result[Number(match[1])] || result.find((row) =>
+      row.category === 'transport' && /车次|交通|铁路|班次|接驳/.test(warning)) || result[0];
+    const concise = warning.slice(0, 160);
+    target.validationWarnings = [...new Set([...(target.validationWarnings || []), concise])];
+    if (!String(target.note || '').includes(concise)) target.note = [target.note, `待确认：${concise}`].filter(Boolean).join('；');
+  });
+  day.executionReviewWarnings = warnings;
+  day.executionReviewStatus = 'needs_confirmation';
+  delete day.executionCandidate;
+  syncAcceptedMoves(day, result);
+  return result;
 }
 
 async function reviewExecutionItems(profile, outline, items, deadline, options = {}) {
@@ -1075,4 +1110,4 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
   return results.flat();
 }
 
-module.exports = { REVIEW_VERSION, collectMealNames, invalidateRepeatedMeals, invalidateUnsafeAcceptedDays, syncAcceptedMoves, applyExecutionPatch, minute, sameEndpoint, fitEstimatedReturn, fitEstimatedConnections, normalizeReviewRows, executionIssues, reviewExecutionItems };
+module.exports = { REVIEW_VERSION, collectMealNames, invalidateRepeatedMeals, invalidateUnsafeAcceptedDays, syncAcceptedMoves, finalizeWithWarnings, applyExecutionPatch, minute, sameEndpoint, fitEstimatedReturn, fitEstimatedConnections, normalizeReviewRows, executionIssues, reviewExecutionItems };

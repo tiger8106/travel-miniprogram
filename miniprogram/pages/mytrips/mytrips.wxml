@@ -22,7 +22,7 @@
       <view class="gen-main">
         <view class="gen-title">正在后台生成「{{genState.title || '新攻略'}}」</view>
         <view class="gen-sub">
-          已细化 {{genState.progress.done || 0}}/{{genState.progress.total || 0}} 天 · 可以离开本页面，跑完会自动保存
+          已检查并保存 {{genState.progress.done || 0}}/{{genState.progress.total || 0}} 天 · 正在生成和检查其余日期
         </view>
       </view>
       <view class="gen-btn">催一下</view>
@@ -33,7 +33,10 @@
         <view class="gen-title">上次生成没跑完</view>
         <view class="gen-sub">{{genState.error || '点这里可以继续生成'}}</view>
       </view>
-      <view class="gen-btn">继续生成</view>
+      <view class="gen-actions">
+        <view class="gen-btn">继续生成</view>
+        <view class="gen-dismiss" catchtap="onDismissGen">清除提示</view>
+      </view>
     </view>
 
     <view wx:for="{{trips}}" wx:key="_id" wx:for-item="trip" class="trip-card card {{trip.ended ? 'trip-card-ended' : ''}}">

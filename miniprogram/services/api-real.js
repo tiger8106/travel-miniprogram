@@ -135,6 +135,10 @@ async function genJobStatus() {
   return callFn('generatePlan', { action: 'jobStatus' });
 }
 
+async function dismissGen(jobId) {
+  return callFn('generatePlan', { action: 'dismissJob', jobId });
+}
+
 // 上传 / 下载
 async function uploadDoc(localPath) {
   const ts = Date.now();
@@ -170,6 +174,7 @@ module.exports = {
   startGen,
   resumeGen,
   genJobStatus,
+  dismissGen,
   uploadDoc,
   downloadFromCloud,
 };

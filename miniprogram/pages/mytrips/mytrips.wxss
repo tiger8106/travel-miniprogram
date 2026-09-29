@@ -76,6 +76,9 @@
   border-radius: 999rpx;
 }
 .gen-bar-fail .gen-btn { background: #ea580c; }
+.gen-actions { flex-shrink: 0; margin-left: 12rpx; display: flex; flex-direction: column; align-items: center; }
+.gen-actions .gen-btn { margin-left: 0; }
+.gen-dismiss { margin-top: 8rpx; padding: 12rpx; font-size: 24rpx; color: #9a3412; }
 .tag-gen {
   background: #dbeafe !important;
   color: #1e40af !important;

@@ -21,3 +21,8 @@ console.log('✓ 原文模糊日期不被模型编成固定提醒，其他类型
 assert.equal(rules.cleanAlarms([{ title: '预订甲城直通车', type: 'bus', fireAt: '2026-09-22 09:00' }],
   'test-user', Date.now(), '9月22～26日\n预订甲城直通车。\n9月22日 17:30\n抢G1001高铁票。').length, 0);
 console.log('✓ 大巴模糊日期范围不被同日铁路精确时刻背书');
+assert.equal(rules.cleanAlarms([{ title: '预订甲城直通车', type: 'bus', fireAt: '2026-09-22 09:00' }],
+  'test-user', Date.now(), '10月1日\n甲城 → 乙城直通车\n9月22～26日\n08:00～09:00出发\n10月2日\n其他安排。').length, 0);
+assert.equal(rules.cleanAlarms(uncertain, 'test-user', Date.now(),
+  '甲酒店\n9月15日前后\n9月15日 09:00\n抢G1001高铁票。').length, 0);
+console.log('✓ 表格事项位于模糊日期之前也会识别，前后上下文不越过相邻日期');

@@ -185,64 +185,10 @@
   margin-bottom: 12rpx;
 }
 
-/* 拖动排序容器：每天卡片高度固定（js 里按屏幕宽度换算成 px） */
-.day-scroll {
-  width: 100%;
-  margin-bottom: 24rpx;
-}
-
-.day-list {
-  position: relative;
-  width: 100%;
-}
-
-/* 每天卡片绝对定位：top 由下标 × 卡片高度算出 */
-.di {
-  position: absolute;
-  left: 0;
-  right: 0;
-  box-sizing: border-box;
-  z-index: 1;
-  transition: transform 0.18s ease, top 0.18s ease;
-}
-
-/* 拖动中的卡片：悬浮最上层 + 缩小一点（inline transform 里的 scale(0.96)）
-   + 半透明，让下面的卡片和参考线透出来，落点看得更清楚 */
-.di-drag {
-  z-index: 99;
-  transition: none;
-  opacity: 0.88;
-}
-
-.di-drag .outline-item {
-  box-shadow: 0 12rpx 32rpx rgba(25, 137, 250, 0.28);
-  border: 2rpx solid var(--primary);
-}
-
-/* 参考线：松手后卡片落到这条线上 */
-.drag-guide {
-  position: absolute;
-  left: 0;
-  right: 0;
-  height: 0;
-  border-top: 4rpx dashed var(--primary);
-  z-index: 98;
-  pointer-events: none;
-}
-
-.drag-guide::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: -8rpx;
-  width: 16rpx;
-  height: 16rpx;
-  border-radius: 50%;
-  background: var(--primary);
-}
+.day-list { margin-bottom: 24rpx; }
+.di { margin-bottom: 16rpx; }
 
 .outline-item {
-  height: 100%;
   box-sizing: border-box;
   background: var(--bg-card);
   border-radius: 16rpx;
@@ -255,12 +201,6 @@
 .oi-head {
   display: flex;
   align-items: center;
-}
-
-.oi-grip {
-  font-size: 28rpx;
-  color: var(--text-placeholder);
-  margin-right: 12rpx;
 }
 
 .oi-day {
