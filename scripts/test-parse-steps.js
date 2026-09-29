@@ -64,7 +64,7 @@ ok(llm.STEP_TIMEOUT_MS <= 25 * 1000, '分步单请求超时 ≤25s（25+25 重�
 const idx = require('fs').readFileSync(require('path').join(__dirname, '../cloudfunctions/parseTravelPlan/index.js'), 'utf8');
 ok(/event\.step/.test(idx) && /handleStep/.test(idx), '主入口有 step 分发');
 ok(/function cleanAlarms/.test(idx), '闹钟清洗抽成共享函数（两条链路同款）');
-ok(/cleanAlarms\(structured\.alarms, openid, now\)/.test(idx), '单次模式改用共享清洗');
-ok(/cleanAlarms\(task\.alarmsRaw, openid, now\)/.test(idx), '分步模式用同一份清洗');
+ok(/cleanAlarms\(structured\.alarms, openid, now, rawText\)/.test(idx), '单次模式共享清洗并核对原文模糊日期');
+ok(/cleanAlarms\(task\.alarmsRaw, openid, now, \(task\.booking/.test(idx), '分步模式同款清洗并核对预订原文');
 
 console.log(process.exitCode ? '\n有失败项 ✗' : '\n全部通过 ✓');

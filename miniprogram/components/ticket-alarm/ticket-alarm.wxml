@@ -12,26 +12,24 @@
 
   <view class="alarm-action-time">办理：{{item.actionFriendly || item.friendly}}</view>
 
-  <view wx:if="{{item.usageInfo}}" class="alarm-usage">{{item.usageInfo}}</view>
+  <view wx:if="{{displayInfo}}" class="alarm-usage">{{displayInfo}}</view>
 
-  <view wx:if="{{item.bookingInfo}}" class="alarm-note">关联信息：{{item.bookingInfo}}</view>
-
-  <view wx:if="{{item.note}}" class="alarm-note">{{item.note}}</view>
-
-  <view class="alarm-actions {{devMode ? 'actions-with-test' : ''}}">
-    <view class="action-row action-icon-row">
-      <view class="action-cell primary" bindtap="onTapCalendar"><text class="action-icon">📅</text></view>
-      <view wx:if="{{devMode}}" class="action-cell" bindtap="onTapTest"><text class="action-icon">🔔</text></view>
-      <view class="action-cell complete" bindtap="onTapComplete"><text class="action-icon">{{item.completed ? '↩' : '✓'}}</text></view>
-      <view class="action-cell" bindtap="onTapEdit"><text class="action-icon">✏️</text></view>
-      <view class="action-cell danger" bindtap="onTapDelete"><text class="action-icon">🗑</text></view>
+  <view class="alarm-actions">
+    <!-- 每个操作是一个完整的“图标 + 文字”组合；窄屏换行时组合不会被拆成两个按钮。 -->
+    <view class="action-pair primary" bindtap="onTapCalendar">
+      <text class="action-icon">📅</text><text class="action-label">日历</text>
     </view>
-    <view class="action-row action-text-row">
-      <view class="action-cell primary" bindtap="onTapCalendar">日历</view>
-      <view wx:if="{{devMode}}" class="action-cell" bindtap="onTapTest">测试</view>
-      <view class="action-cell complete" bindtap="onTapComplete">{{item.completed ? '恢复待办' : '已完成'}}</view>
-      <view class="action-cell" bindtap="onTapEdit">编辑</view>
-      <view class="action-cell danger" bindtap="onTapDelete">删除</view>
+    <view wx:if="{{devMode}}" class="action-pair" bindtap="onTapTest">
+      <text class="action-icon">🔔</text><text class="action-label">测试</text>
+    </view>
+    <view class="action-pair complete" bindtap="onTapComplete">
+      <text class="action-icon">{{item.completed ? '↩' : '✓'}}</text><text class="action-label">{{item.completed ? '恢复待办' : '已完成'}}</text>
+    </view>
+    <view class="action-pair" bindtap="onTapEdit">
+      <text class="action-icon">✏️</text><text class="action-label">编辑</text>
+    </view>
+    <view class="action-pair danger" bindtap="onTapDelete">
+      <text class="action-icon">🗑</text><text class="action-label">删除</text>
     </view>
   </view>
 </view>

@@ -21,6 +21,8 @@ const crypto = require('crypto');
 const {
   generateOutline, buildPlan, dayDiff, collectSegments, applyRealSchedules,
   auditMergedDetailItems,
+  backfillDetailAlarms, linkBookingAlarms, normalizeBookingAlarmKinds,
+  dedupeBookingAlarmRecords, annotateAlarmUsage, normalizeInput,
 } = require('./plan');
 const { geocodeBatch, cityTokens, searchHotelPoi, searchHotelsNearby } = require('./geocode');
 const { validateOutlineHotels } = require('./hotel-validation');
@@ -36,7 +38,7 @@ const COL_SCHED = 'schedule_cache';
 const SCHED_TTL_MS = 36 * 3600 * 1000;
 
 // 生成引擎版本（用于确认线上跑的是哪一版）
-const GEN_VERSION = 'v2.10-deadline-route-audit';
+const GEN_VERSION = 'v2.14-evidence-execution-review';
 
 async function generateOutlineWithHotelCheck(input, opts) {
   const result = await generateOutline(input, opts || {});
@@ -227,7 +229,7 @@ async function updateTripGeneration(db, tripId, patch) {
  *   - 第一次（含撞时间预算的半成品）→ 新建 trip
  *   - 后续轮次（带 tripId）→ 把新生成的天合并进已有 trip，最后再补闹钟和建议
  */
-async function savePlan(openid, plan, tripId, jobId, outline) {
+async function savePlan(openid, plan, tripId, jobId, outline, input) {
   const db = cloud.database();
   // 生成状态写进行程本身：「我的行程」列表要靠它显示"生成中 x/y"，
   // 不需要额外查任务表（列表接口一次拿全）。
@@ -316,7 +318,16 @@ async function savePlan(openid, plan, tripId, jobId, outline) {
   }
 
   if (outline && storedItems.length) {
-    storedItems = auditMergedDetailItems(storedItems, outline);
+    storedItems = auditMergedDetailItems(storedItems, outline, input || {});
+    if (!plan.partial) {
+      const profile = normalizeInput(input || {});
+      let reminders = (plan.alarms || []).concat(
+        backfillDetailAlarms(profile, outline, storedItems, plan.alarms || []));
+      reminders = linkBookingAlarms(reminders, storedItems);
+      reminders = normalizeBookingAlarmKinds(reminders, storedItems, profile);
+      reminders = dedupeBookingAlarmRecords(reminders);
+      plan.alarms = annotateAlarmUsage(reminders, storedItems, outline);
+    }
   }
   plan.items = storedItems;
   await geocodeItems(plan.items, regionOf, { deadlineAt: Date.now() + geoBudgetMs }, cityOf);
@@ -375,7 +386,9 @@ async function savePlan(openid, plan, tripId, jobId, outline) {
     const usedOldIds = new Set();
     const alarms = (plan.alarms || []).map((a) => {
       const fireAt = Number(a.fireAt) || 0;
-      const leadMinutes = alarmLeadOf(a);
+      const leadMinutes = alarmLeadOf(Object.assign({}, a, {
+        leadMinutes: input && input.leadMinutes !== undefined ? input.leadMinutes : a.leadMinutes,
+      }));
       const fireAtStr = String(a.fireAtStr || '');
       const key = alarmKeyOf(Object.assign({}, a, { fireAtStr }));
       const old = oldByKey.get(key);
@@ -466,6 +479,7 @@ async function savePlan(openid, plan, tripId, jobId, outline) {
     doneDayIndexes: plan.doneDayIndexes || [],
     attempts: plan.attempts || {},          // 前端原样带回，才知道哪些天还能重试
     gaveUpDayIndexes: plan.gaveUpDayIndexes || [],  // 重试耗尽的天 → 前端提示用户
+    reviewError: plan.reviewError || '',
     progress: plan.progress || null,        // { done, total } 给前端显示进度
     version: GEN_VERSION,
   };
@@ -659,15 +673,22 @@ async function runJobRound(openid, job) {
     }
   }
 
+  let reviewItems;
+  if (job.tripId && (job.doneDayIndexes || []).length >= (payload.outline.days || []).length) {
+    const stored = await db.collection(COL_TRIP).doc(job.tripId).get();
+    if (!stored.data || stored.data._openid !== openid) throw new Error('行程不存在或无权操作');
+    reviewItems = stored.data.items || [];
+  }
   const plan = await buildPlan(payload, payload, {
     doneDayIndexes: job.doneDayIndexes || [],
     attempts: job.attempts || {},
     budgetMs: job.budgetMs,
+    reviewItems,
   });
   if (!plan || (!plan.items.length && !plan.partial && !job.tripId)) {
     throw new Error('AI 没有生成出有效行程，请调整需求后重试');
   }
-  const data = await savePlan(openid, plan, job.tripId, job._id, payload.outline);
+  const data = await savePlan(openid, plan, job.tripId, job._id, payload.outline, payload);
   // 落库成功才扣费；bizKey 按 tripId 幂等，续跑多轮也只扣一次
   if (data && data.tripId) {
     await quotaCall(openid, {
@@ -678,8 +699,9 @@ async function runJobRound(openid, job) {
   const now = Date.now();
   const round = (job.round || 0) + 1;
   const tooOld = !!job.createdAt && (now - job.createdAt > JOB_MAX_AGE_MS);
-  const status = !data.partial ? 'done' : ((round >= JOB_MAX_ROUNDS || tooOld) ? 'failed' : 'running');
+  const status = !data.partial ? 'done' : ((data.reviewError || round >= JOB_MAX_ROUNDS || tooOld) ? 'failed' : 'running');
   const patch = {
+    input: Object.assign({}, input, { outline: payload.outline }),
     tripId: data.tripId || job.tripId || '',
     title: data.title || job.title || '',
     doneDayIndexes: data.doneDayIndexes || [],
@@ -689,7 +711,7 @@ async function runJobRound(openid, job) {
     itemCount: data.itemCount || 0,
     round,
     status,
-    error: status === 'failed' ? '生成时间过长已停止，请重新生成或稍后再试' : '',
+    error: status === 'failed' ? (data.reviewError || '生成时间过长已停止，请重新生成或稍后再试') : '',
     updatedAt: now,
     // 还在跑 → 继续占着租约，定时触发器别插手；跑完/失败 → 释放
     leaseUntil: status === 'running' ? now + JOB_LEASE_MS : 0,
@@ -1101,17 +1123,24 @@ exports.main = async (event, context) => {
       if (chk.code === -3) return { code: -3, msg: chk.msg || '暂时无法生成' };
     }
     const budget = event.budgetMs ? Number(event.budgetMs) : undefined;
+    let reviewItems;
+    if (event.tripId && (event.doneDayIndexes || []).length >= ((event.outline || {}).days || []).length) {
+      const stored = await cloud.database().collection(COL_TRIP).doc(event.tripId).get();
+      if (!stored.data || stored.data._openid !== openid) throw new Error('行程不存在或无权操作');
+      reviewItems = stored.data.items || [];
+    }
     const plan = await buildPlan(event, event, {
       doneDayIndexes: event.doneDayIndexes,
       attempts: event.attempts,     // 续跑时带回上一轮的失败次数
       budgetMs: budget,
+      reviewItems,
     });
     // 续跑中途可能这一轮只完成了重试、没产出新条目（partial=true），这时要放行让它继续；
     // 只有彻底没有内容、也没有 tripId 可合并时才算失败。
     if (!plan || (!plan.items.length && !plan.partial && !event.tripId)) {
       return { code: -1, msg: 'AI 没有生成出有效行程，请调整需求后重试' };
     }
-    const data = await savePlan(openid, plan, event.tripId, '', event.outline);
+    const data = await savePlan(openid, plan, event.tripId, '', event.outline, event);
     // 落库成功才扣费：大纲阶段没生成出来不收钱（避免"失败也扣费"的投诉）。
     // bizKey 用 tripId，续跑多轮也只扣一次（quota 侧按 bizKey 幂等）。
     if (data && data.tripId) {

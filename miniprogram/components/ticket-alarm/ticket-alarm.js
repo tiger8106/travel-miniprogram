@@ -21,6 +21,13 @@ Component({
   observers: {
     item(item) {
       if (!item) return;
+      const clean = (value, max) => {
+        const text = String(value || '').replace(/[\r\n\u3000]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+        return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+      };
+      const displayInfo = clean(item.usageInfo, 120)
+        || (item.bookingInfo ? `关联：${clean(item.bookingInfo, 80)}` : '')
+        || clean(String(item.note || '').split(/[；;。\n]/)[0], 80);
       this.setData({
         icon: ({
           train: '🚄', plane: '✈️', ticket: '🎫',
@@ -29,6 +36,7 @@ Component({
         statusLabel: ({
           completed: '已完成', past: '进行中', soon: '即将提醒', future: '未来', unknown: '未知',
         })[item.status] || '未知',
+        displayInfo,
       });
     },
   },

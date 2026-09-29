@@ -91,7 +91,7 @@ function chat(messages, a, b) {
     const bodyObj = {
       model,
       messages,
-      temperature: 0.7, // 生成任务比抽取任务需要更多创意（抽取用 0.1）
+      temperature: Number.isFinite(opts.temperature) ? opts.temperature : 0.7,
     };
     // 只有显式给了上限才带这个字段；不传 = 交给模型自己的输出上限
     if (opts.maxTokens > 0) bodyObj.max_tokens = opts.maxTokens;
@@ -183,10 +183,11 @@ async function chatWithRetry(messages, a, b) {
   const deadline = opts.deadline;
   const enableSearch = !!opts.enableSearch;
   const searchOptions = opts.searchOptions;
+  const temperature = opts.temperature;
   const budget = () => (deadline ? deadline - Date.now() : Infinity);
   const single = Math.max(8000, Math.min(REQUEST_TIMEOUT_MS, deadline ? budget() - 3000 : REQUEST_TIMEOUT_MS));
   try {
-    return await chat(messages, { maxTokens, timeoutMs: single, enableSearch, searchOptions });
+    return await chat(messages, { maxTokens, timeoutMs: single, enableSearch, searchOptions, temperature });
   } catch (e) {
     const left = budget();
     // 重试至少还要留 12s，否则这一轮大概率整体超时
@@ -196,7 +197,7 @@ async function chatWithRetry(messages, a, b) {
     }
     console.error('[generatePlan.llm] 调用失败，重试一次:', e.message, `剩余=${deadline ? left + 'ms' : '不限'}`);
     const again = Math.max(8000, Math.min(single, deadline ? budget() - 3000 : REQUEST_TIMEOUT_MS));
-    return chat(messages, { maxTokens, timeoutMs: again, enableSearch, searchOptions });
+    return chat(messages, { maxTokens, timeoutMs: again, enableSearch, searchOptions, temperature });
   }
 }
 

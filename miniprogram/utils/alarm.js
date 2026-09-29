@@ -66,6 +66,40 @@ function normalizeAlarm(alarm) {
   });
 }
 
+// 闹钟卡片/弹窗只保留能帮助用户执行的关键信息：车票/门票/酒店的使用
+// 时间优先，其次是关联名称；生成阶段的长篇解释留在编辑页，不占满提醒界面。
+function alarmKeyInfoOf(alarm) {
+  const a = alarm || {};
+  const clean = (value, max) => {
+    const text = String(value || '').replace(/[\r\n\u3000]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+    return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+  };
+  const usage = clean(a.usageInfo, 120);
+  if (usage) return usage;
+  const booking = clean(a.bookingInfo, 80);
+  if (booking) return `关联：${booking}`;
+  const note = clean(a.note, 80);
+  if (!note) return '';
+  const first = note.split(/[；;。\n]/).map((x) => x.trim()).find(Boolean) || note;
+  return clean(first, 80);
+}
+
+function alarmPopupContent(alarm, phase) {
+  const a = alarm || {};
+  const actionAt = actionAtOf(a);
+  const friendly = timeUtil.fmtFriendly(actionAt);
+  const leadMinutes = leadOf(a);
+  const lines = [
+    a.title || '该办事项了',
+    phase === 'advance' ? `还有 ${leadMinutes} 分钟` : '现在办理',
+    `办理时间：${friendly}`,
+  ];
+  // 弹窗不回显生成阶段的长备注；没有结构化使用信息时只保留标题和办理时间。
+  const keyInfo = alarmKeyInfoOf(Object.assign({}, a, { note: '' }));
+  if (keyInfo) lines.push(keyInfo);
+  return lines.join('\n');
+}
+
 /**
  * 加载本地闹钟缓存
  */
@@ -116,7 +150,7 @@ function fireAlarm(alarm, phase) {
   const isAdvance = phase === 'advance';
   wx.showModal({
     title: isAdvance ? '⏰ 即将到点' : '⏰ 时间到',
-    content: `${alarm.title || '该办事项了'}\n${isAdvance ? `还有 ${leadMinutes} 分钟，请提前准备` : '就是现在，行动！'}\n办理时间：${friendly}\n${alarm.note || ''}`,
+    content: alarmPopupContent(alarm, phase),
     confirmText: '知道了',
     showCancel: false,
   });
@@ -247,7 +281,7 @@ function addToCalendar(a) {
       title: '⏰ ' + (a.title || '抢票提醒'),
       startTime: Math.floor(start / 1000),                       // 秒
       endTime: Math.floor((start + 30 * 60 * 1000) / 1000),      // 秒，半小时后结束
-      description: a.note || '',
+      description: alarmKeyInfoOf(a) || a.title || '',
       alarm: true,
       alarmOffset: leadMinutes * 60, // 每条事项自己的提前量，单位秒
       success: resolve,
@@ -337,6 +371,8 @@ module.exports = {
   actionAtOf,
   remindAtOf,
   normalizeAlarm,
+  alarmKeyInfoOf,
+  alarmPopupContent,
   fireAlarm,         // 暴露供测试
   addToCalendar,
   addAllToCalendar,

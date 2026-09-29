@@ -134,7 +134,8 @@ function cityTokens(region) {
 function pickCity(region) {
   // 地址式住宿区可能把城市词嵌在开头（如「成都市春熙路」），先抽取明确的市/县/区，
   // 避免把「成都市春熙路住宿地」整串当作城市参数传给高德。
-  const addressCities = addrTokens(region).map((x) => x.t).filter((t) => !PROVINCE_NAMES.has(t));
+  const addressCities = /[\s、，,→/]/.test(String(region || '')) ? []
+    : addrTokens(region).filter((t) => !PROVINCE_NAMES.has(t));
   if (addressCities.length) return addressCities[0];
   const tokens = cityTokens(region);
   const nonProv = tokens.filter((t) => !PROVINCE_NAMES.has(t));
@@ -633,7 +634,7 @@ async function geocodeOne(address, city, deadlineAt) {
 function isBookableHotelPoi(row, regions) {
   const name = String(row && row.name || '').trim();
   if (!name || /停车场|停车库|停车位|停车楼|泊车|地下车库|停车出入口|停车区域/.test(name)) return false;
-  if (/(?:大堂|前台|餐厅|会议室|宴会厅|健身房|游泳池|出入口|卫生间|充电站)[)）]?$/u.test(name)) return false;
+  if (/(?:大堂|前台|礼宾部|接待处|洗衣房|大堂吧|售楼处|餐厅|会议室|宴会厅|健身房|游泳池|出入口|卫生间|充电站)[)）]?$/u.test(name)) return false;
   if (!/酒店|宾馆|客栈|民宿|饭店|公寓|度假村|旅店|旅馆|招待所/.test(name)) return false;
   const compact = (value) => String(value || '').replace(/[\s\u3000,，、/()（）·-]/g, '');
   const locationTerms = [...new Set((regions || []).flatMap((value) =>
@@ -679,7 +680,7 @@ async function searchHotelsNearby(region, budget, timeoutMs) {
     .trim();
   const cityCandidates = [...new Set(regionParts.map((part) => {
     const cleaned = cleanRegionPart(part);
-    const explicit = addrTokens(cleaned).map((token) => token.t).find((token) => !PROVINCE_NAMES.has(token));
+    const explicit = addrTokens(cleaned).find((token) => !PROVINCE_NAMES.has(token));
     if (explicit) return explicit;
     const picked = String(pickCity(cleaned) || '');
     // A destination can be written as a compound area without administrative suffixes
@@ -699,7 +700,7 @@ async function searchHotelsNearby(region, budget, timeoutMs) {
     .replace(/(住宿片区|酒店片区|经济型|舒适型|品质型|片区|周边|附近|县城|市区|景区|住宿|区域)/g, ' ')
     .replace(/[（）()\/、，,]/g, ' ').replace(/\s+/g, ' ').trim();
   const economical = /经济/.test(String(budget || ''));
-  const areas = areaHint.split(' ').filter((x) => x.length >= 2).slice(0, 1);
+  const areas = [...new Set([areaHint, ...regionParts.map(cleanRegionPart)].filter((x) => x.length >= 2))].slice(0, 3);
   const queries = [];
   areas.forEach((area) => {
     if (economical) queries.push(`${area}经济型酒店`);

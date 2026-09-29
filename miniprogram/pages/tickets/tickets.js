@@ -207,6 +207,7 @@ Page({
           friendly: actionAt ? timeUtil.fmtFriendly(actionAt) : '',
           actionFriendly: actionAt ? timeUtil.fmtFriendly(actionAt) : '',
           remindFriendly: remindAt ? timeUtil.fmtFriendly(remindAt) : '',
+          displayInfo: alarm.alarmKeyInfoOf(a),
           status: this.computeStatus(remindAt, completed),
         };
       });

@@ -19,7 +19,7 @@ const COL_TASK = 'parse_tasks';
 const GEOCODE_DEADLINE_MS = 35 * 1000;
 
 // 解析引擎版本：返回给前端展示，用于确认线上跑的是不是最新代码
-const PARSE_VERSION = 'v4.2-alarm-usage';
+const PARSE_VERSION = 'v4.3-source-single-reminder';
 const DEFAULT_ALARM_LEAD_MINUTES = 5;
 
 function alarmType(type) {
@@ -43,9 +43,11 @@ function dedupeAlarmRecords(list) {
   (list || []).forEach((alarm) => {
     if (!alarm) return;
     const item = Object.assign({}, alarm);
+    const date = String(item.fireAtStr || tsToCnDateTimeStr(Number(item.fireAt) || 0)).slice(0, 10);
+    const code = String(item.bookingInfo || item.title || '').match(/\b[GDCZTK]\d{1,5}\b/i);
     const identity = item.linkedItemId
       ? `linked|${item.linkedItemId}`
-      : `text|${alarmType(item.type)}|${Number(item.dayIndex || 0)}|${clean(item.bookingInfo || item.title)}`;
+      : `text|${alarmType(item.type)}|${date}|${Number(item.dayIndex || 0)}|${code ? code[0].toUpperCase() : clean(item.bookingInfo || item.title)}`;
     const previous = groups.get(identity);
     if (!previous) {
       groups.set(identity, item);
@@ -65,10 +67,10 @@ function dedupeAlarmRecords(list) {
   return [...groups.values()];
 }
 
-function prepareAlarmRecords(list, openid, tripId, now) {
+function prepareAlarmRecords(list, openid, tripId, now, preferredLead) {
   return dedupeAlarmRecords(list).map((a) => {
     const fireAt = Number(a.fireAt) || 0;
-    const n = Number(a.leadMinutes);
+    const n = Number(preferredLead === undefined ? a.leadMinutes : preferredLead);
     const leadMinutes = isFinite(n) && n > 0 ? Math.max(1, Math.min(60, Math.round(n))) : DEFAULT_ALARM_LEAD_MINUTES;
     const fireAtStr = String(a.fireAtStr || tsToCnDateTimeStr(fireAt));
     return Object.assign({}, a, {
@@ -133,20 +135,45 @@ const { pickCity } = require('./geocode');
 // 清洗闹钟：fireAt 统一转成时间戳数字（数据库里不混字符串/数字两种类型，否则排序报错）
 // 同时保存 fireAtStr（北京时间的原始墙面时刻），前端按"用户手机所在时区"重算触发时间
 // 单次模式与分步模式共用（分步在 infer 步调用）
-function cleanAlarms(rawAlarms, openid, now) {
+function vagueSourceDate(source, date, type) {
+  if (!source) return false;
+  const month = Number(date.slice(5, 7)), day = Number(date.slice(8, 10));
+  const pattern = new RegExp(`(?:20\\d{2}年)?0?${month}月\\s*0?${day}(?!\\d)日?`, 'g');
+  const isRelevant = (text) => type === 'hotel' ? /酒店|民宿|房型|住宿/.test(text)
+    : type === 'train' ? /12306|高铁|动车|车票|[GDCZTK]\d+/i.test(text)
+      : type === 'ticket' ? /门票|游船|竹筏|演出|景区|预约/.test(text)
+        : type === 'bus' ? /巴士|大巴|直通车|客运|汽车票|旅游专线/.test(text)
+          : type === 'plane' ? /机票|航班|航空|飞机/.test(text) : true;
+  let vague = false, explicit = false, match;
+  while ((match = pattern.exec(source))) {
+    const suffix = source.slice(pattern.lastIndex, pattern.lastIndex + 160);
+    if (!isRelevant(suffix.split(/\n\s*\d{1,2}月\d{1,2}日/)[0])) continue;
+    if (/^\s*(?:起|前后|左右|至|～|~|—|–|-|待定)/.test(suffix)) vague = true;
+    else explicit = true;
+  }
+  return vague && !explicit;
+}
+
+function cleanAlarms(rawAlarms, openid, now, sourceText = '') {
   const validTypes = ['train', 'plane', 'ticket', 'hotel', 'bus', 'other'];
   const alarms = (rawAlarms || [])
     .map((a) => {
       if (!a || !(a.title || '').trim()) return null;
       const ts = typeof a.fireAt === 'number' ? a.fireAt : parseCnTime(a.fireAt);
       if (!ts || isNaN(ts)) return null;
+      const type = validTypes.includes(a.type) ? a.type : 'other';
+      if (vagueSourceDate(sourceText, tsToDateStr(ts), type)) return null;
       return {
         _openid: openid,
         title: String(a.title).trim().slice(0, 100),
         note: a.note || '',
         fireAt: ts,
         fireAtStr: tsToCnDateTimeStr(ts),
-        type: validTypes.includes(a.type) ? a.type : 'other',
+        type,
+        dayIndex: Number(a.dayIndex || 0),
+        bookingInfo: String(a.bookingInfo || '').slice(0, 160),
+        usageInfo: String(a.usageInfo || '').slice(0, 160),
+        linkedItemId: String(a.linkedItemId || ''),
         source: 'parsed',
         createdAt: now,
         updatedAt: now,
@@ -301,7 +328,7 @@ exports.main = async (event, context) => {
       console.error('[parseTravelPlan] 地理编码失败（不影响主流程）:', e.message);
     }
 
-    const alarms = cleanAlarms(structured.alarms, openid, now);
+    const alarms = cleanAlarms(structured.alarms, openid, now, rawText);
     console.log('[parseTravelPlan] 清洗后 alarms 数量:', alarms.length);
 
     // 日期清洗：LLM 返回的脏值（"null"/乱格式）全部拦下，再逐级兜底
@@ -373,7 +400,7 @@ exports.main = async (event, context) => {
       console.log('[parseTravelPlan] 详细行程规则查漏补齐 %d 条待办', ruleBackfill.length);
     }
 
-    const storedAlarms = prepareAlarmRecords(alarms, openid, tripId, now);
+    const storedAlarms = prepareAlarmRecords(alarms, openid, tripId, now, event.leadMinutes);
     if (storedAlarms.length) {
       // 批量插入，每次最多 20 条
       for (let i = 0; i < storedAlarms.length; i += 20) {
@@ -472,6 +499,8 @@ async function handleStep(event, ctx) {
         _openid: openid,
         status: 'parsing',
         fileID,
+        leadMinutes: Number(event.leadMinutes) > 0
+          ? Math.max(1, Math.min(60, Math.round(Number(event.leadMinutes)))) : DEFAULT_ALARM_LEAD_MINUTES,
         title: meta.title,
         summary: meta.summary,
         year: meta.year,
@@ -565,7 +594,7 @@ async function handleStep(event, ctx) {
         endDate = tsToDateStr(parseCnTime(startDate + 'T00:00:00') + maxDi * 86400000);
       }
 
-      const alarms = cleanAlarms(task.alarmsRaw, openid, now);
+      const alarms = cleanAlarms(task.alarmsRaw, openid, now, (task.booking || []).join('\n'));
 
       // 文档里没写抢票时间（很常见）→ 用行程反推一份待办清单，别让闹钟页空着
       if (alarms.length < INFER_THRESHOLD) {
@@ -674,7 +703,8 @@ async function handleStep(event, ctx) {
         else if (cityHint && !it.city) it.city = cityHint;
       });
 
-      const alarms = prepareAlarmRecords(task.alarms || [], openid, '', now);
+      const alarms = prepareAlarmRecords(task.alarms || [], openid, '', now,
+        event.leadMinutes === undefined ? task.leadMinutes : event.leadMinutes);
       const tripData = {
         _openid: openid,
         title: task.title || '我的行程',

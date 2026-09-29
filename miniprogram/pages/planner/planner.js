@@ -10,6 +10,7 @@ const homeCache = require('../../utils/homecache');
 const eta = require('../../utils/eta');
 const quota = require('../../utils/quota');
 const genrunner = require('../../utils/genrunner');
+const alarm = require('../../utils/alarm');
 
 const app = getApp();
 
@@ -409,6 +410,11 @@ Page({
 
   buildInput() {
     const d = this.data;
+    // 单输入框统一传给补充要求。不能把“优先高铁/已购票/不吃辣”等
+    // 任意要求都当成景点；云端仅提取明确的必去指令。
+    const supplemental = [...new Set([d.mustGo, d.extra]
+      .map((value) => String(value || '').trim())
+      .filter(Boolean))].join('；');
     return {
       origin: (d.origin || '').trim(),
       dest: (d.dest || '').trim(),
@@ -422,8 +428,9 @@ Page({
       pace: PACE[d.paceIdx],
       transport: TRANSPORT[d.transportIdx],
       interests: d.interestItems.filter((i) => i.on).map((i) => i.name),
-      mustGo: (d.mustGo || '').trim(),
-      extra: (d.extra || '').trim(),
+      mustGo: String(d.mustGo || '').trim(),
+      extra: supplemental,
+      leadMinutes: alarm.getAdvanceMin(),
     };
   },
 
@@ -883,8 +890,9 @@ Page({
       const p = s.progress || {};
       const done = p.done || 0;
       if (p.total) {
-        this.setTipExtra(toldCanLeave ? `已细化 ${Math.min(done, p.total)}/${p.total} 天`
-          : `已细化 ${Math.min(done, p.total)}/${p.total} 天（可离开，后台继续）`);
+        const action = p.stage === 'review' ? '已复核' : '已细化';
+        this.setTipExtra(toldCanLeave ? `${action} ${Math.min(done, p.total)}/${p.total} 天`
+          : `${action} ${Math.min(done, p.total)}/${p.total} 天（可离开，后台继续）`);
         this.setEst((Date.now() - t0) + eta.estimate('detail', Math.max(0, p.total - done)));
       }
       if (s.round >= 1 && !toldCanLeave && !this._left) {

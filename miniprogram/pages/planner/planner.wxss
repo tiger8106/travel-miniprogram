@@ -151,6 +151,7 @@
 
 .area {
   width: 100%;
+  box-sizing: border-box;
   min-height: 80rpx;
   padding: 16rpx;
   margin-bottom: 16rpx;
@@ -158,6 +159,21 @@
   border-radius: 12rpx;
   font-size: 28rpx;
   line-height: 1.5;
+}
+
+.supplement-tip {
+  margin: -4rpx 0 14rpx;
+  color: var(--text-placeholder);
+  font-size: 24rpx;
+  line-height: 1.5;
+}
+
+/* 使用有明确占位的高度，长文本在原生 textarea 内滚动，避免 auto-height
+   与原生组件层叠导致文字越出卡片。键盘弹出时保持光标在可视区域。 */
+.area-supplement {
+  height: 260rpx;
+  margin-bottom: 0;
+  padding-bottom: 24rpx;
 }
 
 /* ---------- 大纲 ---------- */

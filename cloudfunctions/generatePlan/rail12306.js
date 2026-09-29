@@ -280,6 +280,9 @@ async function queryRoute(pair, date, cookie, stationsByCode, deadlineAt) {
   if (res.statusCode < 200 || res.statusCode >= 300) throw new Error(`12306 查询 HTTP ${res.statusCode}`);
   let data;
   try { data = JSON.parse(res.body); } catch (e) { throw new Error('12306 查询返回非 JSON'); }
+  if (!data || data.status !== true || !data.data || !Array.isArray(data.data.result)) {
+    throw new Error('12306 未返回有效查询结果，不能将接口失败当作无直达车');
+  }
   const rows = data && data.data && Array.isArray(data.data.result) ? data.data.result : [];
   const list = [];
   const seen = new Set();
@@ -347,6 +350,8 @@ async function lookupOfficial(segments, deadlineMs) {
     }
     const results = await Promise.allSettled(pairs.map((pair) =>
       queryRoute(pair, seg.date, cookie, byCode, deadlineAt)));
+    meta.querySucceeded = results.some((result) => result.status === 'fulfilled');
+    meta.queriedDate = seg.date;
     let best = null;
     results.forEach((r, i) => {
       if (r.status !== 'fulfilled' || !r.value.length) return;
@@ -356,6 +361,7 @@ async function lookupOfficial(segments, deadlineMs) {
     if (!best) {
       found.set(key, []);
       const firstError = results.find((r) => r.status === 'rejected');
+      if (firstError && !meta.querySucceeded) meta.reason = firstError.reason.message;
       if (firstError) console.warn('[generatePlan.12306] %s→%s 查询失败：%s', seg.from, seg.to, firstError.reason.message);
       return;
     }

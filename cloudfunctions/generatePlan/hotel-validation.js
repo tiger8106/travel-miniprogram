@@ -8,6 +8,8 @@ async function validateOutlineHotels(result, input, searchHotelPoi, searchHotels
   const days = outline && Array.isArray(outline.days) ? outline.days : [];
   const budget = String(input && (input.budget || input.budgetLevel) || '');
   const grade = /经济/.test(budget) ? '经济型' : /品质/.test(budget) ? '品质型' : '舒适型';
+  const bookable = (poi) => poi && String(poi.matchedName || '').trim()
+    && !/礼宾部|接待处|售楼|停车场|停车库|餐厅|洗衣房|会议室|宴会厅|游泳池|健身房|大堂吧/.test(poi.matchedName);
   const matchingOvernight = (poi, overnight) => {
     if (!poi) return false;
     const text = String(overnight || '').replace(/[（(][^）)]*[）)]/g, '');
@@ -24,7 +26,10 @@ async function validateOutlineHotels(result, input, searchHotelPoi, searchHotels
     }
     const actual = `${poi.province || ''}${poi.city || ''}${poi.district || ''}${poi.address || ''}`;
     const addressEvidence = `${poi.district || ''}${poi.address || ''}`;
-    const targetMatchesAddress = expected.some((word) => addressEvidence.includes(word));
+    const namedScenicArea = !/(?:自治州|地区|市(?!区)|县(?!城))/.test(overnight || '');
+    const targetMatchesAddress = expected.some((word) => addressEvidence.includes(word))
+      || !!(namedScenicArea && poi.areaSearch && poi.areaMatched
+        && expected.some((word) => String(poi.matchedName || '').includes(word)));
     const targetMatches = targetMatchesAddress || expected.some((word) => String(poi.city || '').includes(word));
     const explicitCities = [...addressEvidence.matchAll(/([\u4e00-\u9fa5]{2,8}?)(?:市|自治州|地区|盟)/g)]
       .map((match) => match[1]).filter(Boolean);
@@ -67,7 +72,7 @@ async function validateOutlineHotels(result, input, searchHotelPoi, searchHotels
         console.warn('[generatePlan] 住宿 POI 核验失败：%s (%s)', name, e.message);
       }
     }
-    if (poi && !matchingOvernight(poi, overnight)) {
+    if (poi && (!bookable(poi) || !matchingOvernight(poi, overnight))) {
       console.warn('[generatePlan] 第%d天住宿 POI 与当晚住宿地不符，丢弃：%s', index + 1, poi.matchedName);
       poi = null;
     }
@@ -76,7 +81,7 @@ async function validateOutlineHotels(result, input, searchHotelPoi, searchHotels
         console.warn('[generatePlan] 附近住宿搜索失败：%s (%s)', city, e.stack || e.message);
       }
     }
-    if (poi && !matchingOvernight(poi, overnight)) poi = null;
+    if (poi && (!bookable(poi) || !matchingOvernight(poi, overnight))) poi = null;
     if (poi && poi.matchedName) {
       if (generic || poi.areaSearch) {
         console.log('[generatePlan] 第%d天住宿替换为片区可搜索 POI：%s', index + 1, poi.matchedName);
@@ -86,6 +91,7 @@ async function validateOutlineHotels(result, input, searchHotelPoi, searchHotels
       day.hotelPoiVerifiedName = day.hotel;
       day.hotelPoiAddress = [poi.province, poi.city, poi.district, poi.address].filter(Boolean).join('');
       day.hotelPoiSource = 'amap-poi';
+      day.hotelPoiOvernight = overnight;
       day.hotelSearchHint = [day.hotel, day.hotelPoiAddress].filter(Boolean).join('｜');
       day.hotelRecommendationReason = `位于${overnight || city || '当晚住宿地'}范围，已用地图 POI 核验名称和地址；预订前可复制完整名称到携程、去哪儿、美团或高德核对房型、价格与取消规则。`;
     } else {
@@ -95,13 +101,14 @@ async function validateOutlineHotels(result, input, searchHotelPoi, searchHotels
       day.hotelPoiVerifiedName = '';
       day.hotelPoiAddress = '';
       day.hotelPoiSource = '';
+      day.hotelPoiOvernight = '';
       day.hotelSearchHint = day.hotel;
       day.hotelRecommendationReason = `暂未核验到具体物业，先提供${place || '当晚住宿地'}的${grade}住宿片区；请在主流平台搜索片区和档次后选择真实酒店，不要把这段片区描述当作酒店名称。`;
       console.warn('[generatePlan] 第%d天住宿名称未能核验，改为片区+档次：%s', index + 1, day.hotel);
     }
   }));
   const areaKey = (value) => String(value || '').replace(/[（(][^）)]*[）)]/g, '')
-    .replace(/[\s\u3000,，、/]/g, '').replace(/(市区|县城|市|县|区|镇|村|片区|附近|周边)+$/g, '');
+    .replace(/[\s\u3000,，、/]/g, '').replace(/(市中心|市区|县城|市|县|区|镇|村|片区|附近|周边)+$/g, '');
   // 连住同一片区时复用已核验的酒店，避免每天换店、搬行李或生成酒店间接驳。
   for (let index = 1; index < days.length - 1; index++) {
     const previous = days[index - 1];
@@ -118,6 +125,8 @@ async function validateOutlineHotels(result, input, searchHotelPoi, searchHotels
       previous.hotelPoiVerifiedName = day.hotelPoiVerifiedName = chosen.hotel;
       previous.hotelPoiAddress = day.hotelPoiAddress = chosen.hotelPoiAddress || '';
       previous.hotelPoiSource = day.hotelPoiSource = chosen.hotelPoiSource || 'amap-poi';
+      previous.hotelPoiOvernight = String(previous.overnight || previous.city || '').trim();
+      day.hotelPoiOvernight = String(day.overnight || day.city || '').trim();
       previous.hotelSearchHint = day.hotelSearchHint = chosen.hotelSearchHint || [chosen.hotel, chosen.hotelPoiAddress].filter(Boolean).join('｜');
       previous.hotelRecommendationReason = day.hotelRecommendationReason = chosen.hotelRecommendationReason || '';
     }

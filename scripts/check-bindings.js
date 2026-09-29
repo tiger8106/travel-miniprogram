@@ -52,7 +52,8 @@ fs.readdirSync(CF).forEach((dir) => {
   const err = syntaxOk(abs);
   ok(`JS 语法 cloudfunctions/${dir}/index.js`, !err, err || '');
 });
-['generatePlan/plan.js', 'generatePlan/schedule.js', 'generatePlan/rail12306.js', 'generatePlan/hotel-validation.js'].forEach((rel) => {
+['generatePlan/plan.js', 'generatePlan/schedule.js', 'generatePlan/rail12306.js', 'generatePlan/hotel-validation.js',
+  'generatePlan/execution-review.js', 'generatePlan/route-evidence.js', 'generatePlan/solar-time.js'].forEach((rel) => {
   const err = syntaxOk(path.join(CF, rel));
   ok(`JS 语法 cloudfunctions/${rel}`, !err, err || '');
 });
@@ -632,7 +633,7 @@ ok('检索结果注入细化 prompt（模型只挑，不许自创车次与时刻
     && /enforceRealSchedule/.test(planJs));
 
 ok('12306 查不到时清除模型臆造车次（行程可继续但不冒充已核对）',
-  /official-unavailable/.test(planJs) && /班次与时刻暂未从12306查询到/.test(planJs)
+  /official-unavailable/.test(planJs) && /班次待确认/.test(planJs) && /matched\.code = ''/.test(planJs)
     && /lookupOfficial/.test(schedJs));
 
 ok('大纲超时不报错：云端后台补大纲（失败留下一轮重试）+ 前端转后台继续',
