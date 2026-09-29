@@ -665,9 +665,9 @@ ok('生成失败可续：前端超时自动重试（不吓用户）+ 云端 fail
     && /revivals/.test(gpIdx) && /resumeFailed/.test(genrunnerJs)
     && /sync\(\{ resumeFailed: true \}\)/.test(fs.readFileSync(path.join(MP, 'pages/mytrips/mytrips.js'), 'utf8')));
 
-ok('开发者补测试额度有云端开关（QUOTA_DEV_GRANT，默认关死）',
+ok('补测试额度：云端开关保留（QUOTA_DEV_GRANT 默认关死），前端入口已下线',
   /QUOTA_DEV_GRANT/.test(fs.readFileSync(path.join(CF, 'quota/index.js'), 'utf8'))
-    && /devGrant/.test(quotaUtil));
+    && !/devGrant/.test(quotaUtil));
 
 // ---------- ⑯ 班次准确性与生成提速（2026-09-26 晚） ----------
 ok('班次缓存键带出行日期（同线路不同日期开行方案不同，套用就是错车次）',
@@ -703,9 +703,6 @@ ok('班次专轮：后台任务拿到大纲后单独一轮联网核对（写回 
 
 ok('细化波次提到 4 天/轮（并行耗时≈最慢一天，8 天行程少跑一两轮）',
   /const WAVE = 4/.test(planJs));
-
-ok('补测试额度用 KeepCode（callFn 成功只回 data，页面判 r.code===0 会误报"没补上"）',
-  /callFnKeepCode\('quota', \{ action: 'devGrant' \}\)/.test(quotaUtil));
 
 // ---------- ⑰ 生成状态与上线边界（2026-09-27） ----------
 const genIndex2 = fs.readFileSync(path.join(CF, 'generatePlan/index.js'), 'utf8');
@@ -764,6 +761,75 @@ ok('候选隔离，进度以整天检查后的实际发布内容为准',
 ok('局部重复失败带警示收尾，已发布日期保留、不终止整单',
   /finalizeWithWarnings/.test(planJs) && /needs_confirmation/.test(fs.readFileSync(path.join(CF, 'generatePlan/execution-review.js'), 'utf8'))
     && /preservePublishedDays: true/.test(genIndex2) && /finalizePending/.test(genIndex2));
+
+// ---------- ⑬ 管理后台：管理员身份 / 授权不限量 / 在线配置下发 ----------
+const cfgRel = ['generatePlan', 'parseTravelPlan', 'suggestions', 'admin'];
+const cfgBodies = cfgRel.map((n) => fs.readFileSync(path.join(CF, n, 'cloudCfg.js'), 'utf8'));
+ok('配置下发模块 4 份副本完全一致（generatePlan/parseTravelPlan/suggestions/admin）',
+  cfgBodies.every((b) => b === cfgBodies[0]));
+ok('三个消费方入口都先应用远程配置再跑业务（后台改 KEY 60s 内生效）',
+  ['generatePlan', 'parseTravelPlan', 'suggestions'].every((n) => {
+    const src = fs.readFileSync(path.join(CF, n, 'index.js'), 'utf8');
+    return /require\('\.\/cloudCfg'\)/.test(src) && /await cloudCfg\.apply\(\)/.test(src);
+  }));
+ok('在线配置有白名单：支付/内部令牌类永不允许后台改写（防误操作导致资损）',
+  /FORBID_PREFIX/.test(cfgBodies[0])
+    && /'XPAY_'/.test(cfgBodies[0]) && /'INTERNAL_'/.test(cfgBodies[0])
+    && /'ADMIN_'/.test(cfgBodies[0]));
+ok('地理编码改为调用时读 KEY（否则模块加载时固化，后台改完要等实例冷启动）',
+  /function amapKey\(\) \{ return process\.env\.AMAP_KEY/.test(
+    fs.readFileSync(path.join(CF, 'generatePlan/geocode.js'), 'utf8')));
+
+const adminFn = fs.readFileSync(path.join(CF, 'admin/index.js'), 'utf8');
+ok('特权放行只加判定不改现有扣费规则（isPrivileged + 三个入口分支）',
+  /function isPrivileged/.test(quotaIdx)
+    && (quotaIdx.match(/if \(isPrivileged\(u\)\)/g) || []).length >= 3
+    && !/isPrivileged/.test(quotaRules));
+ok('管理员后端：每个写操作都先验身份，且每个敏感操作都写审计（4 个：认领/授权/设管理员/存配置）',
+  /function requireAdmin/.test(adminFn) && /function requireSuper/.test(adminFn)
+    && (adminFn.match(/await requireAdmin\(actorOpenid\)/g) || []).length >= 6
+    && (adminFn.match(/await audit\(/g) || []).length >= 4);
+ok('审计日志只记键名不记值（里面可能有 API Key）',
+  /审计只记键名，绝不记值/.test(adminFn)
+    && !/audit\([^)]*patch\b/.test(adminFn));
+ok('管理员认领：一次性口令 + 用过即废 + 未配置时明确提示',
+  /ADMIN_CLAIM_CODE/.test(adminFn) && /这个口令已经被用过了/.test(adminFn)
+    && /未开启认领/.test(adminFn));
+ok('管理入口只对管理员显示，且云端还会再验一次（前端隐藏不是安全边界）',
+  /wx:if="\{\{isAdmin\}\}"/.test(fs.readFileSync(path.join(MP, 'pages/mine/mine.wxml'), 'utf8'))
+    && /服务端判定|云端会再验一次/.test(fs.readFileSync(path.join(MP, 'pages/mine/mine.wxml'), 'utf8'))
+    && /isAdmin: false/.test(fs.readFileSync(path.join(MP, 'pages/mine/mine.js'), 'utf8')));
+ok('小程序端不内置任何第三方密钥（KEY 只经云端下发）',
+  !/AMAP_KEY|LLM_API_KEY|XPAY_APP_KEY/.test(fs.readFileSync(path.join(MP, 'config.js'), 'utf8')));
+
+const adminPageJs = fs.readFileSync(path.join(MP, 'pages/admin/admin.js'), 'utf8');
+const minePageJs = fs.readFileSync(path.join(MP, 'pages/mine/mine.js'), 'utf8');
+ok('管理入口正确解包云函数返回（callFn 直接给业务体，严禁写 (r && r.data)）',
+  /function bodyOf/.test(adminPageJs) && /function bodyOf/.test(minePageJs)
+    && !/\(r && r\.data\)/.test(adminPageJs) && !/\(r && r\.data\)/.test(minePageJs));
+
+const adminFnSrc = fs.readFileSync(path.join(CF, 'admin/index.js'), 'utf8');
+ok('微信号绑定已下线（云端无 setMyWxId、搜索只按昵称，前端无"微信号"文案）',
+  !/setMyWxId/.test(adminFnSrc) && !/wxId: kw/.test(adminFnSrc)
+    && !/微信号/.test(fs.readFileSync(path.join(MP, 'pages/mine/mine.wxml'), 'utf8'))
+    && !/微信号/.test(fs.readFileSync(path.join(MP, 'pages/admin/admin.wxml'), 'utf8')));
+
+ok('管理后台配置分组：大模型独立模块 + 高级项默认折叠（前端 CFG_GROUP 分桶 + 三张统一卡片）',
+  /group: 'llm'/.test(adminFnSrc) && /group: 'advanced'/.test(adminFnSrc)
+    && /showAdvanced/.test(adminPageJs) && /regroupConfig/.test(adminPageJs)
+    && /CFG_GROUP\s*=\s*\{[\s\S]*LLM_PROVIDER: 'llm'[\s\S]*AMAP_KEY: 'amap'/.test(adminPageJs)
+    && /cfg-card/.test(fs.readFileSync(path.join(MP, 'pages/admin/admin.wxml'), 'utf8'))
+    && /template is="cfgItem"/.test(fs.readFileSync(path.join(MP, 'pages/admin/admin.wxml'), 'utf8')));
+
+ok('admin 保存配置剥掉 _id（doc.set 的 data 带 _id 会报 -501007 invalid param）',
+  /delete next\._id/.test(adminFnSrc));
+
+ok('admin 测试大模型与生成侧默认模型一致（modelOf 按 provider 兜底）',
+  /function modelOf/.test(adminFnSrc) && /model \|\| modelOf\(provider\)/.test(adminFnSrc));
+
+ok('关于弹窗文案集中维护（config.APP_VERSION / APP_BRAND，显示 Tiger 出品）',
+  /APP_VERSION/.test(fs.readFileSync(path.join(MP, 'config.js'), 'utf8'))
+    && /APP_BRAND/.test(minePageJs) && /Tiger 出品/.test(fs.readFileSync(path.join(MP, 'config.js'), 'utf8')));
 
 console.log(failed ? `\n${failed} 项失败 ✗` : '\n全部通过 ✓');
 process.exit(failed ? 1 : 0);

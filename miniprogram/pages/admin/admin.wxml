@@ -1,0 +1,165 @@
+<view class="page">
+  <!-- 加载中 -->
+  <view wx:if="{{loading}}" class="state">正在校验身份…</view>
+
+  <!-- 未登录 -->
+  <view wx:elif="{{!loggedIn}}" class="state">
+    <view class="state-title">需要登录</view>
+    <view class="state-sub">请到「我的」页用微信登录后再来</view>
+  </view>
+
+  <!-- 已登录但不是管理员：认领入口 -->
+  <view wx:elif="{{!isAdmin}}" class="state claim">
+    <view class="state-title">🛠 管理员认领</view>
+    <view wx:if="{{claimEnabled}}">
+      <view class="state-sub">输入一次性管理员口令即可成为超级管理员。<br />口令只在本云函数的环境变量里，用完即废。</view>
+      <input class="claim-input" password value="{{claimCode}}" placeholder="管理员口令"
+             bindinput="onClaimInput" confirm-type="done" bindconfirm="onClaim" />
+      <view class="primary-btn" bindtap="onClaim">认领管理员</view>
+    </view>
+    <view wx:else>
+      <view class="state-sub">管理员认领已关闭。<br />如需开启：在 admin 云函数的环境变量里配置 ADMIN_CLAIM_CODE。</view>
+    </view>
+  </view>
+
+  <!-- 管理员界面 -->
+  <block wx:else>
+    <view class="card who">
+      <view class="who-left">
+        <view class="who-name">{{me.nickname}}</view>
+        <view class="who-sub">{{isSuper ? '超级管理员' : '管理员'}} · 本机环境 {{claimEnabled ? '可招募' : '已关闭招募'}}</view>
+      </view>
+      <view class="who-stats" wx:if="{{stats}}">
+        <view class="stat"><text class="stat-num">{{stats.users}}</text><text class="stat-label">用户</text></view>
+        <view class="stat"><text class="stat-num">{{stats.admins}}</text><text class="stat-label">管理员</text></view>
+        <view class="stat"><text class="stat-num">{{stats.unlimited}}</text><text class="stat-label">已授权</text></view>
+      </view>
+    </view>
+
+    <view class="tabs">
+      <view wx:for="{{tabs}}" wx:key="key"
+            class="tab {{tab === item.key ? 'tab-on' : ''}}"
+            data-key="{{item.key}}" bindtap="onSwitchTab">{{item.label}}</view>
+    </view>
+
+    <!-- ① 用户授权 -->
+    <view wx:if="{{tab === 'users'}}" class="panel">
+      <view class="search-row">
+        <input class="search-input" value="{{keyword}}" placeholder="按昵称查找"
+               bindinput="onKeywordInput" confirm-type="search" bindconfirm="onSearch" />
+        <view class="search-btn" bindtap="onSearch">搜索</view>
+      </view>
+      <view wx:if="{{!users.length}}" class="empty">没有匹配的用户</view>
+      <view wx:for="{{users}}" wx:key="userId" class="user-card">
+        <view class="user-top">
+          <view class="user-main">
+            <view class="user-name">{{item.nickname}}</view>
+            <view class="user-meta">已生成 {{item.totalGen}} 次 · 注册 {{item.createdAtText}}</view>
+          </view>
+          <view wx:if="{{item.isAdmin}}" class="tag tag-admin">管理员</view>
+          <view wx:else class="tag tag-off">普通</view>
+        </view>
+        <view wx:if="{{!item.isAdmin}}" class="user-actions">
+          <view class="act-btn {{item.unlimited ? 'act-off' : 'act-on'}}"
+                data-index="{{index}}" bindtap="onToggleUnlimited">
+            {{item.unlimited ? '取消授权不限量' : '授权不限量'}}
+          </view>
+          <view wx:if="{{isSuper}}" class="act-btn act-admin"
+                data-index="{{index}}" bindtap="onMakeAdmin">设为管理员</view>
+        </view>
+      </view>
+    </view>
+
+    <!-- ② 配置 -->
+    <view wx:elif="{{tab === 'config'}}" class="panel">
+      <view class="hint-bar">改动最长 60 秒内在全部云函数生效。留空并保存 = 清掉，回落到云函数环境变量。支付类密钥不允许在这里改。</view>
+
+      <!-- 配置项通用模板：三张卡片复用同一套结构，视觉统一 -->
+      <template name="cfgItem">
+        <view class="cfg-item-inner">
+          <view class="cfg-head">
+            <text class="cfg-label">{{item.label}}</text>
+            <text wx:if="{{item.overridden}}" class="cfg-flag">已在线改</text>
+            <text wx:elif="{{item.hasValue}}" class="cfg-flag cfg-flag-env">环境变量</text>
+          </view>
+          <input class="cfg-input" value="{{item.input}}"
+                 password="{{item.secret && item.hasValue}}"
+                 placeholder="{{item.secret ? '未设置（留空表示不修改）' : '留空表示不修改'}}"
+                 data-key="{{item.key}}" bindinput="onConfigInput" />
+          <view class="cfg-row">
+            <text class="cfg-hint">{{item.hint}}</text>
+            <text class="cfg-reset" data-key="{{item.key}}" bindtap="onResetConfigItem">清空</text>
+          </view>
+        </view>
+      </template>
+
+      <!-- 大模型配置：四项收在同一张卡片 -->
+      <view class="cfg-card">
+        <view class="cfg-card-head">🤖 大模型配置</view>
+        <block wx:for="{{llmItems}}" wx:key="key">
+          <template is="cfgItem" data="{{item}}" />
+        </block>
+      </view>
+
+      <!-- 高德地图 -->
+      <view class="cfg-card">
+        <view class="cfg-card-head">🗺 高德地图配置</view>
+        <block wx:for="{{amapItems}}" wx:key="key">
+          <template is="cfgItem" data="{{item}}" />
+        </block>
+      </view>
+
+      <!-- 其他配置（高级）：默认折叠，点卡片头展开 -->
+      <view class="cfg-card">
+        <view class="cfg-card-head cfg-card-head-tap" bindtap="onToggleAdvanced">
+          <text>⚙️ 其他配置（检索 / 超时 / 预算等高级项）</text>
+          <text class="cfg-adv-arrow">{{showAdvanced ? '收起 ▲' : '展开 ▼'}}</text>
+        </view>
+        <block wx:if="{{showAdvanced}}">
+          <block wx:for="{{advancedItems}}" wx:key="key">
+            <template is="cfgItem" data="{{item}}" />
+          </block>
+        </block>
+      </view>
+
+      <view class="cfg-actions">
+        <view class="primary-btn" bindtap="onSaveConfig">保存配置</view>
+        <view class="ghost-btn" bindtap="onTestLlm">测试大模型</view>
+        <view class="ghost-btn" bindtap="onTestAmap">测试高德 Key</view>
+      </view>
+      <view class="cfg-updated">最近修改：{{configUpdatedAt}}</view>
+    </view>
+
+    <!-- ③ 管理员名单 -->
+    <view wx:elif="{{tab === 'staff'}}" class="panel">
+      <view wx:if="{{!isSuper}}" class="hint-bar">只有超级管理员可以增减管理员。</view>
+      <view wx:for="{{staff}}" wx:key="userId" class="user-card">
+        <view class="user-top">
+          <view class="user-main">
+            <view class="user-name">{{item.nickname}}</view>
+          </view>
+          <view class="tag {{item.role === 'super' ? 'tag-admin' : 'tag-on'}}">
+            {{item.role === 'super' ? '超管' : '管理员'}}
+          </view>
+        </view>
+        <view wx:if="{{isSuper && item.role !== 'super'}}" class="user-actions">
+          <view class="act-btn act-off" data-index="{{index}}" bindtap="onToggleStaff">撤销管理员</view>
+        </view>
+      </view>
+      <view wx:if="{{isSuper}}" class="hint-bar">给普通用户「设为管理员」：先到「授权」页搜到该用户，在名单页看不到非管理员。</view>
+    </view>
+
+    <!-- ④ 日志 -->
+    <view wx:else class="panel">
+      <view wx:if="{{isSuper && logs.length}}" class="danger-btn" bindtap="onClearLogs">🗑 清空日志</view>
+      <view wx:if="{{!logs.length}}" class="empty">暂无操作记录</view>
+      <view wx:for="{{logs}}" wx:key="ts" class="log-row">
+        <view class="log-main">
+          <text class="log-action">{{item.actionText}}</text>
+          <text class="log-target">{{item.targetLabel}}</text>
+        </view>
+        <view class="log-meta">{{item.actorLabel}} · {{item.timeText}}</view>
+      </view>
+    </view>
+  </block>
+</view>

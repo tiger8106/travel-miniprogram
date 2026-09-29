@@ -5,6 +5,22 @@ const homeCache = require('../../utils/homecache');
 const env = require('../../utils/env');
 const privacy = require('../../utils/privacy');
 const quota = require('../../utils/quota');
+const api = require('../../services/api');
+const config = require('../../config');
+
+/**
+ * api 层有两种封装，返回形态不一样：
+ *   callFn         → 成功时直接给业务体（如 {isAdmin, me, items}）
+ *   callFnKeepCode → 给 {code, data, msg}
+ * 这里两种都吃掉，统一返回业务体。
+ * ⚠️ 踩过的坑：直接写 r.data 时，走 callFn 的接口恒为 undefined，
+ *    管理员菜单就永远显示不出来（后台列表/配置也一样全空）。
+ */
+function bodyOf(r) {
+  if (!r || typeof r !== "object") return {};
+  if (r.data && typeof r.data === 'object') return r.data;
+  return r;
+}
 
 const app = getApp();
 
@@ -16,6 +32,8 @@ Page({
     saving: false,
     showPrivacy: false, // 隐私保护授权弹窗（点头像/填昵称被微信拦截时触发）
     quotaText: '查看剩余次数与套餐',
+    // 管理后台入口：由服务端判定身份后才显示（前端隐藏不是安全边界，云端会再验一次）
+    isAdmin: false,
   },
 
   onShow() {
@@ -61,6 +79,27 @@ Page({
       profile,
     });
     this.loadQuota();
+    this.loadAdminRole();
+  },
+
+  /**
+   * 查一次身份：管理员才显示「管理后台」菜单。
+   * 失败/没部署都静默 —— 这只是一份额外的入口，不该因为它报什么错吓到用户。
+   */
+  async loadAdminRole() {
+    this.setData({ isAdmin: false });
+    if (!auth.isLoggedIn() || !api.adminWhoami) return;
+    try {
+      const r = await api.adminWhoami();
+      const d = bodyOf(r);
+      this.setData({ isAdmin: !!d.isAdmin });
+    } catch (e) {
+      console.warn('[mine] 管理员身份不可用（不影响使用）:', (e && e.message) || e);
+    }
+  },
+
+  onTapAdmin() {
+    wx.navigateTo({ url: '/pages/admin/admin' });
   },
 
   // ---------- 登录 / 退出 ----------
@@ -196,29 +235,26 @@ Page({
   },
 
   onTapAbout() {
-    // 连点 5 次「关于」→ 临时解锁开发者功能（体验版真机自查用，24 小时后自动失效）
+    // 连点 5 次「关于」→ 开启开发者功能；再连点 5 次 → 关闭（体验版真机自查用）
     const now = Date.now();
     if (!this._aboutTapTs || now - this._aboutTapTs > 1500) this._aboutTaps = 0;
     this._aboutTapTs = now;
     this._aboutTaps = (this._aboutTaps || 0) + 1;
     if (this._aboutTaps >= 5) {
       this._aboutTaps = 0;
-      const hours = env.unlockDevTools();
-      wx.showToast({ title: `开发者功能已开启 ${hours} 小时`, icon: 'none' });
+      if (env.isDevToolsUnlocked()) {
+        env.lockDevTools();
+        wx.showToast({ title: '开发者功能已关闭', icon: 'none' });
+      } else {
+        const hours = env.unlockDevTools();
+        wx.showToast({ title: `开发者功能已开启 ${hours} 小时`, icon: 'none' });
+      }
       return;
     }
 
     wx.showModal({
       title: '关于',
-      content: `微信旅游小程序 v1.0\n基于微信云开发\n阿稳 🧰 出品\n\n运行环境：${env.envLabel()}`,
-      showCancel: false,
-    });
-  },
-
-  onTapFeedback() {
-    wx.showModal({
-      title: '反馈',
-      content: '有问题或建议？请在「我的行程」页面截图反馈。',
+      content: `${config.APP_NAME} v${config.APP_VERSION}\n${config.APP_BRAND}\n\n运行环境：${env.envLabel()}`,
       showCancel: false,
     });
   },

@@ -9,7 +9,8 @@
     "pages/suggestions/suggestions",
     "pages/mine/mine",
     "pages/mytrips/mytrips",
-    "pages/pay/pay"
+    "pages/pay/pay",
+    "pages/admin/admin"
   ],
   "window": {
     "backgroundTextStyle": "light",

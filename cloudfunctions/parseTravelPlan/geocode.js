@@ -33,7 +33,8 @@
 
 const https = require('https');
 
-const AMAP_KEY = process.env.AMAP_KEY || '';
+/** 调用时才读环境变量：模块级常量在 require 时就固化了，管理后台改完 KEY 要等实例冷启动才生效 */
+function amapKey() { return process.env.AMAP_KEY || ''; }
 const GEOCODE_URL = 'https://restapi.amap.com/v3/geocode/geo';
 const POI_URL = 'https://restapi.amap.com/v3/place/text';
 const REQUEST_TIMEOUT = 10 * 1000;
@@ -391,8 +392,8 @@ function geoClassOk(keyword, hay) {
 
 /** POI 关键词搜索（v3/place/text）。citylimit=true 时城市是硬限制，不会串到外省。 */
 async function searchPoi(keywords, city, citylimit, size, timeoutMs) {
-  if (!AMAP_KEY || !keywords) return [];
-  let url = `${POI_URL}?keywords=${encodeURIComponent(keywords)}&key=${AMAP_KEY}` +
+  if (!amapKey() || !keywords) return [];
+  let url = `${POI_URL}?keywords=${encodeURIComponent(keywords)}&key=${amapKey()}` +
     `&offset=${size || 10}&page=1&output=json&extensions=base`;
   if (city) url += `&city=${encodeURIComponent(city)}`;
   if (city && citylimit) url += '&citylimit=true';
@@ -421,8 +422,8 @@ async function searchPoi(keywords, city, citylimit, size, timeoutMs) {
 
 /** 地理编码（v3/geocode/geo）。city 只是优先级提示，必须配合城市校验。 */
 async function geoRaw(address, city) {
-  if (!AMAP_KEY || !address) return [];
-  let url = `${GEOCODE_URL}?address=${encodeURIComponent(address)}&key=${AMAP_KEY}&output=json`;
+  if (!amapKey() || !address) return [];
+  let url = `${GEOCODE_URL}?address=${encodeURIComponent(address)}&key=${amapKey()}&output=json`;
   if (city) url += `&city=${encodeURIComponent(city)}`;
   try {
     const resp = await amapGet(url);
@@ -476,7 +477,7 @@ async function geoRaw(address, city) {
  *                          内部拆成候选城市逐个试）
  */
 async function geocodeOne(address, city, deadlineAt) {
-  if (!AMAP_KEY || !address) return null;
+  if (!amapKey() || !address) return null;
   const raw = String(address).trim();
   // 括号补注（「锦江都城酒店（桂林两江四湖象山景区店）」）常拖垮 POI 搜索，
   // 且括号里的「…景区店」会给词根提取造出垃圾——先剥掉
@@ -652,7 +653,7 @@ function isBookableHotelPoi(row, regions) {
 
 /** 只用一次城市限定的 POI 搜索核验住宿名称；命中失败时调用方应展示片区与档次。 */
 async function searchHotelPoi(address, city, timeoutMs) {
-  if (!AMAP_KEY || !address) return null;
+  if (!amapKey() || !address) return null;
   const query = String(address).trim();
   const cityName = pickCity(city);
   const rows = await searchPoi(query, cityName, !!cityName, 10, timeoutMs || 2500);
@@ -679,7 +680,7 @@ function fitsUrbanHotelSearch(row, region) {
 }
 
 async function searchHotelsNearby(region, budget, timeoutMs) {
-  if (!AMAP_KEY) return null;
+  if (!amapKey()) return null;
   const raw = String(region || '').trim();
   if (!raw) return null;
   const regionParts = raw.split(/[\/、，,\s]+/).map((part) => part.trim()).filter(Boolean);
@@ -798,7 +799,7 @@ async function searchHotelsNearby(region, budget, timeoutMs) {
  */
 async function geocodeBatch(addresses, cityOf, opts) {
   const result = new Map();
-  if (!AMAP_KEY) {
+  if (!amapKey()) {
     console.log('[geocode] 未配置 AMAP_KEY，跳过地理编码');
     return result;
   }

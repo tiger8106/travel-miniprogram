@@ -64,12 +64,13 @@
 
   <view class="card">
     <view class="card-title">⚙️ 设置与帮助</view>
-    <view class="menu-item" bindtap="onTapAbout">
-      <text>关于</text>
+    <!-- 管理后台：只有管理员账号才会显示（服务端判定，前端隐藏不是安全边界） -->
+    <view class="menu-item" wx:if="{{isAdmin}}" bindtap="onTapAdmin">
+      <text>管理后台</text>
       <text class="text-placeholder">›</text>
     </view>
-    <view class="menu-item" bindtap="onTapFeedback">
-      <text>问题反馈</text>
+    <view class="menu-item" bindtap="onTapAbout">
+      <text>关于</text>
       <text class="text-placeholder">›</text>
     </view>
     <view class="menu-item" wx:if="{{loggedIn}}" bindtap="onLogout">

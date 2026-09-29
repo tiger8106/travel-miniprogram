@@ -675,9 +675,8 @@ Page({
       const p = s.progress || {};
       const done = p.done || 0;
       if (p.total) {
-        const action = '已检查并保存';
-        this.setTipExtra(toldCanLeave ? `${action} ${Math.min(done, p.total)}/${p.total} 天`
-          : `${action} ${Math.min(done, p.total)}/${p.total} 天（可离开，后台继续）`);
+        // 简洁一句就够：说清「系统会反复校验、耗时长、可以先走开」，不再刷进度数字
+        this.setTipExtra('系统会反复校验行程，耗时较长；可去首页查看已生成的内容，或先去忙别的');
         this.setEst((Date.now() - t0) + eta.estimate('detail', Math.max(0, p.total - done)));
       }
       if (s.round >= 1 && !toldCanLeave && !this._left) {

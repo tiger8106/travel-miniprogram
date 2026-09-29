@@ -1,0 +1,7 @@
+{
+  "navigationBarBackgroundColor": "#10111a",
+  "navigationBarTextStyle": "white",
+  "navigationBarTitleText": "管理后台",
+  "backgroundColor": "#10111a",
+  "enablePullDownRefresh": true
+}

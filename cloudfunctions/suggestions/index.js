@@ -14,6 +14,10 @@ cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 const https = require('https');
 const http = require('http');
 
+// 远程配置（管理后台在线改的 KEY）：自动生成前把覆盖值写进 process.env，
+// 读不到就沿用本函数的环境变量。详见 generatePlan/cloudCfg.js。
+const cloudCfg = require('./cloudCfg');
+
 const COL_SUG = 'suggestions';
 const COL_TRIP = 'trips';
 
@@ -38,6 +42,9 @@ exports.main = async (event, context) => {
   const wxContext = cloud.getWXContext();
   const userOpenid = wxContext.OPENID;
   if (!userOpenid) return { code: -1, msg: '未登录' };
+
+  // 管理后台在线配置优先于环境变量（失败静默沿用）
+  await cloudCfg.apply();
 
   const { action } = event || {};
   const db = cloud.database();

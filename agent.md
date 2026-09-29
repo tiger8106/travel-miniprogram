@@ -140,6 +140,23 @@ node scripts/check-bindings.js
 - 新增 `scripts/test-generation-completion.js` 覆盖真实处理器+内存数据库的4→5→6不回退、候选隐藏、错误完成保护、预算收尾、第三次续跑、删除/清除/孤儿过滤、网络异常及大纲生成→编辑→提交。此测试不是线上数据库或真实模型测试，两类测试结果分别记录。
 - 解析表格时，模糊预订日期的事项可能位于日期前一行，不能只看后文；相邻日期之间隔离上下文，避免另一类事项的精确时刻给日期范围背书。完整真实解析与纯规则测试分开执行，不把旧脚本的大纲阶段误报当作最终详情验收；仅需单元回归时用 `test-generate.js --unit`。
 
+### 🛠 管理后台：身份写在数据库，配置走运行时下发
+
+- 管理员身份 = `users.role`（`super` / `admin`）；「不限量」= `users.unlimited`。**不要写死 openid**。
+- 第一个超管靠**一次性认领码**（`admin` 函数的环境变量 `ADMIN_CLAIM_CODE`）拿到，用过即废；
+  也可以在数据库里直接给 `users.role` 填 `super`。
+- **在线配置机制**（理解这个才不会乱改）：
+  管理员存的是 `admin_config` 集合（`over: {KEY: value}`，权限必须是**仅管理端可读写**）；
+  消费方云函数（`generatePlan` / `parseTravelPlan` / `suggestions`）在 `exports.main` 开头
+  `await cloudCfg.apply()`，把配置写进 `process.env` ——
+  **因为下游模块都是调用时才读 process.env，所以下游一行都不用改**。60 秒 TTL，不用重新部署。
+- `cloudCfg.js` 在四个函数里各有一份副本，改一处必须同步四处（check-bindings 有断言）。
+- **白名单**：只允许 `LLM_*` / `AMAP_*` / `GEOCODE_BUDGET_MS` / `RAIL12306_ENABLED`；
+  `XPAY_*` / `MP_*` / `INTERNAL_*` / `ADMIN_*` 永不允许在线改（避免误操作搞挂支付）。
+- `geocode.js` 的 AMAP_KEY 必须是**调用时读取**（`amapKey()`），写成模块级常量会导致后台改 Key 不生效。
+- 特权放行在 `quota/index.js` 的 `isPrivileged()`：只加判定的分支，**`rules.js` 的扣费规则不许动**。
+- 详细部署与运维见 `管理后台使用说明.md`。
+
 ### 🕐 时区：云函数 UTC，用户在中国（UTC+8）→ 曾经整体偏移 +8 小时
 
 - 云函数**服务器跑 UTC**。`new Date("2026-09-21T15:15:00")` 会被当成 UTC 解析，存库再显示就多了 8 小时。
@@ -325,6 +342,7 @@ travel-miniprogram/
 │  ├─ ticketAlarm/      闹钟 CRUD
 │  ├─ itinerary/        行程 CRUD
 │  ├─ suggestions/      旅行建议
+│  ├─ admin/            管理后台：管理员身份 / 授权不限量 / 在线配置（详见「管理后台」节）
 │  ├─ login/            登录
 │  └─ initdb/           初始化数据库集合
 ├─ scripts/                      本地验证脚本

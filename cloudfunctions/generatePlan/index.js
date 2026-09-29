@@ -27,6 +27,9 @@ const {
 const { geocodeBatch, cityTokens, searchHotelPoi, searchHotelsNearby } = require('./geocode');
 const { validateOutlineHotels } = require('./hotel-validation');
 const { lookupSchedules, canLookupSchedules, canSearch } = require('./schedule');
+// 远程配置（管理后台在线改的 KEY）：在每次调用开始时把覆盖值写进 process.env，
+// 下游模块读环境变量的方式一行都不用改。读不到就静默沿用环境变量，不影响生成。
+const cloudCfg = require('./cloudCfg');
 
 const COL_TRIP = 'trips';
 const COL_ALARM = 'ticket_alarms';
@@ -964,6 +967,9 @@ exports.main = async (event, context) => {
   const ctxOpenid = wxContext.OPENID || '';
   if (!ctxOpenid && !(event && event.openid)) return { code: -1, msg: '未登录' };
   const openid = ctxOpenid || String(event.openid);
+
+  // 管理后台在线配置优先于云函数环境变量（读失败一律静默降级，不阻断生成）
+  await cloudCfg.apply();
 
   const { action } = event || {};
 

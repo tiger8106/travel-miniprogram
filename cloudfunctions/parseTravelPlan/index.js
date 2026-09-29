@@ -10,6 +10,9 @@ const { buildDocMeta } = require('./docmeta');
 const { geocodeBatch, geocodeOne } = require('./geocode');
 const { sanitizeItems } = require('./normalize');
 const { inferAlarms, backfillRuleAlarms, INFER_THRESHOLD } = require('./alarm-infer');
+// 远程配置（管理后台在线改的 KEY）：见 generatePlan/cloudCfg.js 的说明。
+// 本文件那份与其内容一致，改一处要同步三处（check-bindings 有断言盯着）。
+const cloudCfg = require('./cloudCfg');
 
 const COL_TRIP = 'trips';
 const COL_ALARM = 'ticket_alarms';
@@ -203,6 +206,9 @@ function cleanAlarms(rawAlarms, openid, now, sourceText = '') {
 exports.main = async (event, context) => {
   const wxContext = cloud.getWXContext();
   const openid = wxContext.OPENID;
+
+  // 管理后台在线配置优先于环境变量（失败静默沿用）
+  await cloudCfg.apply();
 
   // 子功能：实时地理编码（前端点击地图按钮时，给地点名查经纬度）
   // 复用本函数的环境变量 AMAP_KEY，前端不用重新上传攻略
