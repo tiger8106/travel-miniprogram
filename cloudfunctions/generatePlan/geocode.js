@@ -662,6 +662,7 @@ async function searchHotelPoi(address, city, timeoutMs) {
   matches.sort((a, b) => nameScore(b.name, query) - nameScore(a.name, query));
   return {
     matchedName: matches[0].name,
+    lon: matches[0].lon, lat: matches[0].lat,
     city: matches[0].city || '',
     province: matches[0].province || '',
     district: matches[0].district || '',
@@ -670,6 +671,13 @@ async function searchHotelPoi(address, city, timeoutMs) {
 }
 
 /** 搜索具体住宿片区内的真实酒店 POI，给无法核验的模型店名提供可搜索替代项。 */
+function fitsUrbanHotelSearch(row, region) {
+  const city = String(row.city || '').replace(/市$/, '');
+  const urban = city && cityTokens(region).includes(city)
+    && !/县|镇|乡|村|景区|梯田|田园|瀑布|园区/.test(region || '');
+  return !urban || !/县|镇|乡/.test(`${row.district || ''}${row.address || ''}`);
+}
+
 async function searchHotelsNearby(region, budget, timeoutMs) {
   if (!AMAP_KEY) return null;
   const raw = String(region || '').trim();
@@ -732,7 +740,7 @@ async function searchHotelsNearby(region, budget, timeoutMs) {
     for (const query of uniqueQueries) {
       const rows = await searchPoi(query, city, true, 10, timeoutMs || 2500);
       const matches = rows.filter((row) => lodgingName.test(row.name)
-        && cityHit(city, row.hay)
+        && cityHit(city, row.hay) && fitsUrbanHotelSearch(row, raw)
         && (!areas.length || hotelAreaScore(row) > 0)
         && isBookableHotelPoi(row, [raw, ...cityCandidates, ...areas, city, row.city, row.district]));
       if (!matches.length) continue;
@@ -741,6 +749,7 @@ async function searchHotelsNearby(region, budget, timeoutMs) {
       });
       return {
         matchedName: matches[0].name,
+        lon: matches[0].lon, lat: matches[0].lat,
         city: matches[0].city || '',
         province: matches[0].province || '',
         district: matches[0].district || '',
@@ -763,6 +772,7 @@ async function searchHotelsNearby(region, budget, timeoutMs) {
           && isBookableHotelPoi(row, [raw, ...cityCandidates, area, row.city, row.district]));
         if (matches.length) return {
           matchedName: matches[0].name,
+          lon: matches[0].lon, lat: matches[0].lat,
           province: matches[0].province || '',
           city: matches[0].city || '',
           district: matches[0].district || '',

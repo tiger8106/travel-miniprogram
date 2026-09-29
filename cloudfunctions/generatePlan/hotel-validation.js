@@ -4,6 +4,27 @@
  * instead of showing a made-up property name.
  */
 async function validateOutlineHotels(result, input, searchHotelPoi, searchHotelsNearby) {
+  const geo = require('./geocode');
+  const { distanceKm } = require('./route-evidence');
+  const anchors = new Map();
+  const withinUrbanArea = async (poi, overnight) => {
+    if (!poi || !Number.isFinite(Number(poi.lon)) || !Number.isFinite(Number(poi.lat))) return true;
+    const city = String(poi.city || '').replace(/市$/, '');
+    const bare = String(overnight || '').replace(/[（(].*$/, '').replace(/市区|市中心|中心城区|市/g, '').trim();
+    if (!city || bare !== city) return true;
+    const area = ((String(overnight).match(/[（(]([^）)]+)[）)]/) || [])[1] || '')
+      .split(/[\/、]/)[0].replace(/片区|附近|周边|住宿|酒店/g, '').trim();
+    // 没有指定商圈时用行政区/县镇证据判断市区，不能把市政府当作旅游市中心。
+    // 部分城市政府已迁至新区，以它作唯一圆心会误排真实的老城区酒店。
+    if (!area) return true;
+    const name = area;
+    const key = `${city}|${name}`;
+    if (!anchors.has(key)) anchors.set(key, geo.geocodeOne(name, `${city}市`, Date.now() + 2500));
+    const anchor = await anchors.get(key);
+    // 明确指定的商圈才按距离核验；县镇排除仍由 matchingOvernight 负责。
+    const distance = anchor && distanceKm(anchor, poi);
+    return distance !== null && distance !== undefined && distance <= 5;
+  };
   const outline = result && result.outline;
   const days = outline && Array.isArray(outline.days) ? outline.days : [];
   const budget = String(input && (input.budget || input.budgetLevel) || '');
@@ -26,6 +47,11 @@ async function validateOutlineHotels(result, input, searchHotelPoi, searchHotels
     }
     const actual = `${poi.province || ''}${poi.city || ''}${poi.district || ''}${poi.address || ''}`;
     const addressEvidence = `${poi.district || ''}${poi.address || ''}`;
+    // 同属一个地级市不等于市区：市区住宿不能用下辖县/镇的酒店充数。
+    const cityOnlyTarget = !/县|镇|乡|村|景区|梯田|田园|瀑布/.test(text)
+      && expected.some((word) => actual.includes(`${word}市`));
+    if ((cityOnlyTarget || /市区|市中心|中心城区|[（(][^）)]*(?:路|广场|街)[^）)]*[）)]/.test(overnight || ''))
+        && /(?:县|自治县|镇|乡)/.test(addressEvidence)) return false;
     const namedScenicArea = !/(?:自治州|地区|市(?!区)|县(?!城))/.test(overnight || '');
     const targetMatchesAddress = expected.some((word) => addressEvidence.includes(word))
       || !!(namedScenicArea && poi.areaSearch && poi.areaMatched
@@ -57,7 +83,8 @@ async function validateOutlineHotels(result, input, searchHotelPoi, searchHotels
     if (day.hotelPoiVerified === true
         && String(day.hotelPoiVerifiedName || '').trim() === String(day.hotel).trim()
         && String(day.hotelPoiAddress || '').trim()
-        && matchingOvernight({ address: day.hotelPoiAddress }, overnight)) return;
+        && matchingOvernight({ address: day.hotelPoiAddress }, overnight)
+        && ((day.hotelAreaValidated === true && day.hotelPoiOvernight === overnight) || !process.env.AMAP_KEY)) return;
     const name = String(day.hotel).trim();
     const generic = /(经济型|舒适型|品质型|住宿片区|酒店片区|附近|周边)$/.test(name);
     if (!generic && !/(酒店|宾馆|客栈|民宿|饭店|公寓|度假村)/.test(name)) return;
@@ -72,7 +99,7 @@ async function validateOutlineHotels(result, input, searchHotelPoi, searchHotels
         console.warn('[generatePlan] 住宿 POI 核验失败：%s (%s)', name, e.message);
       }
     }
-    if (poi && (!bookable(poi) || !matchingOvernight(poi, overnight))) {
+    if (poi && (!bookable(poi) || !matchingOvernight(poi, overnight) || !await withinUrbanArea(poi, overnight))) {
       console.warn('[generatePlan] 第%d天住宿 POI 与当晚住宿地不符，丢弃：%s', index + 1, poi.matchedName);
       poi = null;
     }
@@ -81,13 +108,14 @@ async function validateOutlineHotels(result, input, searchHotelPoi, searchHotels
         console.warn('[generatePlan] 附近住宿搜索失败：%s (%s)', city, e.stack || e.message);
       }
     }
-    if (poi && (!bookable(poi) || !matchingOvernight(poi, overnight))) poi = null;
+    if (poi && (!bookable(poi) || !matchingOvernight(poi, overnight) || !await withinUrbanArea(poi, overnight))) poi = null;
     if (poi && poi.matchedName) {
       if (generic || poi.areaSearch) {
         console.log('[generatePlan] 第%d天住宿替换为片区可搜索 POI：%s', index + 1, poi.matchedName);
       }
       day.hotel = poi.matchedName;
       day.hotelPoiVerified = true;
+      day.hotelAreaValidated = true;
       day.hotelPoiVerifiedName = day.hotel;
       day.hotelPoiAddress = [poi.province, poi.city, poi.district, poi.address].filter(Boolean).join('');
       day.hotelPoiSource = 'amap-poi';
@@ -115,6 +143,10 @@ async function validateOutlineHotels(result, input, searchHotelPoi, searchHotels
     const day = days[index];
     if (!previous || !day || !day.hotel || !previous.hotel) continue;
     if (areaKey(previous.overnight || previous.city) !== areaKey(day.overnight || day.city)) continue;
+    // 同城不同片区不能仅靠去掉括号后的城市词强行合并。
+    const areaNote = (value) => (String(value || '').match(/[（(]([^）)]+)[）)]/) || [])[1] || '';
+    if (areaNote(previous.overnight) && areaNote(day.overnight)
+        && areaNote(previous.overnight) !== areaNote(day.overnight)) continue;
     const previousVerified = previous.hotelPoiVerified === true;
     const dayVerified = day.hotelPoiVerified === true;
     if (previousVerified || dayVerified) {

@@ -1,0 +1,42 @@
+{
+  "2026-10-02": [
+    {
+      "sourceUrl": "https://www.lijiangriver.com.cn/page/article/zxlj.tzgg/171",
+      "summary": "运营方2025-07-07常态公示：三星级从磨盘山到阳朔龙头山，09:00、09:30、10:00、12:05；四星级从竹江到阳朔龙头山，08:50、09:20、09:50、10:20。节假日班次可能调整，需预订确认，不可混写船型或编造11点竹江航班。",
+      "sailingWindows": [
+        { "from": "竹江码头", "to": "阳朔龙头山码头", "grade": "四星", "departures": ["08:50", "09:20", "09:50", "10:20"], "estimated": true },
+        { "from": "磨盘山码头", "to": "阳朔龙头山码头", "grade": "三星", "departures": ["09:00", "09:30", "10:00", "12:05"], "estimated": true }
+      ]
+    },
+    {
+      "sourceUrl": "https://www.liriver.com.cn/page/article/zxlj.tzgg/264",
+      "summary": "2026-09-16国庆公告：精华段游船国庆票提前15天线上预售，排筏等提前7天预约。官方渠道漓江售票处，当前需核实余票，已购票不重复提醒。"
+    }
+  ],
+  "2026-10-03": [
+    {
+      "sourceUrl": "https://www.ysylh.cn/matou/2025/jinglongqiaoView.shtml",
+      "summary": "运营方2025-07-04公布金龙桥漂流从金龙桥码头到旧县综合码头，6.18公里、9个堰坝。不是到工农桥，也不经过上游富里桥。漂流结束须按实际旧县终点安排接驳，原寄存点取回行李后才去下一站。旺季排队与漂流用时另行预留，未公布固定发船时刻。",
+      "sailingWindows": [{ "from": "金龙桥码头", "to": "旧县综合码头", "grade": "竹筏", "departures": [], "estimated": true, "basisDate": "2025-07-04" }]
+    },
+    {
+      "sourceUrl": "https://www.ysylh.cn/matou/2025/jimamatouView.shtml",
+      "summary": "运营方2025-07-04公布另一条合法线路为骥马码头到工农桥旁综合码头，5.2公里。不能把不同线路的起终点拼成一条漂流路线。",
+      "sailingWindows": [{ "from": "骥马码头", "to": "工农桥旁综合码头", "grade": "竹筏", "departures": [], "estimated": true, "basisDate": "2025-07-04" }]
+    }
+  ],
+  "2026-10-04": [
+    {
+      "sourceUrl": "https://www.ctgii.com/scenic/overseas/72",
+      "summary": "运营企业公布德天日场07:30-18:30。核心游览和出园接驳均在闭园前完成。预留20分钟出园是本次规划估算，不是官方接驳承诺；夜游属于另一项目。",
+      "visitWindows": [{ "place": "德天瀑布", "openTime": "07:30", "closeTime": "18:30", "exitMinutes": 20, "estimated": true, "basisDate": "2026-09-29" }]
+    }
+  ],
+  "2027-01-02": [
+    {
+      "sourceUrl": "https://you.ctrip.com/sight/dujiangyan911/145236465.html",
+      "summary": "平台列明青城前山冬季11月1日至次年3月31日08:30-17:00开放，16:30停止售票，建议半天游玩。这是季节性参考，不是2027元旦已公告承诺。索道与适度徒步按150分钟保守规划估算，不是官方最低用时；另留出园取件余量，须出行前确认。不能55或84分钟承诺完整建福宫、天师洞、上清宫环线。",
+      "visitWindows": [{ "place": "青城", "openTime": "08:30", "lastEntryTime": "16:30", "closeTime": "17:00", "exitMinutes": 20, "minVisitMinutes": 150, "estimated": true, "basisDate": "2026-09-29" }]
+    }
+  ]
+}
