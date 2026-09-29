@@ -38,7 +38,8 @@ const COL_SCHED = 'schedule_cache';
 const SCHED_TTL_MS = 36 * 3600 * 1000;
 
 // 生成引擎版本（用于确认线上跑的是哪一版）
-const GEN_VERSION = 'v2.15-semantic-navigation-review';
+const GEN_VERSION = 'v2.16-validated-progress-finish';
+const { publicationState, collectGenerationRows } = require('./publication');
 
 async function generateOutlineWithHotelCheck(input, opts) {
   const result = await generateOutline(input, opts || {});
@@ -59,7 +60,7 @@ async function generateOutlineWithHotelCheck(input, opts) {
 // （用户关了小程序、或者那一轮被系统杀掉），才需要它接手。
 // ---------------------------------------------------------------
 const JOB_LEASE_MS = 70 * 1000;
-const JOB_MAX_ROUNDS = 12;                  // 正常 2-4 轮，12 轮是异常兜底
+const JOB_MAX_ROUNDS = 24;                 // 生成、知识、修订分轮；上限还按天数扩展
 const JOB_MAX_AGE_MS = 25 * 60 * 1000;      // 单个任务最长 25 分钟
 const JOB_STATUS_TTL_MS = 24 * 3600 * 1000; // 只把最近失败任务展示给前端，避免旧任务挡住新任务
 const DEFAULT_ALARM_LEAD_MINUTES = 5;
@@ -293,13 +294,26 @@ async function savePlan(openid, plan, tripId, jobId, outline, input) {
     if (!oldData._openid || oldData._openid !== openid) {
       throw new Error('行程不存在或无权操作');
     }
-    const freshDays = new Set(storedItems.map((it) => it.dayIndex));
-    const kept = (oldData.items || []).filter((it) => !freshDays.has(it.dayIndex));
-    storedItems = kept.concat(storedItems).sort((a, b) => (a.dayIndex || 0) - (b.dayIndex || 0));
   }
 
+  const publication = publicationState(oldData, plan, outline);
+  storedItems = publication.published.sort((a, b) => (a.dayIndex || 0) - (b.dayIndex || 0));
+  // 完成状态也以实际落库的整天为准，不能相信候选生成器提前报完。
+  if (!plan.partial && publication.progress.done < publication.progress.total) {
+    plan.partial = true;
+    genPatch.genStatus = 'generating';
+    genPatch.jobId = jobId || '';
+    delete genPatch.genCompletedAt;
+    publication.progress.stage = 'generation_review';
+  }
+  plan.progress = genPatch.genProgress = publication.progress;
+  genPatch.genWarningCount = publication.warningDays.length;
+  // 私有候选不能进入首页 items。job 和非 job 续跑均可恢复这些候选。
+  genPatch.genDraftItems = plan.partial ? publication.pending : [];
+  genPatch.genDraftOutline = plan.partial ? outline : null;
+
   // 等哪一轮真有内容了再建，否则中途放弃会在「我的行程」里留下一条 0 条的空攻略。
-  if (!finalTripId && !storedItems.length && plan.partial) {
+  if (!finalTripId && !storedItems.length && !publication.pending.length && plan.partial) {
     console.log('[generatePlan] 本轮没有新条目，暂不建库，等下一轮续跑');
     return {
       tripId: '',
@@ -498,6 +512,17 @@ async function loadJob(jobId) {
   }
 }
 
+async function generationTrip(db, tripId) {
+  try {
+    return await db.collection(COL_TRIP).doc(tripId).get();
+  } catch (e) {
+    // 部分 SDK 对已删除文档抛异常，只吞明确的文档不存在，不能吞网络/权限错误。
+    const message = String(e.errMsg || e.message || e);
+    if (/document\s+(?:does\s+not\s+exist|not\s+(?:found|exist))|文档不存在/i.test(message)) return null;
+    throw e;
+  }
+}
+
 /** 任务对外可见的字段（不返回 input，里面有大段大纲，没必要来回搬） */
 function jobPublic(job, now) {
   return {
@@ -677,13 +702,18 @@ async function runJobRound(openid, job) {
   if (job.tripId) {
     const stored = await db.collection(COL_TRIP).doc(job.tripId).get();
     if (!stored.data || stored.data._openid !== openid) throw new Error('行程不存在或无权操作');
-    reviewItems = stored.data.items || [];
+    reviewItems = collectGenerationRows((stored.data.items || []).concat(stored.data.genDraftItems || []), payload.outline);
   }
+  const roundLimit = Math.max(JOB_MAX_ROUNDS, (payload.outline.days || []).length * 8 + 4);
+  const finalizing = Number(job.round || 0) >= roundLimit - 1
+    || (job.createdAt && Date.now() - job.createdAt > JOB_MAX_AGE_MS);
   const plan = await buildPlan(payload, payload, {
     doneDayIndexes: job.doneDayIndexes || [],
     attempts: job.attempts || {},
     budgetMs: job.budgetMs,
     reviewItems,
+    preservePublishedDays: true,
+    finalizePending: finalizing,
   });
   if (!plan || (!plan.items.length && !plan.partial && !job.tripId)) {
     throw new Error('AI 没有生成出有效行程，请调整需求后重试');
@@ -698,8 +728,7 @@ async function runJobRound(openid, job) {
 
   const now = Date.now();
   const round = (job.round || 0) + 1;
-  const tooOld = !!job.createdAt && (now - job.createdAt > JOB_MAX_AGE_MS);
-  const status = !data.partial ? 'done' : ((data.reviewError || round >= JOB_MAX_ROUNDS || tooOld) ? 'failed' : 'running');
+  const status = !data.partial ? 'done' : (data.reviewError ? 'failed' : 'running');
   const patch = {
     input: Object.assign({}, input, { outline: payload.outline }),
     tripId: data.tripId || job.tripId || '',
@@ -946,15 +975,34 @@ exports.main = async (event, context) => {
         .where({ _openid: openid })
         .orderBy('updatedAt', 'desc').limit(10).get();
       const now = Date.now();
-      const jobs = (res.data || [])
+      const candidates = (res.data || [])
         .filter((j) => j.status === 'running'
           || (j.status === 'failed' && now - Number(j.updatedAt || 0) <= JOB_STATUS_TTL_MS))
-        .slice(0, 3)
-        .map((j) => jobPublic(j, now));
+        .filter((j) => !j.dismissed);
+      const jobs = [];
+      for (const job of candidates) {
+        if (job.tripId) {
+          const trip = await generationTrip(db, job.tripId);
+          if (!trip || !trip.data || trip.data._openid !== openid) continue;
+        }
+        jobs.push(jobPublic(job, now));
+        if (jobs.length >= 3) break;
+      }
       return { code: 0, data: { jobs, job: jobs[0] || null } };
     } catch (e) {
-      return { code: 0, data: { jobs: [], job: null } };   // 查不到就当没有在跑的任务
+      // 网络/权限错误不是“任务不存在”，否则客户端会错误清空仍有效的进度。
+      return { code: -1, msg: '暂时无法查询生成进度，请稍后重试' };
     }
+  }
+
+  if (action === 'dismissJob') {
+    const job = await loadJob(String(event.jobId || ''));
+    if (!job || job._openid !== openid) return { code: -1, msg: '任务不存在或无权操作' };
+    if (job.status === 'running') return { code: -1, msg: '生成中的任务不能清除' };
+    await cloud.database().collection(COL_JOB).doc(job._id).update({
+      data: { dismissed: true, status: 'cancelled', error: '', leaseUntil: 0, leaseOwner: '', updatedAt: Date.now() },
+    });
+    return { code: 0, data: { dismissed: true } };
   }
 
   // ②-C 续跑一轮：前端自己接着跑（expectRound 做乐观锁），
@@ -965,15 +1013,21 @@ exports.main = async (event, context) => {
     const db = cloud.database();
     const job = await loadJob(jobId);
     if (!job || job._openid !== openid) return { code: -1, msg: '任务不存在' };
+    if (job.tripId) {
+      const trip = await generationTrip(db, job.tripId);
+      if (!trip || !trip.data || trip.data._openid !== openid) {
+        await db.collection(COL_JOB).doc(jobId).update({ data: {
+          status: 'cancelled', dismissed: true, leaseUntil: 0, leaseOwner: '', updatedAt: Date.now(),
+        } });
+        return { code: 0, data: Object.assign(jobPublic(job, Date.now()), { status: 'cancelled' }) };
+      }
+    }
     const runnerId = runnerIdOf(event && event.runnerId);
     const now0 = Date.now();
     // 失败任务允许复活：用户在「我的行程」点「继续生成」时再给一次机会。
-    // 已生成的天都在库里，复活接着跑就行；最多复活 2 次、超过 25 分钟不救，
-    // 防止一个死任务被无限重试烧 token。
+    // 用户明确继续时重置本次运行预算，不限制为终生仅两次；保留已发布日期。
     if (job.status === 'failed') {
       const revivals = Number(job.revivals || 0);
-      const tooOld = job.createdAt && (now0 - job.createdAt > JOB_MAX_AGE_MS);
-      if (revivals >= 2 || tooOld) return { code: 0, data: jobPublic(job, now0) };
       // 用户主动续跑时释放失败日的重试预算，已完成日期和候选不动。
       const attempts = Object.assign({}, job.attempts || {});
       Object.keys(attempts).forEach((key) => {
@@ -985,12 +1039,14 @@ exports.main = async (event, context) => {
       await cloud.database().collection(COL_JOB).doc(jobId).update({
         data: {
           attempts,
+          createdAt: now0, round: 0,
           status: 'running', revivals: revivals + 1, error: '',
           leaseUntil: now0 + JOB_LEASE_MS, leaseOwner: runnerId, updatedAt: now0,
         },
       }).catch(() => {});
       job.status = 'running';
       job.attempts = attempts;
+      job.createdAt = now0; job.round = 0;
       job.leaseOwner = runnerId;
       job.leaseUntil = now0 + JOB_LEASE_MS;
       console.log('[generatePlan] 任务 %s 复活（第 %d 次）', jobId, revivals + 1);
@@ -1137,13 +1193,15 @@ exports.main = async (event, context) => {
     if (event.tripId) {
       const stored = await cloud.database().collection(COL_TRIP).doc(event.tripId).get();
       if (!stored.data || stored.data._openid !== openid) throw new Error('行程不存在或无权操作');
-      reviewItems = stored.data.items || [];
+      if (stored.data.genDraftOutline) event.outline = stored.data.genDraftOutline;
+      reviewItems = collectGenerationRows((stored.data.items || []).concat(stored.data.genDraftItems || []), event.outline);
     }
     const plan = await buildPlan(event, event, {
       doneDayIndexes: event.doneDayIndexes,
       attempts: event.attempts,     // 续跑时带回上一轮的失败次数
       budgetMs: budget,
       reviewItems,
+      preservePublishedDays: true,
     });
     // 续跑中途可能这一轮只完成了重试、没产出新条目（partial=true），这时要放行让它继续；
     // 只有彻底没有内容、也没有 tripId 可合并时才算失败。

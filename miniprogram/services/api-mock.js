@@ -326,6 +326,7 @@ module.exports = {
   genJobStatus: async function () {
     return { jobs: [], job: null };
   },
+  dismissGen: async function () { return { dismissed: true }; },
   uploadDoc,
   downloadFromCloud,
 };

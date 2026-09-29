@@ -5,7 +5,7 @@ const cloud = require('wx-server-sdk');
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
 const COL = 'trips';
-const ITINERARY_VERSION = 'v1.4-booking-usage-sync';
+const ITINERARY_VERSION = 'v1.5-generation-cleanup';
 const { synchronizeTrip, usageInfoForItem } = require('./booking-sync');
 
 function bookingTypeForItem(item) {
@@ -195,7 +195,9 @@ async function get(db, openid, tripId) {
   if (!res.data || res.data._openid !== openid) {
     return { code: -1, msg: '行程不存在' };
   }
-  return { code: 0, data: res.data };
+  const out = Object.assign({}, res.data);
+  delete out.genDraftItems; delete out.genDraftOutline;
+  return { code: 0, data: out };
 }
 
 async function list(db, openid, event) {
@@ -204,7 +206,11 @@ async function list(db, openid, event) {
     .orderBy('updatedAt', 'desc')
     .limit(50)
     .get();
-  const data = res.data || [];
+  const data = (res.data || []).map((trip) => {
+    const out = Object.assign({}, trip);
+    delete out.genDraftItems; delete out.genDraftOutline;
+    return out;
+  });
   if (!(event && event.compact)) return { code: 0, data };
 
   // 列表页只需要摘要；首页传 fullTripId 时只把当前选中的那份 items 带回。
@@ -266,6 +272,10 @@ async function del(db, openid, { tripId }) {
   if (cur.data.genStatus === 'generating') {
     return { code: -1, msg: '行程正在生成，请完成后再删除' };
   }
+  // 删除失败攻略时同时终止任务，避免继续生成提示和后台写回孤儿行程。
+  await db.collection('gen_jobs').where({ _openid: openid, tripId }).update({
+    data: { status: 'cancelled', dismissed: true, error: '', leaseUntil: 0, leaseOwner: '', updatedAt: Date.now() },
+  }).catch((error) => console.warn('[itinerary] 关联任务清理暂不可用:', error.message));
   await db.collection(COL).doc(tripId).remove();
   // 级联删除关联闹钟和旅行建议
   await db.collection('ticket_alarms').where({ _openid: openid, tripId }).remove().catch(() => {});

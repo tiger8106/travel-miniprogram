@@ -67,6 +67,16 @@ Page({
     });
   },
 
+  // 失败任务可以清除提示，不删除用户已经保存的行程。
+  async onDismissGen() {
+    try {
+      await genrunner.dismiss();
+      wx.showToast({ title: '已清除提示', icon: 'none' });
+    } catch (error) {
+      wx.showToast({ title: error.message || '清除失败', icon: 'none' });
+    }
+  },
+
   // 登录成功后由门禁组件回调（正常情况下登录广播已刷新过，这里只兜底）
   onLoginSuccess() {
     if (!this.data.needLogin) return;
@@ -159,6 +169,7 @@ Page({
     wx.showLoading({ title: '删除中' });
     try {
       await api.deleteItinerary(id);
+      genrunner.forgetTrip(id);
       if (tripUtil.getPinnedIds().indexOf(id) >= 0) tripUtil.togglePinned(id);
       if (app.globalData.currentTripId === id) app.globalData.currentTripId = null;
       homeCache.clear(); // 首页快照可能正好是这条，直接失效

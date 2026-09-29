@@ -19,7 +19,8 @@ const { parseJSONFromText, asArray, SYS_PROMPT } = require('./llm');
 const { sanitizeItems, META_PAT, META_HARD, parseDurationMin } = require('./normalize');
 const { parseCnTime, tsToDateStr, tsToCnDateTimeStr } = require('./cn-time');
 const { cacheKeyOf: scheduleKeyOf, sameStation } = require('./schedule');
-const { reviewExecutionItems, executionIssues, invalidateRepeatedMeals, invalidateUnsafeAcceptedDays, syncAcceptedMoves, REVIEW_VERSION } = require('./execution-review');
+const { reviewExecutionItems, executionIssues, invalidateRepeatedMeals, invalidateUnsafeAcceptedDays, syncAcceptedMoves, finalizeWithWarnings, REVIEW_VERSION } = require('./execution-review');
+const { finalizedDays } = require('./publication');
 const { solarEventMinute } = require('./solar-time');
 
 const MAX_DAYS = 12;
@@ -8830,9 +8831,7 @@ async function genDayItems(p, outline, opts = {}) {
   const gaveUp = days.map((_, i) => i)
     .filter((i) => !doneAll.includes(i) && (attempts[i] || 0) >= MAX_DAY_RETRY);
 
-  if (!items.length && !stillTodo.length && !done.size) {
-    throw new Error('逐天细化全部失败，未能生成任何行程项');
-  }
+  // 详情请求耗尽重试由 buildPlan 按已确认大纲补全并明确标注，不终止其他日期。
 
   console.log('[generatePlan] 本轮：完成=%d 失败=%d 放弃=%d 待续=%d',
     finished.length, failed.length, gaveUp.length, stillTodo.length);
@@ -10636,6 +10635,39 @@ function annotateAlarmUsage(alarms, items, outline) {
 }
 
 /** 详情生成和联网执行复核分轮进行，已通过日期绝不重复生成。 */
+function warningContext(profile, outline, di) {
+  const day = outline.days[di], previous = outline.days[di - 1] || {};
+  return { isFirst: di === 0, isLast: di === outline.days.length - 1,
+    origin: profile.origin, goTime: profile.goTime, backTime: profile.backTime, date: day.date,
+    hotel: day.hotel, overnight: day.overnight, previousHotel: previous.hotel,
+    sameHotel: !!day.hotel && day.hotel === previous.hotel,
+    noDrive: !drivingAllowed(profile), selfDriveAllowed: (row) => explicitSelfDriveSegment(profile, row),
+    lightLuggage: explicitCarryLuggagePreference(profile), points: day.executionPoints || {},
+    preferRail: /高铁|动车|铁路/.test(profile.transport || ''),
+    routeFacts: [...((day.executionEvidence || {}).routeFacts || []), ...(day.executionNetworkFacts || []),
+      ...(day.executionRoadFacts || []), ...(day.executionTransitFacts || [])],
+    visitWindows: (day.executionEvidence || {}).visitWindows || [],
+    sailingWindows: (day.executionEvidence || {}).sailingWindows || [],
+    official: asArray(day.moves).filter((move) => move.schedSource === '12306').map((move) => ({
+      startLocation: move.from, endLocation: move.to, startTime: move.startTime, endTime: move.endTime, code: move.code,
+    })),
+  };
+}
+
+function fallbackDayWithWarnings(profile, outline, di) {
+  profile = Object.assign({}, profile, { goTime: profile.goTime || '08:00', backTime: profile.backTime || '20:00' });
+  const copy = JSON.parse(JSON.stringify(outline));
+  let rows = skeletonDayItems(profile, copy.days[di], di, copy);
+  if (!rows.length) rows = [{ dayIndex: di, category: 'other', startTime: '09:00', endTime: '18:00',
+    activity: `按大纲前往${copy.days[di].city || profile.dest}，具体安排待确认`, endLocation: copy.days[di].city || profile.dest }];
+  rows = enforceOriginAccess(rows, profile, copy, [di]);
+  rows = enforceTripEdgeOrder(rows, profile, copy, [di]);
+  rows = finalizeExecutionEdges(stripUnverifiedSchedules(enforceTransportPreference(rows, profile), copy), copy, profile);
+  return finalizeWithWarnings(rows, di, outline.days[di],
+    ['此日详细生成多次未返回有效内容，已按大纲补全估算安排；请确认各段交通、景区路线、开放时间和行李服务后执行。'],
+    warningContext(profile, outline, di));
+}
+
 async function buildExecutionReview(rawInput, outlineData, opts) {
   const p = normalizeInput(rawInput);
   const outline = (outlineData && outlineData.outline) || outlineData || {};
@@ -10656,29 +10688,36 @@ async function buildExecutionReview(rawInput, outlineData, opts) {
       return value;
     }).catch(() => ({})) : Promise.resolve({});
   const candidates = all.filter((row) => selected.includes(Number(row.dayIndex || 0)));
-  const reviewed = await reviewExecutionItems(p, outline, candidates, deadline, {
+  let reviewed = await reviewExecutionItems(p, outline, candidates, deadline, {
     selfDriveAllowed: (row) => explicitSelfDriveSegment(p, row),
   });
   const combined = all.filter((row) => !selected.includes(Number(row.dayIndex || 0))).concat(reviewed);
-  const mealChanged = invalidateRepeatedMeals(days, combined, p.extra);
+  const mealChanged = invalidateRepeatedMeals(days, combined, p.extra,
+    opts.preservePublishedDays ? finalizedDays(all) : new Set());
   mealChanged.forEach((di) => {
     if (!selected.includes(di)) reviewed.push(...combined.filter((row) => Number(row.dayIndex || 0) === di));
   });
-  const accepted = new Set(reviewed.filter((row) => row.executionReview === REVIEW_VERSION)
-    .map((row) => Number(row.dayIndex || 0)));
-  const ready = days.map((_, di) => di).filter((di) => accepted.has(di)
-    || (all.some((row) => Number(row.dayIndex || 0) === di)
-      && !mealChanged.has(di) && all.filter((row) => Number(row.dayIndex || 0) === di).every((row) => row.executionReview === REVIEW_VERSION)));
+  let accepted = finalizedDays(reviewed);
   selected.forEach((di) => {
     const key = `review-${di}`;
     if (accepted.has(di)) delete attempts[key];
     else if (days[di].executionReviewAttempted && asArray(days[di].executionReviewIssues).length) attempts[key] = Number(attempts[key] || 0) + 1;
+    if (!accepted.has(di)) attempts[`review-round-${di}`] = Number(attempts[`review-round-${di}`] || 0) + 1;
   });
   // 独立运营检索占一轮，失败日期还需至少三次真正的重排机会。
-  const exhausted = selected.filter((di) => Number(attempts[`review-${di}`] || 0) >= 5);
-  // 本轮通过的日期也必须先返回/落库，不能因为另一日期耗尽重试而丢失成果。
-  const reviewError = exhausted.length
-    ? `第${exhausted.map((di) => di + 1).join('、')}天执行复核未通过，请续跑或调整需求；未将错误行程标记为完成` : '';
+  const exhausted = selected.filter((di) => !accepted.has(di)
+    && (Number(attempts[`review-${di}`] || 0) >= 3 || Number(attempts[`review-round-${di}`] || 0) >= 8));
+  exhausted.forEach((di) => {
+    const day = days[di];
+    const rows = day.executionCandidate || reviewed.filter((row) => Number(row.dayIndex || 0) === di);
+    const done = finalizeWithWarnings(rows, di, day, day.executionReviewIssues, warningContext(p, outline, di));
+    reviewed = reviewed.filter((row) => Number(row.dayIndex || 0) !== di).concat(done);
+    delete attempts[`review-${di}`]; delete attempts[`review-round-${di}`];
+  });
+  accepted = finalizedDays(reviewed);
+  const ready = days.map((_, di) => di).filter((di) => accepted.has(di)
+    || (!mealChanged.has(di) && finalizedDays(all).has(di)));
+  const reviewError = '';
   const items = ensureStableItemIds(annotateHotelItems(reviewed, outline));
   const complete = ready.length === days.length;
   const returnedDays = new Set(items.map((row) => Number(row.dayIndex || 0)));
@@ -10719,17 +10758,38 @@ async function buildExecutionReview(rawInput, outlineData, opts) {
     suggestions: complete ? await withTimeout(suggestionsPromise, Math.max(1000, deadline - Date.now()), {}) : {},
     partial: !complete,
     doneDayIndexes: [...new Set(all.map((row) => Number(row.dayIndex || 0)))], attempts,
-    gaveUpDayIndexes: exhausted, reviewError, progress: { done: ready.length, total: days.length, stage: 'review' },
+    gaveUpDayIndexes: [], warningDayIndexes: days.map((_, di) => di).filter((di) => days[di].executionReviewStatus === 'needs_confirmation'),
+    reviewError, progress: { done: ready.length, total: days.length, stage: 'generation_review' },
     meta: { days: days.length, reviewPendingDayIndexes: pending.filter((di) => !accepted.has(di)) },
   };
 }
 
 async function buildPlan(rawInput, outlineData, opts = {}) {
+  if (opts.finalizePending) {
+    const outline = (outlineData && outlineData.outline) || outlineData || {};
+    const profile = normalizeInput(rawInput), all = asArray(opts.reviewItems), ready = finalizedDays(all);
+    const items = all.filter((row) => ready.has(Number(row.dayIndex || 0)));
+    outline.days.forEach((day, di) => {
+      if (ready.has(di)) return;
+      const rows = day.executionCandidate || all.filter((row) => Number(row.dayIndex || 0) === di);
+      items.push(...(rows.length ? finalizeWithWarnings(rows, di, day,
+        day.executionReviewIssues || ['自动复核已达到时间预算，此段运营信息需出行前确认。'], warningContext(profile, outline, di))
+        : fallbackDayWithWarnings(profile, outline, di)));
+    });
+    if (!outline.executionSuggestions) outline.executionSuggestions = {};
+    const result = await buildExecutionReview(rawInput, outlineData, Object.assign({}, opts, { reviewItems: items }));
+    // 强制收尾的新增日期已经带完成标记，普通复核会跳过它们；仍需作为增量落库。
+    result.items = ensureStableItemIds(annotateHotelItems(items.filter((row) => !ready.has(Number(row.dayIndex || 0))), outline));
+    result.items.forEach((row) => [row.startLocation, row.endLocation].filter(Boolean)
+      .forEach((addr) => result.addrDay.set(addr, Number(row.dayIndex || 0))));
+    return result;
+  }
   if (Array.isArray(opts.reviewItems)) {
     const storedOutline = (outlineData && outlineData.outline) || outlineData || {};
     const days = asArray(storedOutline.days);
     const profile = normalizeInput(rawInput);
-    const invalidated = invalidateUnsafeAcceptedDays(profile, storedOutline, opts.reviewItems, (row) => explicitSelfDriveSegment(profile, row));
+    const invalidated = opts.preservePublishedDays ? new Set()
+      : invalidateUnsafeAcceptedDays(profile, storedOutline, opts.reviewItems, (row) => explicitSelfDriveSegment(profile, row));
     if (invalidated.size) {
       const attempts = Object.assign({}, opts.attempts || {});
       invalidated.forEach((di) => { delete attempts[`review-${di}`]; });
@@ -10807,7 +10867,14 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
     attempts: opts.attempts,     // 上一轮回传的失败次数，决定哪些天还能再试
     deadline,
   });
-  const progress = { done: detail.doneDayIndexes.length, total: asArray(outline.days).length };
+  const fallbackRows = opts.skipExecutionReview ? [] : detail.gaveUpDayIndexes.flatMap((di) => fallbackDayWithWarnings(p, outline, di));
+  if (fallbackRows.length) {
+    detail.doneDayIndexes = [...new Set(detail.doneDayIndexes.concat(fallbackRows.map((row) => Number(row.dayIndex || 0))))];
+    detail.gaveUpDayIndexes = [];
+  }
+  const progress = { done: opts.skipExecutionReview ? detail.doneDayIndexes.length
+    : new Set([...finalizedDays(opts.reviewItems || []), ...finalizedDays(fallbackRows)]).size,
+    total: asArray(outline.days).length, stage: 'generation_review' };
   console.log('[generatePlan] 细化完成 %dms, 原始条目=%d, partial=%s',
     Date.now() - t1, detail.items.length, detail.partial);
   if (!detail.items.length && !opts.skipExecutionReview) {
@@ -10817,7 +10884,7 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
     return { title: String((outlineData && outlineData.title) || outline.title || '我的行程'),
       summary: String((outlineData && outlineData.summary) || outline.summary || ''),
       startDate: p.startDate, endDate: p.endDate, origin: p.origin,
-      items: [], dayCities: outline.days.map((day) => [day.city, day.overnight].filter(Boolean).join(' ')), addrDay: new Map(),
+      items: fallbackRows, dayCities: outline.days.map((day) => [day.city, day.overnight].filter(Boolean).join(' ')), addrDay: new Map(),
       partial: true, doneDayIndexes: detail.doneDayIndexes, attempts: detail.attempts,
       gaveUpDayIndexes: detail.gaveUpDayIndexes, progress,
       reviewError: detail.gaveUpDayIndexes.length ? `第${detail.gaveUpDayIndexes.map((di) => di + 1).join('、')}天生成暂未成功，请续跑；已完成日期保留` : '',
@@ -11011,7 +11078,7 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
       startDate: p.startDate,
       endDate: p.endDate,
       origin: p.origin,
-      items,
+      items: items.concat(fallbackRows),
       dayCities,
       addrDay,
       partial: true,
@@ -11019,7 +11086,7 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
       attempts: detail.attempts,
       gaveUpDayIndexes: detail.gaveUpDayIndexes,
       reviewError: detail.gaveUpDayIndexes.length ? `第${detail.gaveUpDayIndexes.map((di) => di + 1).join('、')}天生成暂未成功，请续跑；已完成日期保留` : '',
-      progress: detail.partial ? progress : { done: 0, total: progress.total, stage: 'review' },
+      progress,
       meta: {
         days: p.days,
         failedDayIndexes: detail.failedDayIndexes,

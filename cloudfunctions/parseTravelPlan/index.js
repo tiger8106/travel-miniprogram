@@ -19,7 +19,7 @@ const COL_TASK = 'parse_tasks';
 const GEOCODE_DEADLINE_MS = 35 * 1000;
 
 // 解析引擎版本：返回给前端展示，用于确认线上跑的是不是最新代码
-const PARSE_VERSION = 'v4.4-hotel-poi-coordinates';
+const PARSE_VERSION = 'v4.5-source-date-context';
 const DEFAULT_ALARM_LEAD_MINUTES = 5;
 
 function alarmType(type) {
@@ -139,15 +139,24 @@ function vagueSourceDate(source, date, type) {
   if (!source) return false;
   const month = Number(date.slice(5, 7)), day = Number(date.slice(8, 10));
   const pattern = new RegExp(`(?:20\\d{2}年)?0?${month}月\\s*0?${day}(?!\\d)日?`, 'g');
-  const isRelevant = (text) => type === 'hotel' ? /酒店|民宿|房型|住宿/.test(text)
-    : type === 'train' ? /12306|高铁|动车|车票|[GDCZTK]\d+/i.test(text)
-      : type === 'ticket' ? /门票|游船|竹筏|演出|景区|预约/.test(text)
-        : type === 'bus' ? /巴士|大巴|直通车|客运|汽车票|旅游专线/.test(text)
-          : type === 'plane' ? /机票|航班|航空|飞机/.test(text) : true;
+  const isRelevant = (text, kind = type) => kind === 'hotel' ? /酒店|民宿|房型|住宿/.test(text)
+    : kind === 'train' ? /12306|高铁|动车|车票|[GDCZTK]\d+/i.test(text)
+      : kind === 'ticket' ? /门票|游船|竹筏|演出|景区|预约/.test(text)
+        : kind === 'bus' ? /巴士|大巴|直通车|客运|汽车票|旅游专线/.test(text)
+          : kind === 'plane' ? /机票|航班|航空|飞机/.test(text) : true;
   let vague = false, explicit = false, match;
   while ((match = pattern.exec(source))) {
     const suffix = source.slice(pattern.lastIndex, pattern.lastIndex + 160);
-    if (!isRelevant(suffix.split(/\n\s*\d{1,2}月\d{1,2}日/)[0])) continue;
+    // 表格可能先写事项、后写预订日期。前后都取相邻上下文，但不能越过上一日期，
+    // 否则会用另一行/另一类事项的精确日期替模糊预订窗口背书。
+    const before = source.slice(Math.max(0, match.index - 160), match.index).split(/\r?\n/).slice(-4);
+    let boundary = -1;
+    before.forEach((line, index) => {
+      if (/(?:20\d{2}年)?\d{1,2}月\s*\d{1,2}/.test(line)) boundary = index;
+    });
+    const following = suffix.split(/\n\s*(?:20\d{2}年)?\d{1,2}月\s*\d{1,2}/)[0];
+    const otherKind = ['hotel', 'train', 'ticket', 'bus', 'plane'].some((kind) => kind !== type && isRelevant(following, kind));
+    if (!isRelevant(following) && (otherKind || !isRelevant(before.slice(boundary + 1).join('\n')))) continue;
     if (/^\s*(?:起|前后|左右|至|～|~|—|–|-|待定)/.test(suffix)) vague = true;
     else explicit = true;
   }

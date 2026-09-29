@@ -136,43 +136,27 @@
       <view class="card">
         <view class="card-title">🗺️ {{outlineTitle}}</view>
         <view wx:if="{{outlineSummary}}" class="trip-summary">{{outlineSummary}}</view>
-        <view class="tip">长按 ☰ 拖动调整天数顺序（日期自动重排），点 ✏️ 修改当天内容</view>
+        <view class="tip">按日期查看大纲，点 ✏️ 修改当天内容</view>
       </view>
 
-      <!-- 拖动期间 scroll-y 关掉，避免手指一动就把页面滚走；
-           自动滚动用 manualOffset 手动偏移模拟，松手时再同步回真实 scroll-top -->
-      <scroll-view scroll-y="{{!dragging}}" scroll-top="{{scrollTop}}" bindscroll="onDayScroll"
-                   class="day-scroll" style="height:{{listH}}px">
-        <view class="day-list" style="height:{{areaH}}px">
-          <view wx:for="{{outlineDays}}" wx:key="uid"
-                class="di {{dragging && dragIdx === index ? 'di-drag' : ''}}"
-                style="top:{{index * itemH - manualOffset}}px;height:{{itemH}}px;transform:translateY({{dragging && dragIdx === index ? dragShift : 0}}px){{dragging && dragIdx === index ? ' scale(0.96)' : ''}}"
-                data-idx="{{index}}"
-                bindlongpress="onDayLongPress"
-                bindtouchmove="onDayTouchMove"
-                bindtouchend="onDayTouchEnd"
-                bindtouchcancel="onDayTouchEnd">
-            <view class="outline-item">
-              <view class="oi-head">
-                <text class="oi-grip">☰</text>
-                <text class="oi-day">第{{item.idx + 1}}天</text>
-                <text class="oi-date">{{item.date}}</text>
-                <text class="oi-city">{{item.city}}</text>
-                <text class="oi-edit" data-idx="{{index}}" catchtap="onEditDay">✏️</text>
-              </view>
-              <view class="oi-theme">{{item.theme}}</view>
-              <view class="oi-meta">
-                <text class="oi-move" wx:if="{{item.moveText}}">🚄 {{item.moveText}}</text>
-                <text class="oi-night">🏨 {{item.overnight}}</text>
-              </view>
-              <view wx:if="{{item.highlights}}" class="oi-hl">{{item.highlights}}</view>
+      <view class="day-list">
+        <view wx:for="{{outlineDays}}" wx:key="uid" class="di">
+          <view class="outline-item">
+            <view class="oi-head">
+              <text class="oi-day">第{{item.idx + 1}}天</text>
+              <text class="oi-date">{{item.date}}</text>
+              <text class="oi-city">{{item.city}}</text>
+              <text class="oi-edit" data-idx="{{index}}" catchtap="onEditDay">✏️</text>
             </view>
+            <view class="oi-theme">{{item.theme}}</view>
+            <view class="oi-meta">
+              <text class="oi-move" wx:if="{{item.moveText}}">🚄 {{item.moveText}}</text>
+              <text class="oi-night">🏨 {{item.overnight}}</text>
+            </view>
+            <view wx:if="{{item.highlights}}" class="oi-hl">{{item.highlights}}</view>
           </view>
-
-          <!-- 拖动参考线：贴在拖动卡中心最近的缝隙上，松手后卡片就落到这条线所在的位置 -->
-          <view wx:if="{{dragging}}" class="drag-guide" style="top:{{guideTop - manualOffset}}px"></view>
         </view>
-      </scroll-view>
+      </view>
 
       <view class="footer">
         <view class="btn-row">

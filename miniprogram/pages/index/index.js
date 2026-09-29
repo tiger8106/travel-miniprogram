@@ -618,6 +618,7 @@ Page({
     try {
       wx.showLoading({ title: '删除中' });
       await api.deleteItinerary(trip._id);
+      genrunner.forgetTrip(trip._id);
       // 同步清理本地置顶状态与当前选中
       if (tripUtil.getPinnedIds().indexOf(trip._id) >= 0) tripUtil.togglePinned(trip._id);
       app.globalData.currentTripId = null;

@@ -113,6 +113,8 @@ async function pump(jobId, round, token) {
     if (!next) break;
     if (token !== runToken) return { jobId, status: 'cancelled' };
     r = Object.assign({}, r, next);
+    if (r.status === 'cancelled') { reset(); return r; }
+    if (r.status === 'done') r.partial = false;
     selectGeneratedTrip(r.tripId || state.tripId);
     set({
       jobId,
@@ -164,6 +166,8 @@ async function start(payload) {
     if (token !== runToken) return state;
     if (state.status === 'done') saveJobId('');
     driving = false;
+    if (state.status === 'failed') throw new Error(state.error || '生成暂未完成，请稍后继续');
+    if (state.status !== 'done') return Object.assign({}, r, { tripId: state.tripId, itemCount: state.itemCount, partial: true });
     return Object.assign({}, r, { tripId: state.tripId, itemCount: state.itemCount });
   } catch (e) {
     driving = false;
@@ -193,8 +197,8 @@ async function sync(options) {
   }
   if (token !== runToken) return state;
   if (!job) {
-    saveJobId('');
-    if (state.status === 'running') set({ status: 'idle', jobId: '', progress: null, error: '' });
+    // 云端已清除任务（包括删除关联行程），失败态也必须清空。
+    reset();
     return state;
   }
   const willRevive = reviveFailed && job.status === 'failed';
@@ -237,4 +241,15 @@ function reset() {
   });
 }
 
-module.exports = { get, subscribe, start, sync, reset, readJobId };
+async function dismiss() {
+  if (state.status === 'running') throw new Error('生成中的任务不能清除');
+  const id = state.jobId;
+  if (id) await api.dismissGen(id);
+  if (state.jobId === id) reset();
+}
+
+function forgetTrip(tripId) {
+  if (tripId && state.tripId === tripId) reset();
+}
+
+module.exports = { get, subscribe, start, sync, reset, dismiss, forgetTrip, readJobId };
