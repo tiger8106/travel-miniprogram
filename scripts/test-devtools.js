@@ -3,11 +3,13 @@
 //   'auto'  → 只在开发版显示，体验版 / 正式版隐藏（防止体验成员看到调试入口）
 //   'trial' → 开发版 + 体验版显示
 //   true / false → 恒开 / 恒关
-//   临时解锁 → 任何环境都显示，24 小时后自动失效
+//
+// 2026-09-29 上线清理：临时解锁（连点关于 5 次 → 24 小时）整套机制已删除，
+// 这里改成反向断言——确保它不会被人无意间加回来。
 
 const path = require('path');
 
-const KEY = '__dev_tools_unlock_ts__';
+const KEY = '__dev_tools_unlock_ts__';   // 仅用于模拟「老版本残留的解锁标记」
 let store = {};
 let ENV = 'release'; // develop / trial / release
 
@@ -67,28 +69,18 @@ e = load(false);
 ENV = 'develop';
 ok(e.showDevTools() === false, 'false → 开发版也不显示');
 
-console.log('\n[临时解锁] 24 小时有效，到期自动失效');
+console.log('\n[上线态] 临时解锁后门已删除（2026-09-29 清理）');
 reset();
 e = load('auto');
-ENV = 'trial';
-ok(e.showDevTools() === false, '解锁前体验版隐藏');
-const hours = e.unlockDevTools();
-ok(hours === 24, 'unlockDevTools 返回 24 小时', String(hours));
-ok(e.showDevTools() === true, '解锁后体验版显示');
-ok(e.isDevToolsUnlocked() === true, 'isDevToolsUnlocked 为真');
-ENV = 'release';
-ok(e.showDevTools() === true, '解锁期间正式版也显示（开发者自己排查用）');
-
-// 手动把存储里的时间戳往前推 25 小时
-store[KEY] = String(Date.now() - 25 * 3600 * 1000);
-ENV = 'trial';
-ok(e.showDevTools() === false, '超过 24 小时 → 自动失效，体验版重新隐藏');
-
-e = load('auto');
+// 即便本地 Storage 里还残留着以前的解锁标记，也不该再让调试入口出现
 store[KEY] = String(Date.now() - 1000);
-ok(e.showDevTools() === true, '1 秒前解锁 → 仍有效');
-e.lockDevTools();
-ok(e.showDevTools() === false, 'lockDevTools 后立即隐藏');
+ENV = 'trial';
+ok(e.showDevTools() === false, '旧解锁标记残留 → 体验版依然隐藏（后门已废）');
+ENV = 'release';
+ok(e.showDevTools() === false, '旧解锁标记残留 → 正式版依然隐藏');
+ok(typeof e.unlockDevTools !== 'function', 'unlockDevTools 已不存在');
+ok(typeof e.lockDevTools !== 'function', 'lockDevTools 已不存在');
+ok(typeof e.isDevToolsUnlocked !== 'function', 'isDevToolsUnlocked 已不存在');
 
 console.log('\n[版本号] 环境中文名');
 ENV = 'trial';
