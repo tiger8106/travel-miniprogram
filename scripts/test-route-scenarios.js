@@ -30,7 +30,7 @@ const P = require('../cloudfunctions/generatePlan/plan');
 const { searchHotelPoi, searchHotelsNearby } = require('../cloudfunctions/generatePlan/geocode');
 const { validateOutlineHotels } = require('../cloudfunctions/generatePlan/hotel-validation');
 const { lookupSchedules, canLookupSchedules } = require('../cloudfunctions/generatePlan/schedule');
-const { executionIssues, reviewExecutionItems, sameEndpoint } = require('../cloudfunctions/generatePlan/execution-review');
+const { executionIssues, reviewExecutionItems, normalizeReviewRows, sameEndpoint } = require('../cloudfunctions/generatePlan/execution-review');
 
 const scenarios = [
   {
@@ -172,7 +172,7 @@ function offlineFixture(scenario) {
       offlineMove('重庆西站', '成都东站', 'train', '19:00', '21:30'),
     ]),
     offlineDay('2027-01-01', '都江堰、青城山', '都江堰', ['都江堰', '青城山'], [
-      offlineMove('成都东站', '离堆公园站', 'train', '08:00', '09:00'),
+      offlineMove('犀浦站', '离堆公园站', 'train', '08:00', '09:00'),
     ]),
     offlineDay('2027-01-02', '毕棚沟', '古尔沟', ['毕棚沟', '自然山水'], [
       offlineMove('都江堰', '毕棚沟游客中心', 'bus', '07:30', '12:00'),
@@ -190,8 +190,10 @@ function offlineFixture(scenario) {
     offlineItem(0, '22:00', '22:30', 'hotel', '到成都酒店办理入住', '成都酒店', '成都酒店', ''),
     offlineItem(0, '22:30', '23:00', 'sight', '成都春熙路夜景短线散步', '成都酒店', '成都春熙路', ''),
     offlineItem(0, '23:00', '23:20', 'hotel', '返回成都酒店休息', '成都春熙路', '成都酒店', ''),
-    offlineItem(1, '06:50', '07:30', 'food', '在成都酒店吃早餐', '成都酒店', '成都酒店', ''),
-    offlineItem(1, '08:00', '09:00', 'transport', '乘动车从成都东站前往离堆公园站', '成都东站', '离堆公园站', 'train'),
+    offlineItem(1, '06:00', '06:30', 'food', '在成都酒店吃早餐', '成都酒店', '成都酒店', ''),
+    offlineItem(1, '06:30', '07:20', 'transport', '乘公共交通前往犀浦站', '成都酒店', '犀浦站', 'bus'),
+    offlineItem(1, '07:20', '08:00', 'other', '进站安检候车', '犀浦站', '犀浦站', ''),
+    offlineItem(1, '08:00', '09:00', 'transport', '乘动车从犀浦站前往离堆公园站', '犀浦站', '离堆公园站', 'train'),
     offlineItem(1, '09:00', '12:00', 'sight', '游览都江堰水利工程与南桥', '离堆公园站', '都江堰', ''),
     offlineItem(1, '12:00', '13:00', 'food', '都江堰当地午餐', '都江堰', '都江堰', ''),
     offlineItem(1, '13:00', '13:30', 'hotel', '到都江堰住宿地放行李', '都江堰', '都江堰酒店', ''),
@@ -200,8 +202,11 @@ function offlineFixture(scenario) {
     offlineItem(1, '17:15', '18:00', 'transport', '乘公交返回都江堰住宿地', '青城山', '都江堰酒店', 'ride'),
     offlineItem(2, '06:30', '07:30', 'food', '在都江堰住宿地吃早餐并退房', '都江堰酒店', '都江堰酒店', ''),
     offlineItem(2, '07:30', '12:00', 'transport', '乘旅游大巴从都江堰前往毕棚沟游客中心', '都江堰', '毕棚沟游客中心', 'bus'),
-    offlineItem(2, '12:00', '16:30', 'sight', '冬季游览毕棚沟景区，预留雪地步行和拍照时间', '毕棚沟游客中心', '毕棚沟', ''),
-    offlineItem(2, '16:30', '17:00', 'transport', '乘景区接驳前往古尔沟住宿地', '毕棚沟', '古尔沟酒店', 'ride'),
+    // 固定样例也必须提供真实的行李状态链；不能靠省略“徒步”二字绕过验收。
+    offlineItem(2, '12:00', '12:15', 'other', '在游客中心办理行李寄存', '毕棚沟游客中心', '毕棚沟游客中心', ''),
+    offlineItem(2, '12:15', '16:00', 'sight', '冬季游览毕棚沟景区，预留雪地步行和拍照时间', '毕棚沟游客中心', '毕棚沟', ''),
+    offlineItem(2, '16:00', '16:30', 'transport', '乘观光车返回游客中心，取回寄存行李', '毕棚沟', '毕棚沟游客中心', 'bus'),
+    offlineItem(2, '16:30', '17:00', 'transport', '乘网约车前往古尔沟住宿地', '毕棚沟游客中心', '古尔沟酒店', 'ride'),
     offlineItem(2, '17:00', '17:30', 'hotel', '到古尔沟酒店办理入住', '古尔沟酒店', '古尔沟酒店', ''),
     offlineItem(3, '06:00', '07:00', 'food', '在古尔沟吃早餐并退房，携带全部行李出发', '古尔沟酒店', '古尔沟酒店', ''),
     offlineItem(3, '07:00', '11:00', 'transport', '乘旅游大巴从古尔沟前往成都东站', '古尔沟', '成都东站', 'bus'),
@@ -350,6 +355,9 @@ function inspectScenario(scenario, outline, items) {
       preferRail: /高铁|动车/.test(profile.transport), date: day.date, points: day.executionPoints || {},
       hotel: day.hotel, overnight: day.overnight,
       previousHotel: (outline.days[dayIndex - 1] || {}).hotel,
+      previousMeals: (outline.days[dayIndex - 1] || {}).executionMealNames || [], knownMeals: day.meals || [], repeatMeals: profile.extra,
+      visitWindows: (day.executionEvidence || {}).visitWindows || [],
+      sailingWindows: (day.executionEvidence || {}).sailingWindows || [],
       sameHotel: !!day.hotel && sameEndpoint(day.hotel, (outline.days[dayIndex - 1] || {}).hotel),
       lightLuggage: P.explicitCarryLuggagePreference(profile),
       routeFacts: ((day.executionEvidence || {}).routeFacts || []).filter((fact) =>
@@ -473,9 +481,8 @@ function inspectScenario(scenario, outline, items) {
   }
   const lastDayIndex = (outline.days || []).length - 1;
   const lastDay = items.filter((item) => Number(item.dayIndex || 0) === lastDayIndex);
-  const lastDayStorage = lastDay.filter((item) => /寄存|暂存|存放|寄放|存包/.test(`${item.activity || ''} ${item.note || ''}`)
-    && !/(?:不|无|无需|不用|禁止|避免|严禁)[^。；;，,]{0,12}(?:寄存|暂存|存放|存包|寄放)/.test(`${item.activity || ''} ${item.note || ''}`));
-  if (lastDayStorage.length) issues.push(`返程日仍出现未清理的行李寄存：${lastDayStorage.map(fmt).join('；')}`);
+  // 末日寄存本身合法；上面的通用执行审计已检查是否在原地点取回。
+  // 不能把“取回寄存行李”也识别成新的存包，并一概拒绝末日寄存。
   const finalOutline = (outline.days || [])[lastDayIndex] || {};
   const finalMoves = (finalOutline.moves || []).filter((move) => move && move.from && move.to);
   const returnMove = finalMoves.slice().reverse().find((move) =>
@@ -677,12 +684,18 @@ function inspectScenario(scenario, outline, items) {
   items.forEach((item) => {
     const text = `${item.activity || ''} ${item.note || ''}`;
     if (/(?:携带|带走)(?:全部|大件)?行李|(?:全部|大件)?行李[^。；;，,]{0,12}(?:携带|带走)/.test(text)
-        && /(?:仅携带|只带)(?:轻便)?(?:随身)?(?:物品|小包)/.test(text)) {
+        && /(?:仅携带|只带)(?:轻便)?(?:随身)?(?:物品|小包)/.test(text)
+        && !/(?:寄存|暂存)(?:大件)?行李|(?:大件)?行李(?:留房|留在房间|寄存)/.test(text)) {
       issues.push('行李文案同时写携带大件和仅带小包，存在矛盾');
     }
   });
   const fourStarDays = (outline.days || []).map((day, index) => ({ day, index }))
-    .filter(({ day }) => /(?:四星|4\s*星)/.test(JSON.stringify(day)) && /(?:漓江|游船)/.test(JSON.stringify(day)))
+    .filter(({ day, index }) => {
+      const actual = items.filter((row) => Number(row.dayIndex || 0) === index && row.transportType === 'ship');
+      if (actual.length) return actual.some((row) => /(?:四星|4\s*星)/.test(row.activity || ''));
+      const selected = [day.theme, day.note, ...(day.highlights || [])].filter(Boolean).join(' ');
+      return /(?:四星|4\s*星)/.test(selected) && /(?:漓江|游船)/.test(selected);
+    })
     .map(({ index }) => index);
   const oldPierOutlineMoves = (outline.days || []).flatMap((day, dayIndex) =>
     (day.moves || []).filter((move) => fourStarDays.includes(dayIndex)
@@ -724,6 +737,13 @@ async function runOfflineScenario(scenario) {
   // 大纲对齐而漏掉龙脊日落、跨日行李和末日到家边界。
   items = P.auditMergedDetailItems(items, fixture.outline, scenario.input);
   items = P.annotateHotelItems(items, fixture.outline);
+  // 与执行复核一样先做语义归一化；不写 accepted 标记绕过验收。
+  items = fixture.outline.days.flatMap((day, di) => normalizeReviewRows(items.filter((item) => Number(item.dayIndex || 0) === di), di, {
+    isFirst: di === 0, isLast: di === fixture.outline.days.length - 1,
+    origin: profile.origin, goTime: profile.goTime, backTime: profile.backTime,
+    hotel: day.hotel, overnight: day.overnight, previousHotel: (fixture.outline.days[di - 1] || {}).hotel,
+    sameHotel: !!day.hotel && sameEndpoint(day.hotel, (fixture.outline.days[di - 1] || {}).hotel),
+  }));
   const inspected = inspectScenario(scenario, fixture.outline, items);
   const issues = inspected.issues.slice();
 
@@ -796,7 +816,7 @@ async function runScenario(scenario) {
       result = await P.buildPlan(input, outlineResult, {
         doneDayIndexes,
         attempts,
-        reviewItems: doneDayIndexes.length >= outline.days.length ? allItems : undefined,
+        reviewItems: allItems.length ? allItems : undefined,
       });
     } finally {
       clearInterval(heartbeat);
@@ -872,7 +892,7 @@ async function runScenario(scenario) {
     console.error(`  错误门票提醒：「${alarm.title}」关联=${linked ? `${linked.category}/${linked.transportType || ''} ${linked.activity}` : '无行程条目'}`);
   });
   const hotelAlarms = alarms.filter((alarm) => alarm.type === 'hotel');
-  if (hotelAlarms.some((alarm) => !/酒店住宿/.test(alarm.note || '') || !/越早/.test(alarm.note || ''))) {
+  if (hotelAlarms.some((alarm) => !/酒店住宿|住宿日期/.test(alarm.note || '') || !/越早|尽早/.test(alarm.note || ''))) {
     issues.push('酒店提醒没有说明可随时预订并引导到酒店住宿分类');
   }
   const verifiedHotels = (outline.days || []).filter((day) => day.hotelPoiVerified).length;
@@ -920,6 +940,10 @@ function inspectBookingReminders(profile, items, alarms) {
     if (alarm.type === 'bus' && item && /地铁|公交|观光车|景区.*接驳/.test(`${item.activity} ${item.note}`)) {
       issues.push(`普通市内/景区交通错误生成预购汽车票：${item.activity}`);
     }
+    if (!item || alarm.type === 'hotel') return;
+    const action = String(item.activity || '');
+    const actualBooking = /购买|购票|预约|预订|(?:乘坐|搭乘|体验|观看).{0,16}(?:游船|竹筏|漂流|演出|缆车|索道)/.test(action);
+    if (!actualBooking && /候车|候船|取票|安检|检票/.test(action)) issues.push(`候车/候船等办理动作被重复当成新购票：${action}`);
   });
   return [...new Set(issues)];
 }
@@ -929,8 +953,32 @@ function inspectBookingReminders(profile, items, alarms) {
     const saved = JSON.parse(fs.readFileSync(path.resolve(replayPath), 'utf8'));
     const scenario = scenarios.find((entry) => entry.input.dest === saved.input.dest);
     if (!scenario) throw new Error('重放文件不属于两条指定测试路线');
+    if (process.argv.includes('--evidence-file')) {
+      const evidencePath = process.argv[process.argv.indexOf('--evidence-file') + 1];
+      const references = JSON.parse(fs.readFileSync(path.resolve(evidencePath), 'utf8'));
+      saved.outline.days.forEach((day) => {
+        if (references[day.date]) day.operatingReferences = references[day.date];
+      });
+    }
     let items = liveReview ? saved.items : P.auditMergedDetailItems(saved.items, saved.outline, saved.input);
     let alarms = saved.alarms || [];
+    if (liveReview) {
+      const hotels = saved.outline.days.map((day) => day.hotel);
+      await validateOutlineHotels({ outline: saved.outline }, saved.input, searchHotelPoi, searchHotelsNearby);
+      const changed = new Set();
+      saved.outline.days.forEach((day, di) => {
+        if (day.hotel !== hotels[di]) { changed.add(di); changed.add(di + 1); }
+      });
+      changed.forEach((di) => {
+        const day = saved.outline.days[di];
+        if (!day) return;
+        delete day.executionCandidate; delete day.executionEvidence;
+      });
+      items = items.map((row) => {
+        if (!changed.has(Number(row.dayIndex || 0))) return row;
+        const next = Object.assign({}, row); delete next.executionReview; return next;
+      });
+    }
     if (liveReview && (process.argv.includes('--recheck-day') || process.argv.includes('--recheck-days'))) {
       const option = process.argv.includes('--recheck-days') ? '--recheck-days' : '--recheck-day';
       const requested = String(process.argv[process.argv.indexOf(option) + 1]).split(',').map((n) => Number(n) - 1);

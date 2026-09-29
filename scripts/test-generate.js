@@ -2559,7 +2559,7 @@ return (async () => {
     plan = await P.buildPlan(INPUT, Object.assign({}, INPUT, phase1), {
       doneDayIndexes: plan && plan.doneDayIndexes,
       attempts: plan && plan.attempts,
-      reviewItems: plan && plan.doneDayIndexes.length >= phase1.outline.days.length ? allItems : undefined,
+      reviewItems: allItems.length ? allItems : undefined,
     });
     const cost = (Date.now() - rt) / 1000;
     slowest = Math.max(slowest, cost);

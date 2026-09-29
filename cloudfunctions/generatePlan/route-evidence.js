@@ -73,7 +73,7 @@ function lookupPoint(name, region, deadline) {
 }
 
 async function collectRoutePoints(rows, regions, deadline) {
-  const names = [...new Set(rows.filter((row) => row.category === 'transport')
+  const names = [...new Set(rows.filter((row) => row.category === 'transport' || row.transportType === 'walk')
     .flatMap((row) => [row.startLocation, row.endLocation]).filter(Boolean))];
   const points = {};
   // 有限并发，避免大行程将地图 API 的 QPS 打满。
@@ -91,7 +91,7 @@ async function collectRoutePoints(rows, regions, deadline) {
 function geometryIssues(rows, points) {
   const issues = [];
   rows.forEach((row) => {
-    if (row.category !== 'transport') return;
+    if (row.category !== 'transport' && row.transportType !== 'walk') return;
     const distance = distanceKm(points[row.startLocation], points[row.endLocation]);
     if (distance === null || distance < 0.4) return;
     const min = (value) => {
@@ -170,8 +170,11 @@ async function collectUrbanTransitFacts(rows, points, deadline) {
   const results = [];
   if (!process.env.AMAP_KEY) return results;
   for (const row of rows) {
-    if (row.category !== 'transport' || !/地铁|轨道交通/.test(`${row.activity} ${row.note}`)) continue;
+    if (row.category !== 'transport') continue;
     const a = points[row.startLocation], b = points[row.endLocation];
+    // 检索候选公共交通，不只验证模型已经写出的地铁；远距离误步行也需要可执行替代。
+    if (!/地铁|轨道交通|公交|专线/.test(`${row.activity} ${row.note}`)
+        && !(/^(?:bus|ride|walk)$/.test(row.transportType) && distanceKm(a, b) > 3)) continue;
     if (!a || !b || !a.city || a.city !== b.city || deadline - Date.now() < 500) continue;
     const url = new URL('https://restapi.amap.com/v3/direction/transit/integrated');
     url.search = new URLSearchParams({ key: process.env.AMAP_KEY, origin: `${a.lon},${a.lat}`,

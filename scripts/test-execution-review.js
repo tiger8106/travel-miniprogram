@@ -9,6 +9,255 @@ function test(name, fn) { fn(); passed++; console.log(`✓ ${name}`); }
 const row = (startTime, endTime, category, activity, startLocation = '', endLocation = '', transportType = '') =>
   ({ dayIndex: 0, startTime, endTime, category, activity, startLocation, endLocation, transportType, note: '' });
 const room = row('20:00', '21:00', 'other', '回房休息', '', '甲城晨光酒店');
+test('水上终点先按运营起点核验，不能用错误终点绕过检查；竹筏无需固定发船时刻', () => {
+  const context = { lightLuggage: true, sailingWindows: [
+    { from: '甲码头', to: '乙综合码头', grade: '竹筏', departures: [], sourceUrl: 'https://operator.example/raft' },
+  ] };
+  const wrong = row('09:00', '10:30', 'sight', '体验竹筏漂流', '漂流起点（甲码头）', '漂流终点（丙码头）', 'ship');
+  assert(R.executionIssues([wrong, room], context).some((issue) => /水上路线.*终点.*乙综合码头/.test(issue)));
+  const right = Object.assign({}, wrong, { endLocation: '漂流终点（乙综合码头）', transportType: '' });
+  assert(!R.executionIssues([right, room], context).some((issue) => /水上路线|发船|船型/.test(issue)));
+  assert(!R.executionIssues([wrong, room], { lightLuggage: true }).some((issue) => /水上路线/.test(issue)));
+});
+test('同码头不同合法航线不互相误判，只核对实际船型而非备注中的备选船型', () => {
+  const context = { sailingWindows: [
+    { from: '甲码头', to: '乙码头', grade: '四星', departures: ['10:00'], sourceUrl: 'https://operator.example/a' },
+    { from: '甲码头', to: '丙码头', grade: '四星', departures: ['11:00'], sourceUrl: 'https://operator.example/b' },
+  ] };
+  const cruise = row('11:00', '13:00', 'sight', '乘四星游船', '甲码头', '丙码头', 'ship');
+  assert(!R.executionIssues([cruise, room], context).some((issue) => /水上路线|运营窗口|船型/.test(issue)));
+  const wrong = Object.assign({}, cruise, { activity: '乘三星游船', note: '四星仅为备选' });
+  assert(R.executionIssues([wrong, room], context).some((issue) => /船型必须明确/.test(issue)));
+});
+test('抵达段已入住放行李，游览回来只是回房；相邻到店和办理入住不误删', () => {
+  const arrival = row('16:00', '17:00', 'transport', '乘车前往酒店办理入住并寄存行李', '甲城站', room.endLocation, 'ride');
+  const night = row('20:00', '20:30', 'hotel', '入住甲城晨光酒店，整理随身物品', '', room.endLocation);
+  const context = { hotel: room.endLocation };
+  assert(R.executionIssues([arrival, night], context).some((issue) => /晚间应回房/.test(issue)));
+  const normalized = R.normalizeReviewRows([arrival, night], 0, context);
+  assert(!normalized[1].activity.includes('入住')); assert(normalized[1].activity.includes('回房'));
+  const adjacent = R.normalizeReviewRows([arrival, Object.assign({}, night, { startTime: '17:00', endTime: '17:30' })], 0, context);
+  assert(adjacent[1].activity.includes('入住'));
+});
+test('去漂流终点取回行李不是再次漂流，但取回后骑行仍须重新寄存', () => {
+  const pickup = row('10:00', '10:30', 'other', '从漂流终点返回寄存处取回行李', '甲漂流终点', '甲寄存处');
+  const store = row('09:00', '09:15', 'other', '寄存大件行李', '', '甲寄存处');
+  assert(!R.executionIssues([store, pickup, room], {}).some((issue) => /携带大件/.test(issue)));
+  const cycling = Object.assign({}, pickup, { activity: '取回行李后骑行电动车游览' });
+  assert(R.executionIssues([store, cycling, room], {}).some((issue) => /携带大件/.test(issue)));
+});
+test('备注中的未核验参考车次不泄漏成实际使用班次', () => {
+  const train = Object.assign(row('10:00', '11:00', 'transport', '计划乘动车从甲站至乙站', '甲站', '乙站', 'train'),
+    { note: '参考车次D1001/D1003等，具体以购票为准。记得带证件。' });
+  const normalized = R.normalizeReviewRows([train], 0)[0];
+  assert(!/D1001|D1003/.test(normalized.note)); assert(normalized.note.includes('带证件'));
+  assert(R.executionIssues([train], {}).some((issue) => /未核验参考车次/.test(issue)));
+});
+test('城市长时散步也要先放大件行李，单纯索道购票不能瞬移到山顶', () => {
+  const walk = row('18:00', '19:00', 'other', '在甲城江边散步消食', '', '甲江');
+  assert(R.executionIssues([walk, room], { hotel: room.endLocation }).some((issue) => /携带大件/.test(issue)));
+  const deposit = row('17:00', '17:20', 'hotel', '办理入住放下行李', '', room.endLocation);
+  assert(!R.executionIssues([deposit, walk, room], { hotel: room.endLocation }).some((issue) => /携带大件/.test(issue)));
+  const cable = row('17:00', '17:30', 'ticket', '购买索道票并排队等候上行', '', '甲索道下站');
+  const sunset = row('17:30', '18:30', 'sight', '在甲山顶观景台观赏日落', '', '甲山顶观景台');
+  assert(R.executionIssues([cable, sunset, room], {}).some((issue) => /缺少实际索道上行/.test(issue)));
+});
+test('大纲已有父景区门票时，次晨日出不重复补购票提醒', () => {
+  const profile = P.normalizeInput({ startDate: '2026-12-20', endDate: '2026-12-21' });
+  const outline = { days: [{ date: '2026-12-20' }, { date: '2026-12-21' }] };
+  const sunrise = Object.assign(row('06:00', '07:00', 'sight', '观赏甲山日出', '', '甲山'), { dayIndex: 1, itemId: 'sunrise', visitScope: '甲山' });
+  const existing = [{ type: 'ticket', dayIndex: 0, title: '甲山景区门票/预约放票', bookingInfo: '甲山' }];
+  assert.equal(P.backfillDetailAlarms(profile, outline, [sunrise], existing).filter((alarm) => alarm.type === 'ticket').length, 0);
+});
+test('最终大纲交通只同步实际接受条目，保留步行衔接，删除旧合成接驳', () => {
+  const day = { moves: [{ from: '甲停车场', to: '乙索道站', mode: 'bus', autoConnector: true }] };
+  const rows = [row('12:00', '12:30', 'transport', '步行至甲酒店', '甲停车场', '甲酒店', 'walk'),
+    row('16:00', '16:30', 'transport', '步行至乙索道站', '甲观景台', '乙索道站', 'walk')]
+    .map((item) => Object.assign(item, { executionReview: R.REVIEW_VERSION }));
+  assert(R.syncAcceptedMoves(day, rows)); assert.equal(day.moves.length, 2);
+  assert(day.moves.every((move) => move.mode === 'walk')); assert(!day.moves.some((move) => move.autoConnector));
+  const official = { from: '甲站', to: '乙站', code: 'D1001', startTime: '10:00', endTime: '11:00', schedSource: '12306' };
+  day.moves = [official]; assert(!R.syncAcceptedMoves(day, rows)); assert.strictEqual(day.moves[0], official);
+});
+test('候车候船和寄存不是新的购票，父景区与寺祠真实游览仍补预约', () => {
+  const outline = { days: [{ date: '2026-12-20', highlights: [] }] };
+  const items = [row('09:00', '09:30', 'ticket', '抵达甲码头，取票、安检、候船', '', '甲码头'),
+    row('09:30', '10:00', 'other', '携带行李前往甲漂流起点寄存大件行李', '', '甲码头'),
+    row('10:00', '12:00', 'sight', '体验甲河竹筏漂流', '甲码头', '乙码头'),
+    Object.assign(row('13:00', '15:00', 'sight', '游览甲堰景区核心游线', '甲堰景区游客中心', '甲桥'), { visitScope: '甲堰' }),
+    row('15:00', '17:00', 'sight', '游览乙祠与古街', '乙祠', '古街')]
+    .map((item, i) => Object.assign(item, { itemId: `support-${i}` }));
+  const profile = P.normalizeInput({ startDate: '2026-12-20', endDate: '2026-12-20' });
+  const raw = P.backfillDetailAlarms(profile, outline, items, []);
+  const alarms = P.normalizeBookingAlarmKinds(P.linkBookingAlarms(raw, items), items, profile);
+  assert(!alarms.some((alarm) => /support-[01]/.test(alarm.linkedItemId)));
+  assert(alarms.some((alarm) => /甲堰景区/.test(alarm.bookingInfo))); assert(alarms.some((alarm) => /乙祠/.test(alarm.bookingInfo)));
+  assert(alarms.some((alarm) => alarm.linkedItemId === 'support-2'));
+});
+test('备注中的轨交备选不替换实际打车，公共交通不能沿用更短的打车时长', () => {
+  const ride = Object.assign(row('15:00', '16:00', 'transport', '打车返回用户家', '甲城西站', '用户家', 'ride'),
+    { note: '也可乘地铁，换乘耗时更长' });
+  const normalized = R.normalizeReviewRows([ride], 0);
+  assert.equal(normalized[0].transportType, 'ride'); assert(normalized[0].activity.includes('打车'));
+  const bus = Object.assign({}, ride, { endTime: '15:40', transportType: 'bus', activity: '乘公共交通返回用户家' });
+  assert(R.executionIssues([bus], { routeFacts: [{ from: '甲城西站', to: '用户家', mode: 'ride', minMinutes: 60 }] })
+    .some((issue) => /不能直接沿用打车时长/.test(issue)));
+});
+test('短时接驳不能把公交和网约车混用同一时长，有真实公交证据才采用', () => {
+  const mixed = row('15:15', '16:00', 'transport', '乘公交、地铁或网约车从甲西站回家', '甲西站', '用户家', 'ride');
+  assert(R.executionIssues([mixed], {}).some((issue) => /混写公共交通/.test(issue)));
+  const taxi = R.normalizeReviewRows([mixed], 0)[0];
+  assert.equal(taxi.transportType, 'ride'); assert(taxi.activity.startsWith('乘网约车'));
+  const bus = R.normalizeReviewRows([mixed], 0, { routeFacts: [{ from: '甲西站', to: '用户家', transitEstimate: true, minMinutes: 40, summary: '甲线换乙线' }] })[0];
+  assert.equal(bus.transportType, 'bus'); assert(bus.note.includes('甲线换乙线'));
+});
+test('有住宿定位却无餐饮门店定位时不能断言某分店短程步行可达', () => {
+  const walk = row('19:00', '19:15', 'transport', '步行前往甲米粉', room.endLocation, '甲米粉(中心店)', 'walk');
+  const context = { points: { [room.endLocation]: { lon: 110, lat: 25 } } };
+  assert(R.executionIssues([walk, room], context).some((issue) => /门店.*定位未核验/.test(issue)));
+  assert(!R.executionIssues([walk, room], {}).some((issue) => /门店.*定位未核验/.test(issue)), '地图整体不可用不冒充已查证距离');
+  context.points[walk.endLocation] = { lon: 110.001, lat: 25 };
+  assert(!R.executionIssues([walk, room], context).some((issue) => /门店.*定位未核验/.test(issue)));
+});
+test('换船型后删除旧派生附注，资料对比不代表实际选了另一船型', () => {
+  const cruise = Object.assign(row('12:00', '16:00', 'sight', '乘坐三星级游船游览', '甲码头', '乙码头'),
+    { note: '注意防风；四星级漓江游船：旧码头出发，请按船票核对' });
+  const normalized = R.normalizeReviewRows([cruise, room], 1);
+  assert(normalized[0].note.includes('防风')); assert(!normalized[0].note.includes('四星'));
+});
+test('新寄存不能覆盖未取回的旧寄存，博物馆长游也需行李安排', () => {
+  const route = [row('09:00', '09:15', 'other', '寄存大件行李', '', '甲寄存处'),
+    row('10:00', '10:15', 'other', '寄存大件行李', '', '乙寄存处'), room];
+  assert(R.executionIssues(route, {}).some((issue) => /甲寄存处.*未取回/.test(issue)));
+  const museum = Object.assign(row('10:00', '12:00', 'sight', '游览乙博物馆'), { note: '行李暂存于包车后备箱或附近寄存点（若需）' });
+  assert(R.executionIssues([museum, room], {}).some((issue) => /携带大件/.test(issue)));
+});
+test('准确停车场后的泛称别名可收敛，两个实际候选站仍要复核', () => {
+  const result = R.normalizeReviewRows([row('08:00', '09:00', 'transport', '从甲山停车场/接驳车点乘车', '甲山停车场/接驳车点', '乙码头', 'ride'), room], 1);
+  assert.equal(result[0].startLocation, '甲山停车场');
+  const ambiguous = R.normalizeReviewRows([row('08:00', '09:00', 'transport', '乘车前往车站', '甲酒店', '甲东站/甲西站', 'ride'), room], 1);
+  assert(R.executionIssues(ambiguous, {}).some((issue) => /多个备选/.test(issue)));
+});
+test('游船也是跨城移动，船型和开航时刻须符合带来源的运营窗口', () => {
+  const cruise = row('11:00', '15:00', 'sight', '乘坐三星/四星游船游览', '甲码头', '乙码头');
+  const context = { sailingWindows: [{ from: '甲码头', to: '乙码头', grade: '四星', departures: ['10:20'], sourceUrl: 'https://operator.example/sailing' }] };
+  const normalized = R.normalizeReviewRows([cruise, room], 1, context);
+  assert.equal(normalized[0].transportType, 'ship');
+  assert(R.executionIssues(normalized, context).some((issue) => /发船/.test(issue)));
+  assert(R.executionIssues(normalized, context).some((issue) => /明确船型/.test(issue)));
+  const valid = Object.assign({}, normalized[0], { startTime: '10:20', activity: '乘坐四星游船游览' });
+  assert(!R.executionIssues([valid, room], context).some((issue) => /发船|船型/.test(issue)));
+});
+test('先入园再到核心游览点不被误判为晚于停止入园', () => {
+  const rows = [row('14:40', '14:55', 'ticket', '在甲沟景区购票入园', '', '甲沟景区游客中心'),
+    row('15:05', '16:00', 'sight', '游览甲沟景区核心段'), room];
+  assert(!R.executionIssues(rows, { visitWindows: [{ place: '甲沟景区', lastEntryTime: '15:00', closeTime: '17:30', sourceUrl: 'https://operator.example/entry' }] }).some((issue) => /停止入园/.test(issue)));
+});
+test('车站广场和候车厅是同一铁路枢纽，普通广场不能借此串站', () => {
+  assert(R.sameEndpoint('甲城东站候车厅', '甲城东站'));
+  assert(R.sameEndpoint('甲城东站南广场', '甲城东站'));
+  assert(!R.sameEndpoint('甲城东站南广场', '甲城西站'));
+  assert(!R.sameEndpoint('甲城人民广场', '甲城人民'));
+});
+test('入住条目仅填准确酒店起点时恢复住宿终点，不制造二次交通', () => {
+  const result = R.normalizeReviewRows([row('20:00', '21:00', 'hotel', '抵达甲城晨光酒店办理入住并休息', '甲城晨光酒店')],
+    1, { hotel: '甲城晨光酒店' });
+  assert.equal(result[0].endLocation, '甲城晨光酒店'); assert.equal(result[0].startLocation, '');
+  assert(!R.executionIssues(result, { hotel: '甲城晨光酒店' }).includes('当晚收尾住宿地错误'));
+});
+test('已寄存状态备注不会把寄存地点改为游览地点', () => {
+  const route = [row('09:00', '09:20', 'other', '寄存大件行李', '', '甲景区游客中心寄存处'),
+    Object.assign(row('09:20', '10:20', 'sight', '乘竹筏游览', '', '甲景区码头'), { note: '此时行李已寄存，无需携带' }),
+    row('10:20', '10:40', 'other', '取回寄存的大件行李', '', '甲景区游客中心寄存处'), room];
+  assert(!R.executionIssues(route, { hotel: room.endLocation }).some((issue) => /行李/.test(issue)));
+});
+test('安检和交通合并时按真实接驳下限拆分，不改变官方发车', () => {
+  const access = row('07:30', '08:23', 'transport', '退房后前往甲城站并办理进站安检', '甲酒店', '甲城站', 'ride');
+  const train = row('08:23', '09:14', 'transport', '乘D1001', '甲城站', '乙城站', 'train');
+  const context = { official: [{ startLocation: '甲城站', endLocation: '乙城站', startTime: '08:23', endTime: '09:14', code: 'D1001' }],
+    routeFacts: [{ from: '甲酒店', to: '甲城站', mode: 'ride', minMinutes: 30 }] };
+  const result = R.normalizeReviewRows([access, train, room], 1, context);
+  assert.equal(result[0].startTime, '07:13'); assert.equal(result[0].endTime, '07:43');
+  assert.equal(result[1].activity, '进站安检、候车及检票'); assert.equal(result[2].startTime, '08:23');
+  assert(!R.executionIssues(result, context).includes('铁路进站接驳没有40分钟安检缓冲'));
+});
+test('按车次恢复官方终点和下一段起点，不把到站改成另一车站', () => {
+  const train = row('08:00', '09:30', 'transport', '乘D1001', '甲城站', '乙城东站', 'train');
+  const access = row('09:30', '10:00', 'transport', '从乙城东站乘公交', '乙城东站', '乙酒店', 'bus');
+  const result = R.normalizeReviewRows([train, access, room], 1, { official: [
+    { startLocation: '甲城', endLocation: '乙城', startTime: '08:00', endTime: '09:00', code: 'D1001' },
+  ] });
+  assert.equal(result[0].endTime, '09:00'); assert.equal(result[0].endLocation, '乙城站');
+  assert.equal(result[1].startLocation, '乙城站'); assert(!result[1].activity.includes('东站'));
+});
+test('并行批次合并后只撤回重复主菜的后一天，允许明确重复偏好', () => {
+  const days = [{ meals: ['甲城焖鱼'] }, { meals: ['甲城焖鱼'] }];
+  const rows = [0, 1].map((dayIndex) => Object.assign(row('12:00', '13:00', 'food', '午餐品尝甲城焖鱼'),
+    { dayIndex, mealNames: ['甲城焖鱼'], executionReview: R.REVIEW_VERSION }));
+  assert.deepEqual([...R.invalidateRepeatedMeals(days, rows)], [1]);
+  assert.equal(rows[0].executionReview, R.REVIEW_VERSION); assert(!rows[1].executionReview);
+  rows[1].executionReview = R.REVIEW_VERSION;
+  assert.equal(R.invalidateRepeatedMeals(days, rows, '每天都想吃甲城焖鱼').size, 0);
+});
+test('景区冬季停止入园和出园接驳窗口有独立验收，未知时刻不编造', () => {
+  const context = { visitWindows: [{ place: '甲沟', openTime: '08:30', lastEntryTime: '15:00', closeTime: '17:30', exitMinutes: 30, sourceUrl: 'https://operator.example/winter' }] };
+  assert(R.executionIssues([row('15:40', '17:20', 'sight', '游览甲沟'), room], context).some((issue) => /停止入园/.test(issue)));
+  assert(R.executionIssues([row('14:30', '17:20', 'sight', '游览甲沟'), room], context).some((issue) => /出园接驳/.test(issue)));
+  assert(!R.executionIssues([row('14:00', '16:50', 'sight', '游览甲沟'), room], context).some((issue) => /甲沟/.test(issue)));
+});
+test('带来源的游线保守耗时按真实游览段累计，不把寄存或买票算游玩', () => {
+  const context = { visitWindows: [{ place: '甲山', minVisitMinutes: 150, sourceUrl: 'https://operator.example/route', estimated: true }] };
+  const short = row('14:00', '15:00', 'sight', '游览甲山核心游线', '', '甲山');
+  const deposit = row('13:00', '14:00', 'other', '在甲山寄存大件行李', '', '甲山');
+  assert(R.executionIssues([deposit, short, room], context).some((issue) => /仅60分钟.*150/.test(issue)));
+  assert(!R.executionIssues([Object.assign({}, short, { endTime: '16:30' }), room], context).some((issue) => /保守用时/.test(issue)));
+});
+test('局部修订只替换目标段，拒绝越界和重叠补丁', () => {
+  const before = [{ activity: '早餐' }, { activity: '游玩' }, room];
+  const output = R.applyExecutionPatch(before, [{ startIndex: 1, endIndex: 1, items: [{ activity: '寄存' }, { activity: '游玩并取回' }] }]);
+  assert.equal(output.length, 4); assert.strictEqual(output[0], before[0]); assert.strictEqual(output[3], room);
+  assert.equal(before.length, 3);
+  assert.equal(R.applyExecutionPatch(before, [{ startIndex: 3, endIndex: 3, items: [] }]), null);
+  assert.equal(R.applyExecutionPatch(before, [{ startIndex: 3, endIndex: 3, items: [{ activity: '收尾' }] }]).length, 4);
+  assert.equal(R.applyExecutionPatch(before, [{ startIndex: 0, endIndex: 1, items: [] }, { startIndex: 1, endIndex: 2, items: [] }]), null);
+});
+test('生成闹钟备注不固化提前设置，使用时间单独保留', () => {
+  const [alarm] = P.annotateAlarmUsage([{ type: 'train', note: '提前15分钟开抢', usageInfo: '原摘要' }], [], { days: [] });
+  assert(!/15|提前.*分钟/.test(alarm.note)); assert(/乘车日期/.test(alarm.note));
+});
+test('退房后去车站不被当晚酒店覆盖，退房预订关联昨晚酒店', () => {
+  const outline = { days: [{ hotel: '甲城晨光酒店', city: '甲城' }, { hotel: '乙城星光酒店', city: '乙城' }] };
+  const input = Object.assign(row('08:00', '09:00', 'hotel', '退房后前往甲城站', '甲城晨光酒店', '甲城站'), { dayIndex: 1 });
+  const output = P.annotateHotelItems([input], outline)[0];
+  assert.equal(output.endLocation, '甲城站');
+  assert.equal(output.category, 'transport');
+  assert.equal(output.bookingInfo, '甲城晨光酒店');
+});
+test('返程日游客中心寄存并原地取回允许，不能异地取回', () => {
+  const rows = [row('09:00', '09:15', 'other', '寄存行李', '', '甲游客中心'),
+    row('11:00', '11:15', 'other', '取回行李', '甲游客中心', '甲游客中心')];
+  assert(!R.executionIssues(rows, { isLast: true }).some((x) => /寄存|取回/.test(x)));
+  rows[1].startLocation = rows[1].endLocation = '乙游客中心';
+  assert(R.executionIssues(rows, { isLast: true }).some((x) => /取回地点/.test(x)));
+});
+test('同日重复退房会被识别，备注说明不算再次退房', () => {
+  const rows = [row('08:00', '08:15', 'hotel', '退房'), row('09:00', '09:15', 'hotel', '办理退房')];
+  assert(R.executionIssues(rows, {}).includes('同一天重复退房'));
+  rows[1].activity = '前往车站'; rows[1].note = '已退房，行李随身';
+  assert(!R.executionIssues(rows, {}).includes('同一天重复退房'));
+});
+test('日出活动归类不能因起床整理前缀而丢失锁定窗口', () => {
+  const sunrise = row('06:00', '07:00', 'other', '起床洗漱后拍摄甲观景台日出（约5:40-6:00）');
+  const result = R.normalizeReviewRows([sunrise], 1, { solar: [sunrise] });
+  assert.equal(result[0].category, 'sight'); assert.equal(result[0].startTime, '06:00');
+  assert(!result[0].activity.includes('5:40'));
+});
+test('行李取回以后再骑行，不再把早上的寄存当成有效状态', () => {
+  const rows = [row('08:00', '08:15', 'other', '寄存行李', '', '甲游客中心'),
+    row('10:00', '10:15', 'other', '取回行李', '甲游客中心', '甲游客中心'),
+    row('11:00', '12:00', 'sight', '骑行乡间道路', '', '甲村'), room];
+  assert(R.executionIssues(rows, {}).includes('携带大件行李安排了不便随身携带的活动'));
+});
 test('长途包车离开父景区后不把新目的地游览冒充旧景区覆盖', () => {
   const normalized = R.normalizeReviewRows([
     row('06:00', '07:00', 'sight', '观赏晨景', '', '甲山观景台'),
@@ -228,6 +477,28 @@ test('冬季山地游览不能延续至当地日落后，夜景与日落专门�
   const hike = row('16:00', '19:00', 'sight', '游览前山徒步步道', '', '甲山');
   assert(R.executionIssues([hike, room], context).some((issue) => issue.includes('当地日落')));
   assert(!R.executionIssues([Object.assign({}, hike, { activity: '观赏日落夕阳' }), room], context).some((issue) => issue.includes('当地日落')));
+});
+test('游览山地不必写徒步才验收日照，多节点短游线仍须核对耗时', () => {
+  const context = { date: '2027-01-02', points: { 甲山: { lat: 31, lon: 103 } } };
+  const hike = row('18:05', '19:00', 'sight', '游览甲山（山门-甲道观-乙山顶方向）', '', '甲山前山游客中心');
+  const issues = R.executionIssues([hike, room], context);
+  assert(issues.some((issue) => issue.includes('当地日落')));
+  assert(issues.some((issue) => issue.includes('多节点山地游线')));
+});
+test('新版仅撤回违反新约束的已接受日期，不调用模型重做合法日', () => {
+  const outline = { days: [
+    { date: '2027-01-01', hotel: room.endLocation },
+    { date: '2027-01-02', hotel: room.endLocation, executionPoints: { 甲山: { lat: 31, lon: 103 } } },
+    { date: '2027-01-03' },
+  ] };
+  const rows = [Object.assign(row('10:00', '11:00', 'transport', '从用户家乘公交前往甲酒店', '用户家', room.endLocation, 'bus'), { executionReview: R.REVIEW_VERSION }),
+    Object.assign({}, room, { executionReview: R.REVIEW_VERSION }),
+    Object.assign(row('18:05', '19:00', 'sight', '游览甲山（山门-甲道观-乙山顶）', '', '甲山'), { dayIndex: 1, executionReview: R.REVIEW_VERSION }),
+    Object.assign({}, room, { dayIndex: 1, executionReview: R.REVIEW_VERSION })];
+  assert.deepEqual([...R.invalidateUnsafeAcceptedDays({ origin: '用户家', goTime: '10:00' }, outline, rows)], [1]);
+  assert.equal(rows[0].executionReview, R.REVIEW_VERSION);
+  assert(!rows[2].executionReview);
+  assert(outline.days[1].executionReviewIssues.some((issue) => issue.includes('当地日落')));
 });
 test('铁路优先返程不能通过机场片段与到家后自由安排填满时间', () => {
   const home = row('10:00', '11:00', 'transport', '打车到家', '甲机场', '用户家', 'ride');

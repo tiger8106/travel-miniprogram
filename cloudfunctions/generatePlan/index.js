@@ -38,7 +38,7 @@ const COL_SCHED = 'schedule_cache';
 const SCHED_TTL_MS = 36 * 3600 * 1000;
 
 // 生成引擎版本（用于确认线上跑的是哪一版）
-const GEN_VERSION = 'v2.14-evidence-execution-review';
+const GEN_VERSION = 'v2.15-semantic-navigation-review';
 
 async function generateOutlineWithHotelCheck(input, opts) {
   const result = await generateOutline(input, opts || {});
@@ -674,7 +674,7 @@ async function runJobRound(openid, job) {
   }
 
   let reviewItems;
-  if (job.tripId && (job.doneDayIndexes || []).length >= (payload.outline.days || []).length) {
+  if (job.tripId) {
     const stored = await db.collection(COL_TRIP).doc(job.tripId).get();
     if (!stored.data || stored.data._openid !== openid) throw new Error('行程不存在或无权操作');
     reviewItems = stored.data.items || [];
@@ -974,13 +974,23 @@ exports.main = async (event, context) => {
       const revivals = Number(job.revivals || 0);
       const tooOld = job.createdAt && (now0 - job.createdAt > JOB_MAX_AGE_MS);
       if (revivals >= 2 || tooOld) return { code: 0, data: jobPublic(job, now0) };
+      // 用户主动续跑时释放失败日的重试预算，已完成日期和候选不动。
+      const attempts = Object.assign({}, job.attempts || {});
+      Object.keys(attempts).forEach((key) => {
+        if (/^review-/.test(key) || !asCompletedDay(key)) attempts[key] = 0;
+      });
+      function asCompletedDay(key) {
+        return (job.doneDayIndexes || []).includes(Number(key));
+      }
       await cloud.database().collection(COL_JOB).doc(jobId).update({
         data: {
+          attempts,
           status: 'running', revivals: revivals + 1, error: '',
           leaseUntil: now0 + JOB_LEASE_MS, leaseOwner: runnerId, updatedAt: now0,
         },
       }).catch(() => {});
       job.status = 'running';
+      job.attempts = attempts;
       job.leaseOwner = runnerId;
       job.leaseUntil = now0 + JOB_LEASE_MS;
       console.log('[generatePlan] 任务 %s 复活（第 %d 次）', jobId, revivals + 1);
@@ -1124,7 +1134,7 @@ exports.main = async (event, context) => {
     }
     const budget = event.budgetMs ? Number(event.budgetMs) : undefined;
     let reviewItems;
-    if (event.tripId && (event.doneDayIndexes || []).length >= ((event.outline || {}).days || []).length) {
+    if (event.tripId) {
       const stored = await cloud.database().collection(COL_TRIP).doc(event.tripId).get();
       if (!stored.data || stored.data._openid !== openid) throw new Error('行程不存在或无权操作');
       reviewItems = stored.data.items || [];

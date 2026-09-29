@@ -19,7 +19,7 @@ const { parseJSONFromText, asArray, SYS_PROMPT } = require('./llm');
 const { sanitizeItems, META_PAT, META_HARD, parseDurationMin } = require('./normalize');
 const { parseCnTime, tsToDateStr, tsToCnDateTimeStr } = require('./cn-time');
 const { cacheKeyOf: scheduleKeyOf, sameStation } = require('./schedule');
-const { reviewExecutionItems, REVIEW_VERSION } = require('./execution-review');
+const { reviewExecutionItems, executionIssues, invalidateRepeatedMeals, invalidateUnsafeAcceptedDays, syncAcceptedMoves, REVIEW_VERSION } = require('./execution-review');
 const { solarEventMinute } = require('./solar-time');
 
 const MAX_DAYS = 12;
@@ -8638,6 +8638,7 @@ function dayDetailPrompt(p, day, idx, outline) {
       ? '【12306 班次状态】当天官方查询没有返回可用车次；只写“乘列车”及行程估算时间，严禁编造 G/D/C 车次号或把估算时间写成已核对时刻。备注写“班次与时刻待12306核实”。\n'
       : '') +
     (day.meals && asArray(day.meals).length ? `餐饮建议：${asArray(day.meals).join('、')}\n` : '') +
+    `全程餐饮分配：${JSON.stringify(asArray(outline.days).map((entry) => ({ date: entry.date, meals: entry.meals })))}。每天更换当地代表菜，不连续多天重复同一道主菜；用户明确要求重复的除外。\n` +
     (day.note ? `提示：${day.note}\n` : '') +
     `当晚住宿：${day.overnight || day.city}${day.hotel ? `（推荐酒店：${day.hotel}${day.hotelPoiAddress ? `；核验地址：${day.hotelPoiAddress}` : ''}，已按用户预算「${p.budget}」档挑选，最后的入住条目用它）` : ''}\n\n` +
     (prev ? `【昨天】${prev.date}｜${prev.theme}，昨晚住${prev.overnight || prev.city} —— 今天第一条行程从这里出发。\n` : '') +
@@ -8804,6 +8805,17 @@ async function genDayItems(p, outline, opts = {}) {
           last.endLocation = tonightOv;
         }
       }
+      // 每天返回即作基础验收，记录具体问题供下一轮修订；不丢掉整天重新生成。
+      const localIssues = executionIssues(dayItems, {
+        isFirst: r.i === 0, isLast: r.i === days.length - 1,
+        origin: p.origin, goTime: p.goTime, backTime: p.backTime,
+        hotel: days[r.i].hotel, overnight: tonightOv,
+        sameHotel: r.i > 0 && !!days[r.i].hotel && days[r.i].hotel === days[r.i - 1].hotel,
+        lightLuggage: explicitCarryLuggagePreference(p), noDrive: !drivingAllowed(p),
+        selfDriveAllowed: (row) => explicitSelfDriveSegment(p, row),
+      });
+      if (localIssues.length) days[r.i].executionReviewIssues = localIssues;
+      else delete days[r.i].executionReviewIssues;
       finished.push(r.i);
     });
     k += wave;
@@ -9071,8 +9083,16 @@ function syncHotelReferences(items, outline) {
     const previousScope = scopes[dayIndex - 1] || '';
     const currentScope = scopes[dayIndex] || '';
     const start = String(item.startLocation || '').trim();
-    const end = String(item.endLocation || '').trim();
+    let end = String(item.endLocation || '').trim();
     const activity = String(item.activity || '');
+    const knownDestinations = asArray(days[dayIndex] && days[dayIndex].moves)
+      .flatMap((move) => [move.from, move.to]).filter(Boolean);
+    const statedDestination = knownDestinations.find((name) =>
+      ['前往', '赶往', '去往', '赴'].some((verb) => activity.includes(`${verb}${name}`)));
+    if (statedDestination && statedDestination !== end && /退房/.test(activity)) {
+      end = out.endLocation = statedDestination;
+      out.endLon = ''; out.endLat = '';
+    }
     const morningDeparture = String(item.category || '') === 'food'
       || /早餐|早饭|早餐店|退房|收拾行李|整理行李/.test(`${activity} ${item.note || ''}`)
       || ((toMin(item.startTime) ?? 1440) < 10 * 60 + 30 && /出发|离开/.test(activity));
@@ -9097,7 +9117,10 @@ function syncHotelReferences(items, outline) {
     // 入住/回酒店条目必须落到当天酒店；早餐、退房等如果仍指向上一晚，
     // 则沿用上面的 previousTarget，而不是把人瞬移到今晚酒店。
     let endTarget = '';
-    if (String(item.category || '') === 'hotel' && currentTarget) {
+    const checkingOut = /退房/.test(activity) && !/不退房|无需退房/.test(activity);
+    const hotelArrival = !checkingOut && /入住|回房|回到|返回|休息/.test(activity)
+      && (!end || LODGING_WORD_RE.test(end));
+    if (String(item.category || '') === 'hotel' && currentTarget && hotelArrival) {
       endTarget = currentTarget;
     } else if (end && previousTarget && matches(end, dayIndex - 1)
         && (morningDeparture || !matches(end, dayIndex))) {
@@ -9113,8 +9136,11 @@ function syncHotelReferences(items, outline) {
     }
 
     if (replacements.length) out.activity = replaceExact(activity, replacements);
-    if (String(item.category || '') === 'hotel' && currentTarget) {
-      out.bookingInfo = currentTarget;
+    if (String(item.category || '') === 'hotel') {
+      out.bookingInfo = checkingOut ? previousTarget : currentTarget;
+      // 分类不能覆盖动作语义：退房后去交通枢纽仍是移动，不是今晚入住。
+      if (checkingOut && /前往|赶往|去往|赴/.test(activity)
+          && end && !LODGING_WORD_RE.test(end)) out.category = 'transport';
     }
     return out;
   });
@@ -9128,11 +9154,14 @@ function annotateHotelItems(items, outline) {
   const synced = removeCheckoutBacktracks(removeZeroDistanceTransports(syncHotelReferences(items, outline)));
   return synced.map((item) => {
     if (!item || String(item.category || '') !== 'hotel') return item;
-    const day = days[Number(item.dayIndex || 0)] || {};
+    const offset = /退房/.test(item.activity || '') && !/不退房|无需退房/.test(item.activity || '') ? -1 : 0;
+    const day = days[Number(item.dayIndex || 0) + offset] || {};
     const hotel = String(day.hotel || item.endLocation || '').trim();
     if (!hotel) return item;
     const out = Object.assign({}, item, { bookingInfo: hotel });
     const note = hotelRecommendationNote(day);
+    // 推荐附注是派生数据，替换酒店后不能把旧地址一直追加保留下来。
+    out.note = String(out.note || '').split(/(?:推荐酒店|住宿建议|所在区域|地址)[：:]/)[0].replace(/[；;\s]+$/, '');
     if (note && !String(out.note || '').includes(note)) {
       out.note = [String(out.note || '').trim(), note].filter(Boolean).join('；');
     }
@@ -9371,6 +9400,12 @@ function backfillDetailAlarms(p, outline, items, existing) {
   };
   asArray(items).forEach((it) => {
     const text = `${it.activity || ''} ${it.note || ''}`;
+    const action = String(it.activity || '');
+    const actualBooking = /购买|购票|预约|预订|(?:乘坐|搭乘|体验|观看).{0,16}(?:游船|竹筏|漂流|演出|缆车|索道)/.test(action);
+    const waitingOnly = /取票|安检|候车|候船|检票/.test(action) && !actualBooking;
+    const baggageOnly = it.category !== 'sight' && /行李|箱子|大件/.test(action)
+      && /寄存|暂存|取回|退房|整理/.test(action) && !actualBooking;
+    if (waitingOnly || baggageOnly) return;
     const day = days[Number(it.dayIndex || 0)] || {};
     const date = validDate(day.date) ? day.date : shiftDate(p.startDate, Number(it.dayIndex || 0));
     const titleText = String(it.activity || it.endLocation || it.startLocation || '该项目').slice(0, 28);
@@ -9379,15 +9414,21 @@ function backfillDetailAlarms(p, outline, items, existing) {
       || (statusType && bookingStatusMatches(p, `${titleText} ${text}`, statusType))) return;
     const entryLocation = String(it.endLocation || '').replace(/(?:正门|大门|门口|出口|入口).*$/, '').trim();
     const scoped = String(it.visitScope || '').trim();
-    const parent = /景区|梯田|瀑布|山|公园|沟|田园|博物馆/.test(scoped) ? scoped
-      : /景区|公园|博物馆$/.test(entryLocation) ? entryLocation : '';
-    if (it.category === 'sight' && /景区|梯田|瀑布|山|公园|沟|田园|博物馆/.test(parent)
+    const scenicScope = scoped && `${action} ${it.startLocation || ''} ${it.endLocation || ''}`.includes(`${scoped}景区`)
+      ? `${scoped}景区` : '';
+    const parent = /景区|梯田|瀑布|山|公园|沟|田园|博物馆|祠|寺|宫/.test(scoped) ? scoped
+      : scenicScope || (/景区|公园|博物馆|祠$|寺$|宫$/.test(entryLocation) ? entryLocation
+        : /(?:^|[\s，,：:])(?:游览|参观)([^\s，,。；;（）()与及]{1,20}(?:祠|寺|宫))/.exec(action)?.[1] || '');
+    if (it.category === 'sight' && /景区|梯田|瀑布|山|公园|沟|田园|博物馆|祠|寺|宫/.test(parent)
       && !scenicEntries.has(parent)) {
       scenicEntries.add(parent);
-      if (!bookingStatusMatches(p, `${parent} 门票`, 'ticket')) {
+      const entryKey = (value) => normalize(value).replace(/风景区|景区|门票|预约|放票/g, '');
+      const existingEntry = base.some((alarm) => alarm.type === 'ticket' && /门票\/预约放票/.test(alarm.title || '')
+        && entryKey(alarm.bookingInfo) === entryKey(parent));
+      if (!existingEntry && !bookingStatusMatches(p, `${parent} 门票`, 'ticket')) {
         const entry = asArray(items).find((row) => Number(row.dayIndex || 0) === Number(it.dayIndex || 0)
           && row.category === 'ticket' && `${row.activity || ''} ${row.endLocation || ''}`.includes(parent)) || it;
-        push(`${parent}景区门票/预约放票`, shiftDate(date, -TICKET_PRESALE_DAYS), '09:00', 'ticket',
+        push(`${parent}${/景区$/.test(parent) ? '' : '景区'}门票/预约放票`, shiftDate(date, -TICKET_PRESALE_DAYS), '09:00', 'ticket',
           '提前核验景区官方预约及售票规则；连续游玩时确认门票有效期，内部观景点不重复购票。',
           { dayIndex: Number(it.dayIndex || 0), bookingInfo: parent, linkedItemId: entry.itemId });
       }
@@ -9411,7 +9452,6 @@ function backfillDetailAlarms(p, outline, items, existing) {
       return;
     }
     // 日常携带行李、回房和游玩备注不等于行前待办，证件/装备已有统一清单。
-    const action = String(it.activity || '');
     const prepLike = /^(?:出发前|行前|提前|预先|准备|整理|核对|检查|备好|备齐|预约|预订|确认).{0,20}(?:身份证|护照|签证|通行证|驾照|药品|充电宝|装备|宠物|外币|流量卡|保险|值机|选座|租车|包车|接送机)/.test(action)
       || /护照|签证|通行证|外币|流量卡|保险|值机|选座/.test(action);
     if (prepLike && !covered('other', shiftDate(date, -3), titleText)) {
@@ -10396,6 +10436,13 @@ function normalizeBookingAlarmKinds(alarms, items, p) {
   const filtered = [];
   asArray(alarms).forEach((alarm) => {
     const current = Object.assign({}, alarm);
+    const workflow = rows.find((row) => row.itemId && row.itemId === current.linkedItemId);
+    if (workflow && current.type !== 'hotel') {
+      const action = String(workflow.activity || '');
+      const actualBooking = /购买|购票|预约|预订|(?:乘坐|搭乘|体验|观看).{0,16}(?:游船|竹筏|漂流|演出|缆车|索道)/.test(action);
+      if (!actualBooking && (/取票|安检|候车|候船|检票/.test(action)
+          || workflow.category !== 'sight' && /行李|箱子|大件/.test(action) && /寄存|暂存|取回|退房|整理/.test(action))) return;
+    }
     if (String(current.type || '') === 'hotel') {
       const title = String(current.title || current.bookingInfo || '酒店预订').trim();
       if (!/尽早确认酒店预订/.test(title)) current.title = `尽早确认酒店预订：${title}`.slice(0, 100);
@@ -10578,7 +10625,13 @@ function alarmUsageInfo(alarm, items, outline) {
 function annotateAlarmUsage(alarms, items, outline) {
   return asArray(alarms).map((alarm) => {
     const usageInfo = alarmUsageInfo(alarm, items, outline);
-    return usageInfo ? Object.assign({}, alarm, { usageInfo }) : alarm;
+    const notes = {
+      train: '核对乘车日期、车站、车次及乘车人；购票后标记完成。',
+      hotel: '尽早预订，核对住宿日期、酒店位置和退改规则；预订后标记完成。',
+      ticket: '核对使用日期、入场时段及退改规则，以官方公告为准；购票后标记完成。',
+      bus: '核对乘车日期、上下车点及运营公告；购票后标记完成。',
+    };
+    return Object.assign({}, alarm, usageInfo ? { usageInfo } : {}, notes[alarm.type] ? { note: notes[alarm.type] } : {});
   });
 }
 
@@ -10590,14 +10643,15 @@ async function buildExecutionReview(rawInput, outlineData, opts) {
   const all = asArray(opts.reviewItems);
   const pending = days.map((_, di) => di).filter((di) => {
     const rows = all.filter((row) => Number(row.dayIndex || 0) === di);
-    return !rows.length || rows.some((row) => row.executionReview !== REVIEW_VERSION);
+    return rows.length && rows.some((row) => row.executionReview !== REVIEW_VERSION);
   });
   const selected = pending.slice(0, 4);
   const attempts = Object.assign({}, opts.attempts || {});
   const deadline = Date.now() + Math.min(Number(opts.budgetMs) || 43000, 45000);
   const suggestionsPromise = outline.executionSuggestions
     ? Promise.resolve(outline.executionSuggestions)
-    : pending.length <= 4 ? genSuggestions(p, outline, deadline).then((value) => {
+    : pending.length <= 4 && new Set(all.map((row) => Number(row.dayIndex || 0))).size === days.length
+      ? genSuggestions(p, outline, deadline).then((value) => {
       if (value && Object.keys(value).length) outline.executionSuggestions = value;
       return value;
     }).catch(() => ({})) : Promise.resolve({});
@@ -10605,15 +10659,20 @@ async function buildExecutionReview(rawInput, outlineData, opts) {
   const reviewed = await reviewExecutionItems(p, outline, candidates, deadline, {
     selfDriveAllowed: (row) => explicitSelfDriveSegment(p, row),
   });
+  const combined = all.filter((row) => !selected.includes(Number(row.dayIndex || 0))).concat(reviewed);
+  const mealChanged = invalidateRepeatedMeals(days, combined, p.extra);
+  mealChanged.forEach((di) => {
+    if (!selected.includes(di)) reviewed.push(...combined.filter((row) => Number(row.dayIndex || 0) === di));
+  });
   const accepted = new Set(reviewed.filter((row) => row.executionReview === REVIEW_VERSION)
     .map((row) => Number(row.dayIndex || 0)));
   const ready = days.map((_, di) => di).filter((di) => accepted.has(di)
     || (all.some((row) => Number(row.dayIndex || 0) === di)
-      && all.filter((row) => Number(row.dayIndex || 0) === di).every((row) => row.executionReview === REVIEW_VERSION)));
+      && !mealChanged.has(di) && all.filter((row) => Number(row.dayIndex || 0) === di).every((row) => row.executionReview === REVIEW_VERSION)));
   selected.forEach((di) => {
     const key = `review-${di}`;
     if (accepted.has(di)) delete attempts[key];
-    else attempts[key] = Number(attempts[key] || 0) + 1;
+    else if (days[di].executionReviewAttempted && asArray(days[di].executionReviewIssues).length) attempts[key] = Number(attempts[key] || 0) + 1;
   });
   // 独立运营检索占一轮，失败日期还需至少三次真正的重排机会。
   const exhausted = selected.filter((di) => Number(attempts[`review-${di}`] || 0) >= 5);
@@ -10622,9 +10681,11 @@ async function buildExecutionReview(rawInput, outlineData, opts) {
     ? `第${exhausted.map((di) => di + 1).join('、')}天执行复核未通过，请续跑或调整需求；未将错误行程标记为完成` : '';
   const items = ensureStableItemIds(annotateHotelItems(reviewed, outline));
   const complete = ready.length === days.length;
-  const merged = all.filter((row) => !selected.includes(Number(row.dayIndex || 0))).concat(items);
+  const returnedDays = new Set(items.map((row) => Number(row.dayIndex || 0)));
+  const merged = all.filter((row) => !returnedDays.has(Number(row.dayIndex || 0))).concat(items);
   let alarms = [];
   if (complete) {
+    days.forEach((day, di) => syncAcceptedMoves(day, merged.filter((row) => Number(row.dayIndex || 0) === di)));
     // 执行复核后的 moves 含市内接驳。只为需要购票/预订的交通建开售提醒，
     // 不能把地铁、公交或景区内部接驳全当成长途汽车票。
     days.forEach((day, di) => {
@@ -10657,16 +10718,41 @@ async function buildExecutionReview(rawInput, outlineData, opts) {
     items, dayCities, addrDay, alarms,
     suggestions: complete ? await withTimeout(suggestionsPromise, Math.max(1000, deadline - Date.now()), {}) : {},
     partial: !complete,
-    doneDayIndexes: days.map((_, di) => di), attempts,
+    doneDayIndexes: [...new Set(all.map((row) => Number(row.dayIndex || 0)))], attempts,
     gaveUpDayIndexes: exhausted, reviewError, progress: { done: ready.length, total: days.length, stage: 'review' },
     meta: { days: days.length, reviewPendingDayIndexes: pending.filter((di) => !accepted.has(di)) },
   };
 }
 
 async function buildPlan(rawInput, outlineData, opts = {}) {
-  if (Array.isArray(opts.reviewItems)) return buildExecutionReview(rawInput, outlineData, opts);
+  if (Array.isArray(opts.reviewItems)) {
+    const storedOutline = (outlineData && outlineData.outline) || outlineData || {};
+    const days = asArray(storedOutline.days);
+    const profile = normalizeInput(rawInput);
+    const invalidated = invalidateUnsafeAcceptedDays(profile, storedOutline, opts.reviewItems, (row) => explicitSelfDriveSegment(profile, row));
+    if (invalidated.size) {
+      const attempts = Object.assign({}, opts.attempts || {});
+      invalidated.forEach((di) => { delete attempts[`review-${di}`]; });
+      opts = Object.assign({}, opts, { attempts });
+    }
+    const generated = new Set(opts.reviewItems.map((row) => Number(row.dayIndex || 0)));
+    opts = Object.assign({}, opts, { doneDayIndexes: [...new Set([...(opts.doneDayIndexes || []), ...generated])] });
+    if (generated.size >= days.length || opts.reviewItems.some((row) => row.executionReview !== REVIEW_VERSION)) {
+      return buildExecutionReview(rawInput, outlineData, opts);
+    }
+  }
   const p = normalizeInput(rawInput);
   let normalizedOutline = (outlineData && outlineData.outline) || outlineData || {};
+  const acceptedSnapshots = new Map();
+  asArray(opts.reviewItems).forEach((row) => {
+    const di = Number(row.dayIndex || 0);
+    if (row.executionReview === REVIEW_VERSION && !acceptedSnapshots.has(di) && asArray(normalizedOutline.days)[di]) {
+      acceptedSnapshots.set(di, JSON.parse(JSON.stringify(normalizedOutline.days[di])));
+    }
+  });
+  const restoreAcceptedDays = (target) => acceptedSnapshots.forEach((snapshot, di) => {
+    target.days[di] = JSON.parse(JSON.stringify(snapshot));
+  });
   normalizedOutline = enforceOutlineTransportPreference(p, normalizedOutline);
   normalizeLijiangCruiseOutline(normalizedOutline);
   if (drivingAllowed(p)) normalizedOutline = applyTripEdgeTimes(p, normalizedOutline);
@@ -10683,6 +10769,7 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
   enforceLongjiSameDayRoute(outline, p);
   ensureLongjiSunriseSunset(outline);
   normalizeLijiangCruiseOutline(outline);
+  restoreAcceptedDays(outline);
   if (!asArray(outline.days).length) throw new Error('缺少行程大纲，无法展开详情');
 
   const t1 = Date.now();
@@ -10705,7 +10792,7 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
   // 就当最后一轮；预判失误（这轮提前跑完）就在收尾时用剩余时间补排一次。
   const totalDays = asArray(outline.days).length;
   const doneBefore = (opts.doneDayIndexes || []).length;
-  const likelyFinal = totalDays - doneBefore <= 3;
+  const likelyFinal = !!opts.skipExecutionReview && totalDays - doneBefore <= 3;
   const alarmsPromise = likelyFinal
     ? genAlarms(p, outline, sideDeadline)
         .catch((e) => { console.error('[generatePlan] 闹钟生成失败:', e.message); return null; })
@@ -10723,6 +10810,19 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
   const progress = { done: detail.doneDayIndexes.length, total: asArray(outline.days).length };
   console.log('[generatePlan] 细化完成 %dms, 原始条目=%d, partial=%s',
     Date.now() - t1, detail.items.length, detail.partial);
+  if (!detail.items.length && !opts.skipExecutionReview) {
+    // 超时空返回不是“全程缺失”，不运行补景点/太阳窗口/大纲对齐等全局兜底。
+    // 这些规则会修改已复核日期的 moves，并制造本轮根本没生成的条目。
+    restoreAcceptedDays(outline);
+    return { title: String((outlineData && outlineData.title) || outline.title || '我的行程'),
+      summary: String((outlineData && outlineData.summary) || outline.summary || ''),
+      startDate: p.startDate, endDate: p.endDate, origin: p.origin,
+      items: [], dayCities: outline.days.map((day) => [day.city, day.overnight].filter(Boolean).join(' ')), addrDay: new Map(),
+      partial: true, doneDayIndexes: detail.doneDayIndexes, attempts: detail.attempts,
+      gaveUpDayIndexes: detail.gaveUpDayIndexes, progress,
+      reviewError: detail.gaveUpDayIndexes.length ? `第${detail.gaveUpDayIndexes.map((di) => di + 1).join('、')}天生成暂未成功，请续跑；已完成日期保留` : '',
+      meta: { days: p.days } };
+  }
 
   // 行李规则放在 sanitize 之后：清洗会删条目（可能把"寄存行李"那条删掉，
   // 也可能把提醒取回的那条删掉），删完再看一遍才是最终要展示的结果。
@@ -10739,7 +10839,7 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
   //   fixDayTimeOverlaps 最后顺延重叠/倒退（插入的条目可能造成重叠）
   // 用平铺变量代替俄罗斯套娃调用，括号错一层就是静默传错参数
   // 细化失败/残缺的天用大纲骨架重建（只在最后一轮做：partial 时剩余天下一轮还会来）
-  const skeleton = detail.partial
+  const skeleton = detail.partial || !opts.skipExecutionReview
     ? { items: [], replaced: [] }
     : skeletonForEmptyDays(p, outline, detail.items, detail.doneDayIndexes);
   const baseItems = skeleton.replaced.length
@@ -10882,6 +10982,8 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
   // 大纲和详细页都不会展示“竹江码头→桂林竹江码头”的无效移动。
   normalizeLijiangCruiseOutline(outline);
 
+  restoreAcceptedDays(outline);
+
   // 地理编码消歧要用的每天城市 + 地址→天下标映射。
   // savePlan 的 cityOf 靠它们给高德传 city 参数——之前只消费不生产，
   // cityOf 永远拿不到每天的城市，同名地点照样可能定位到别的省去。
@@ -10916,6 +11018,7 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
       doneDayIndexes: detail.doneDayIndexes,
       attempts: detail.attempts,
       gaveUpDayIndexes: detail.gaveUpDayIndexes,
+      reviewError: detail.gaveUpDayIndexes.length ? `第${detail.gaveUpDayIndexes.map((di) => di + 1).join('、')}天生成暂未成功，请续跑；已完成日期保留` : '',
       progress: detail.partial ? progress : { done: 0, total: progress.total, stage: 'review' },
       meta: {
         days: p.days,
@@ -10997,7 +11100,7 @@ async function generate(rawInput) {
     plan = await buildPlan(rawInput, first, {
       doneDayIndexes: previous && previous.doneDayIndexes,
       attempts: previous && previous.attempts,
-      reviewItems: previous && previous.doneDayIndexes.length >= first.outline.days.length ? items : undefined,
+      reviewItems: items.length ? items : undefined,
     });
     const fresh = new Set(plan.items.map((row) => Number(row.dayIndex || 0)));
     items = auditMergedDetailItems(items.filter((row) => !fresh.has(Number(row.dayIndex || 0))).concat(plan.items), first.outline, rawInput);
