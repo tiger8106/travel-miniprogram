@@ -103,38 +103,16 @@ function isDevtools() {
   return devicePlatform() === 'devtools';
 }
 
-/**
- * 买一个套餐：下单（云函数算签名）→ 拉起支付 → 确认发货
- * @param {string} goodsId plan_1 / plan_5 / vip_month
- */
-async function pay(goodsId) {
+/** 拉起微信虚拟支付（signData 必须原样透传：重新序列化会改字段顺序 → 验签失败 -15006） */
+function raiseVirtualPay(order) {
   if (typeof wx.requestVirtualPayment !== 'function') {
-    throw new Error('当前微信版本不支持虚拟支付（需基础库 2.19.2+）');
+    return Promise.reject(new Error('当前微信版本不支持虚拟支付（需基础库 2.19.2+）'));
   }
   // 模拟器不支持虚拟支付（报 "no permission"）：提前拦下来，别让用户以为支付坏了
   if (isDevtools()) {
-    throw new Error('开发者工具的模拟器不支持虚拟支付，请点「预览」用真机扫码后再买');
+    return Promise.reject(new Error('开发者工具的模拟器不支持虚拟支付，请点「预览」用真机扫码后再买'));
   }
-  wx.showLoading({ title: '下单中…', mask: true });
-  let order;
-  try {
-    const code = await loginCode().catch(() => '');
-    try {
-      order = await callFn('virtualPay', { action: 'createOrder', goodsId, code, platform: devicePlatform() });
-    } catch (e) {
-      // code 是一次性的：偶发失效（并行登录/时钟差）会报"登录态"，换个新 code 重试一次
-      if (!/登录态/.test(e.message)) throw e;
-      const code2 = await loginCode().catch(() => '');
-      if (!code2) throw e;
-      order = await callFn('virtualPay', { action: 'createOrder', goodsId, code: code2, platform: devicePlatform() });
-    }
-  } finally {
-    wx.hideLoading();
-  }
-  if (!order || !order.signData) throw new Error('下单失败，请稍后再试');
-
-  // signData 必须原样透传：重新 JSON.stringify 会改字段顺序 → 验签失败（-15006）
-  await new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     wx.requestVirtualPayment({
       signData: order.signData,
       paySig: order.paySig,
@@ -157,16 +135,79 @@ async function pay(goodsId) {
       },
     });
   });
+}
 
-  // 不能只信前端 success：让云端查单确认真的到账
+/** 支付成功后让云端查单确认（不能只信前端 success），返回是否立即到账 */
+async function confirmOrder(outTradeNo) {
   clear();
-  const r = await callFnKeepCode('virtualPay', { action: 'confirm', outTradeNo: order.outTradeNo });
+  const r = await callFnKeepCode('virtualPay', { action: 'confirm', outTradeNo });
   if (r.code === 0 && r.data && (r.data.delivered || r.data.ok)) {
     clear();
     return { ok: true };
   }
   // 查单不可用（没配 MP_APPSECRET）时靠平台回调发货：提示用户可以手动刷新
   return { ok: false, pending: true, msg: (r.data && r.data.msg) || '支付成功，额度稍后自动到账' };
+}
+
+/**
+ * 买一个套餐：下单（云函数算签名）→ 拉起支付 → 确认发货
+ * @param {string} goodsId plan_1 / plan_5 / vip_month
+ */
+async function pay(goodsId) {
+  wx.showLoading({ title: '下单中…', mask: true });
+  let order;
+  try {
+    const code = await loginCode().catch(() => '');
+    try {
+      order = await callFn('virtualPay', { action: 'createOrder', goodsId, code, platform: devicePlatform() });
+    } catch (e) {
+      // code 是一次性的：偶发失效（并行登录/时钟差）会报"登录态"，换个新 code 重试一次
+      if (!/登录态/.test(e.message)) throw e;
+      const code2 = await loginCode().catch(() => '');
+      if (!code2) throw e;
+      order = await callFn('virtualPay', { action: 'createOrder', goodsId, code: code2, platform: devicePlatform() });
+    }
+  } finally {
+    wx.hideLoading();
+  }
+  if (!order || !order.signData) throw new Error('下单失败，请稍后再试');
+
+  await raiseVirtualPay(order);
+  return confirmOrder(order.outTradeNo);
+}
+
+/**
+ * 继续支付：对一笔「待支付」的订单，用原订单号重新签名后拉起支付
+ * @param {string} outTradeNo
+ */
+async function payAgain(outTradeNo) {
+  if (!outTradeNo) throw new Error('缺少订单号');
+  wx.showLoading({ title: '重新下单…', mask: true });
+  let order;
+  try {
+    const code = await loginCode().catch(() => '');
+    try {
+      order = await callFn('virtualPay', { action: 'repay', outTradeNo, code, platform: devicePlatform() });
+    } catch (e) {
+      if (!/登录态/.test(e.message)) throw e;
+      const code2 = await loginCode().catch(() => '');
+      if (!code2) throw e;
+      order = await callFn('virtualPay', { action: 'repay', outTradeNo, code: code2, platform: devicePlatform() });
+    }
+  } finally {
+    wx.hideLoading();
+  }
+  if (!order || !order.signData) throw new Error('重新发起支付失败，请稍后再试');
+
+  await raiseVirtualPay(order);
+  return confirmOrder(order.outTradeNo);
+}
+
+/** 删除订单（云端只允许删自己「待支付」的订单，已支付的不给删） */
+async function deleteOrder(outTradeNo) {
+  const r = await callFnKeepCode('virtualPay', { action: 'deleteOrder', outTradeNo });
+  if (r.code !== 0) throw new Error(r.msg || '删除失败');
+  return true;
 }
 
 /**
@@ -210,5 +251,5 @@ async function bindInvite(code) {
 
 module.exports = {
   info, ensure, ensureOrPay, guideToPay, clear,
-  pay, syncOrders, orderList, inviteInfo, bindInvite,
+  pay, payAgain, deleteOrder, syncOrders, orderList, inviteInfo, bindInvite,
 };

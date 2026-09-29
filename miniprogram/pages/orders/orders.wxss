@@ -94,6 +94,27 @@
   margin-top: 10rpx;
 }
 
+/* ---------- 待支付订单的操作 ---------- */
+.order-acts {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16rpx;
+}
+.act {
+  font-size: 24rpx;
+  padding: 10rpx 28rpx;
+  border-radius: 999rpx;
+  margin-left: 16rpx;
+}
+.act-del {
+  color: #c0392b;
+  background: #fdeceb;
+}
+.act-pay {
+  color: #fff;
+  background: #2b7bfa;
+}
+
 /* ---------- 说明 ---------- */
 .rule-item {
   font-size: 24rpx;

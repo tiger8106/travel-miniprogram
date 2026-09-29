@@ -247,6 +247,88 @@ function actionGoods() {
 }
 
 /**
+ * 选支付环境：iOS / 开发者工具不支持沙箱 → 自动切现网
+ * @returns {{env:number, appKey:string, platform:string, err?:string}}
+ */
+function pickPayEnv(platform) {
+  let env = ENV;
+  let appKey = APP_KEY;
+  const p = String(platform || '').toLowerCase();
+  if (env === 1 && (p === 'ios' || p === 'devtools')) {
+    env = 0;
+    appKey = String(process.env.XPAY_APP_KEY || '');
+    if (!appKey) {
+      return { env, appKey: '', platform: p, err: 'iOS 不支持沙箱支付：请在云函数 virtualPay 配置现网 AppKey（XPAY_APP_KEY），或把 XPAY_ENV 改回 0' };
+    }
+    console.log('[virtualPay] %s 设备下单自动切现网（沙箱仅安卓可测）', p);
+  }
+  if (!appKey) {
+    return { env, appKey: '', platform: p, err: env === 1 ? '未配置沙箱 AppKey（XPAY_APP_KEY_SANDBOX）' : '未配置现网 AppKey（XPAY_APP_KEY）' };
+  }
+  return { env, appKey, platform: p };
+}
+
+/**
+ * 拿 session_key（userSig 要用）：
+ *   主通道 HTTP 直调 jscode2session（云调用没有 code2Session，见 code2SessionHttp 注释）
+ *   备用通道 users 表里缓存的 sessionKey
+ * @returns {{sessionKey:string, err:string}}
+ */
+async function resolveSessionKey(openid, code) {
+  const users = await db.collection('users').where({ _openid: openid }).limit(1).get().catch(() => ({ data: [] }));
+  const me = users.data && users.data[0];
+  let sessionKey = '';
+  let err = '';
+
+  if (code) {
+    let r = await code2SessionHttp(code);
+    if (!r.session_key) {
+      err = r.errmsg || 'code2session 失败';
+      try {
+        const r2 = await cloud.openapi.auth.code2Session({ js_code: code });
+        if (r2 && r2.session_key) r = r2;
+      } catch (e2) {
+        err += `；openapi 也不行（${String(e2.errMsg || e2.errCode || e2.message || e2).slice(0, 60)}）`;
+      }
+    }
+    if (r && r.session_key) {
+      sessionKey = r.session_key;
+      err = '';
+      if (me && me._id) {
+        await db.collection('users').doc(me._id)
+          .update({ data: { sessionKey, sessionKeyAt: Date.now() } }).catch(() => {});
+      }
+    } else {
+      console.warn('[virtualPay] code 换 session_key 失败:', err);
+    }
+  } else {
+    err = '前端没有传 wx.login code';
+  }
+
+  if (!sessionKey && me) sessionKey = String(me.sessionKey || '');
+  if (!sessionKey) {
+    console.error('[virtualPay] 拿不到 session_key:', err, 'users记录存在:', !!me);
+  }
+  return { sessionKey, err };
+}
+
+/** 打包前端拉起支付需要的两道签名（signData 必须原样透传，不能重新序列化） */
+function buildPayParams(g, outTradeNo, price, attachOpenid, env, appKey, sessionKey) {
+  const signData = S.buildSignData({
+    offerId: OFFER_ID, buyQuantity: 1, env,
+    productId: g.id, goodsPrice: price, outTradeNo, attach: attachOpenid,
+  });
+  return {
+    signData,
+    paySig: paySigWith(appKey, 'requestVirtualPayment', signData),
+    signature: userSigWith(sessionKey, signData),
+    mode: 'short_series_goods',
+    env,
+    outTradeNo,
+  };
+}
+
+/**
  * 下单：算好两道签名，把 signData 原样交给前端
  * 前端拿到后不要 JSON.stringify，直接透传（重新序列化会改字段顺序 → 验签失败 -15006）
  */
@@ -256,67 +338,16 @@ async function actionCreateOrder(openid, event) {
   if (!g) return { code: -1, msg: `未知商品：${goodsId}` };
   if (!OFFER_ID) return { code: -2, msg: '未配置 XPAY_OFFER_ID（云函数环境变量）' };
 
-  // iOS 没有沙箱（沙箱支付只给安卓自测用，iOS 调了必报 PAYMENT_ILLEGAL_IN_SANDBOX）。
-  // 所以云端配了 XPAY_ENV=1（安卓沙箱自测）时，iOS/开发者工具的订单自动切**现网**签名；
-  // 现网 AppKey 没配就明确报错，别让用户对着"支付没走成"猜。
-  let env = ENV;
-  let appKey = APP_KEY;
-  const platform = String(event.platform || '').toLowerCase();
-  if (env === 1 && (platform === 'ios' || platform === 'devtools')) {
-    env = 0;
-    appKey = String(process.env.XPAY_APP_KEY || '');
-    if (!appKey) {
-      return { code: -2, msg: 'iOS 不支持沙箱支付：请在云函数 virtualPay 配置现网 AppKey（XPAY_APP_KEY），或把 XPAY_ENV 改回 0' };
-    }
-    console.log('[virtualPay] %s 设备下单自动切现网（沙箱仅安卓可测）', platform);
-  }
-  if (!appKey) return { code: -2, msg: env === 1 ? '未配置沙箱 AppKey（XPAY_APP_KEY_SANDBOX）' : '未配置现网 AppKey（XPAY_APP_KEY）' };
+  const picked = pickPayEnv(event.platform);
+  if (picked.err) return { code: -2, msg: picked.err };
 
-  // session_key：用前端传来的 code 换（wx.login），存 users 表供后续下单复用
-  let sessionKey = '';
-  const users = await db.collection('users').where({ _openid: openid }).limit(1).get().catch(() => ({ data: [] }));
-  const me = users.data && users.data[0];
-  let code = String(event.code || '');
-  let codeErr = '';
-  if (code) {
-    // 主通道：HTTP 直调 jscode2session（云调用没有 code2Session，见 code2SessionHttp 注释）
-    let r = await code2SessionHttp(code);
-    if (!r.session_key) {
-      codeErr = r.errmsg || 'code2session 失败';
-      // 备用通道：万一个别环境 openapi 能用（正常会报 -604100，无害）
-      try {
-        const r2 = await cloud.openapi.auth.code2Session({ js_code: code });
-        if (r2 && r2.session_key) r = r2;
-      } catch (e2) {
-        codeErr += `；openapi 也不行（${String(e2.errMsg || e2.errCode || e2.message || e2).slice(0, 60)}）`;
-      }
-    }
-    if (r && r.session_key) {
-      sessionKey = r.session_key;
-      codeErr = '';
-      if (me && me._id) {
-        await db.collection('users').doc(me._id)
-          .update({ data: { sessionKey, sessionKeyAt: Date.now() } }).catch(() => {});
-      }
-    } else {
-      console.warn('[virtualPay] code 换 session_key 失败:', codeErr);
-    }
-  } else {
-    codeErr = '前端没有传 wx.login code';
-  }
-  if (!sessionKey && me) sessionKey = String(me.sessionKey || '');
-  if (!sessionKey) {
+  const sk = await resolveSessionKey(openid, String(event.code || ''));
+  if (!sk.sessionKey) {
     // 把真实原因带出去：云端日志里也有，别只给一句模糊提示
-    console.error('[virtualPay] 拿不到 session_key:', codeErr, 'users记录存在:', !!me);
-    return { code: -3, msg: `拿不到微信登录态（${codeErr || '无缓存 session_key'}）。请退出小程序重新进入后再买一次` };
+    return { code: -3, msg: `拿不到微信登录态（${sk.err || '无缓存 session_key'}）。请退出小程序重新进入后再买一次` };
   }
 
   const outTradeNo = genOutTradeNo();
-  // 字段顺序固定：签名按这个串算，前端必须原样传
-  const signData = S.buildSignData({
-    offerId: OFFER_ID, buyQuantity: 1, env,
-    productId: g.id, goodsPrice: g.price, outTradeNo, attach: openid,
-  });
 
   await ensureColl(COL_ORDER);
   await db.collection(COL_ORDER).add({
@@ -325,8 +356,8 @@ async function actionCreateOrder(openid, event) {
       outTradeNo,
       goodsId: g.id,
       price: g.price,
-      env,
-      platform: platform || '',
+      env: picked.env,
+      platform: picked.platform,
       status: 'created',
       createdAt: Date.now(),
     },
@@ -334,15 +365,61 @@ async function actionCreateOrder(openid, event) {
 
   return {
     code: 0,
-    data: {
-      signData,
-      paySig: paySigWith(appKey, 'requestVirtualPayment', signData),
-      signature: userSigWith(sessionKey, signData),
-      mode: 'short_series_goods',
-      env,
-      outTradeNo,
-    },
+    data: buildPayParams(g, outTradeNo, g.price, openid, picked.env, picked.appKey, sk.sessionKey),
   };
+}
+
+/**
+ * 继续支付：对一笔「待支付」的订单，用**原来的订单号**重新签名让前端拉起支付
+ * 不新建订单记录（否则同一笔购买会留两条单），原单支付成功后照常走 confirm 发货。
+ */
+async function actionRepay(openid, event) {
+  const outTradeNo = String(event.outTradeNo || '');
+  if (!outTradeNo) return { code: -1, msg: '缺少订单号' };
+  if (!OFFER_ID) return { code: -2, msg: '未配置 XPAY_OFFER_ID（云函数环境变量）' };
+
+  const order = await loadOrder(outTradeNo);
+  if (!order || order._openid !== openid) return { code: -1, msg: '订单不存在' };
+  if (order.status === 'delivered') return { code: -2, msg: '这笔订单已经到账了，不用再付' };
+  if (order.status === 'paid') return { code: -2, msg: '这笔订单已支付，额度发放中，点「同步订单」即可' };
+
+  const g = R.goodsById(order.goodsId);
+  if (!g) return { code: -3, msg: '商品已下架，请回到付费页重新购买' };
+
+  const picked = pickPayEnv(event.platform || order.platform);
+  if (picked.err) return { code: -2, msg: picked.err };
+
+  const sk = await resolveSessionKey(openid, String(event.code || ''));
+  if (!sk.sessionKey) {
+    return { code: -3, msg: `拿不到微信登录态（${sk.err || '无缓存 session_key'}）。请退出小程序重新进入后再试` };
+  }
+
+  // 价格以**下单时记录的为准**，防止期间调价导致与米大师下单金额不符
+  const price = Number(order.price || g.price || 0);
+  await updateOrder(order._id, { env: picked.env, platform: picked.platform, lastPayAt: Date.now() }).catch(() => {});
+
+  return {
+    code: 0,
+    data: buildPayParams(g, outTradeNo, price, openid, picked.env, picked.appKey, sk.sessionKey),
+  };
+}
+
+/**
+ * 删除订单：只允许删自己「待支付」的订单
+ * 已支付/已到账的不给删——虚拟支付订单是对账和售后的唯一凭据，删了说不清。
+ */
+async function actionDeleteOrder(openid, event) {
+  const outTradeNo = String(event.outTradeNo || '');
+  if (!outTradeNo) return { code: -1, msg: '缺少订单号' };
+
+  const order = await loadOrder(outTradeNo);
+  if (!order || order._openid !== openid) return { code: -1, msg: '订单不存在' };
+  if (order.status !== 'created') {
+    return { code: -2, msg: '已支付的订单不能删除（用于对账和售后）' };
+  }
+
+  await db.collection(COL_ORDER).doc(order._id).remove();
+  return { code: 0, data: { ok: true, outTradeNo } };
 }
 
 /**
@@ -510,6 +587,8 @@ exports.main = async (event, context) => {
     if (action === 'confirm') return await actionConfirm(openid, event);
     if (action === 'sync') return await actionSync(openid);
     if (action === 'orderList') return await actionOrderList(openid);
+    if (action === 'repay') return await actionRepay(openid, event);
+    if (action === 'deleteOrder') return await actionDeleteOrder(openid, event);
     if (action === 'notify') return await actionNotify(event.body || event.rawBody || event);
     return { code: -1, msg: `未知 action：${action}` };
   } catch (e) {

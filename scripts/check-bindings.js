@@ -595,6 +595,17 @@ ok('订单中心：订单页已创建并在 app.json 注册，付费页有入口
     && /pages\/orders\/orders/.test(appJson2)
     && /onTapOrders/.test(payPageJs) && /onTapOrders/.test(payPageWxml));
 
+// 继续支付必须复用**原订单号**重新签名（新开单号会留两条单、对不上账）；
+// 删除只能删自己「待支付」的订单，已支付的不给删（对账/售后凭据）
+ok('订单中心：待支付订单可继续支付（复用原单号 repay）',
+  /action === 'repay'/.test(payIdx) && /buildPayParams\(g, outTradeNo/.test(payIdx)
+    && /quota\.payAgain\(/.test(ordersPageJs) && /onPayAgain/.test(ordersPageJs));
+ok('订单中心：删除订单仅允许本人待支付订单（已支付不给删）',
+  /action === 'deleteOrder'/.test(payIdx)
+    && /order\._openid !== openid/.test(payIdx)
+    && /order\.status !== 'created'/.test(payIdx)
+    && /已支付的订单不能删除/.test(payIdx));
+
 ok('付费页已注册且展示计费说明（避免"为什么又扣钱"的投诉）',
   /pages\/pay\/pay/.test(appJson2) && /计费说明/.test(payPageWxml)
     && /一次完整攻略 = 1 次额度/.test(payPageWxml));
@@ -662,9 +673,12 @@ ok('gen_jobs / schedule_cache 集合不存在时自动创建（-502005 兜底）
 ok('模拟器不支持虚拟支付有明确提示（不再让用户以为支付坏了）',
   /isDevtools/.test(quotaUtil) && /模拟器不支持虚拟支付/.test(quotaUtil));
 
+// 环境选择已抽成 pickPayEnv（下单 createOrder 与继续支付 repay 共用同一套），
+// 所以断言盯 pickPayEnv + ios 分支，不再盯具体函数内部
 ok('iOS 没有沙箱：下单按设备自动切现网（修复 PAYMENT_ILLEGAL_IN_SANDBOX）',
-  /platform === 'ios'/.test(payIdx) && /paySigWith/.test(payIdx)
-    && /SANDBOX/.test(quotaUtil) && /platform: devicePlatform\(\)/.test(quotaUtil));
+  /function pickPayEnv/.test(payIdx) && /p === 'ios'/.test(payIdx) && /paySigWith/.test(payIdx)
+    && /pickPayEnv\(event\.platform\)/.test(payIdx) && /SANDBOX/.test(quotaUtil)
+    && /platform: devicePlatform\(\)/.test(quotaUtil));
 
 ok('细化轮时间纪律：地理编码有硬预算（不再顶穿 60s）+ 闹钟/建议只在最后一轮生成',
   /deadlineAt/.test(genGeoJs) && /GEOCODE_BUDGET_MS/.test(gpIdx)
