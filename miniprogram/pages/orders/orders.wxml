@@ -38,6 +38,11 @@
           <view class="order-status st-{{item.status}}">{{item.statusText}}</view>
         </view>
         <view class="order-no">订单号 {{item.outTradeNo}}</view>
+        <!-- 只有「待支付」的订单能继续支付 / 删除；已支付的留着对账和售后 -->
+        <view class="order-acts" wx:if="{{item.status === 'created'}}">
+          <view class="act act-del" data-no="{{item.outTradeNo}}" bindtap="onDelete">删除订单</view>
+          <view class="act act-pay" data-no="{{item.outTradeNo}}" bindtap="onPayAgain">继续支付</view>
+        </view>
       </view>
     </view>
 
@@ -55,8 +60,9 @@
       <view class="card-title">📋 说明</view>
       <view class="rule-item">· 已到账：额度或会员已生效，可直接用于生成行程</view>
       <view class="rule-item">· 处理中：钱已付、额度发放中，一般几分钟内到账</view>
-      <view class="rule-item">· 待支付：订单未完成支付，不会产生扣费</view>
+      <view class="rule-item">· 待支付：订单未完成支付，不会产生扣费，可以继续支付或删掉</view>
       <view class="rule-item">· 虚拟商品，到账后不支持退款；购买记录只保留最近 20 笔</view>
+      <view class="rule-item">· 已支付的订单不能删除（用于对账和售后）</view>
     </view>
   </block>
 
