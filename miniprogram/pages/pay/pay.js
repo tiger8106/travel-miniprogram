@@ -87,11 +87,10 @@ Page({
       if (r.ok) {
         wx.showToast({ title: '购买成功', icon: 'success' });
       } else {
-        // 支付成功但云端还没确认（多半是没配回调/查单参数）：
-        // 告诉用户钱不会白花，点一下就能补
+        // 客户端支付入口已返回，但云端仍需从微信侧核实结果。
         wx.showModal({
           title: '支付已提交',
-          content: `${r.msg || '额度稍后自动到账'}\n\n如果一直没到账，点「刷新额度」手动同步（不会重复扣款）。`,
+          content: `${r.msg || '支付状态待核实'}\n\n请到「我的订单」查看并点「同步订单」；如已扣款但未出现订单，请保存购买凭证联系客服。`,
           confirmText: '刷新额度',
           cancelText: '知道了',
           success: (res) => { if (res.confirm) this.onSync(); },

@@ -511,6 +511,7 @@ const quotaIdx = fs.readFileSync(path.join(CF, 'quota/index.js'), 'utf8');
 const quotaRules = fs.readFileSync(path.join(CF, 'quota/rules.js'), 'utf8');
 const payIdx = fs.readFileSync(path.join(CF, 'virtualPay/index.js'), 'utf8');
 const paySign = fs.readFileSync(path.join(CF, 'virtualPay/sign.js'), 'utf8');
+const payX = fs.readFileSync(path.join(CF, 'virtualPay/xpay.js'), 'utf8');
 const payRules = fs.readFileSync(path.join(CF, 'virtualPay/quota-rules.js'), 'utf8');
 const genPlanIdx = fs.readFileSync(path.join(CF, 'generatePlan/index.js'), 'utf8');
 const ptpIdx = fs.readFileSync(path.join(CF, 'parseTravelPlan/index.js'), 'utf8');
@@ -543,17 +544,19 @@ ok('扣费顺序：会员 → 快过期的赠送 → 长期额度（不让用户
 ok('扣费幂等（bizKey 去重，续跑多轮只扣一次）',
   /findLog\(openid, bizKey, 'consume'\)/.test(quotaIdx) && /duplicated: true/.test(quotaIdx));
 
-ok('加额度的操作只认微信上下文 openid（防止自己给自己加次数）',
-  /if \(!trusted\) return \{ code: -1, msg: '未登录，不能退额度' \}/.test(quotaIdx)
-    && /if \(!trusted\) return \{ code: -1, msg: '未登录，不能发货' \}/.test(quotaIdx)
-    && /const trusted = !!ctxOpenid \|\| internal/.test(quotaIdx));
+ok('付费发货和退款必须持内部令牌，发货按订单号幂等',
+  /actionRefund\(openid, event, internal\)/.test(quotaIdx)
+    && /actionDeliver\(openid, event, internal\)/.test(quotaIdx)
+    && /if \(!internal\) return \{ code: -1, msg: '未授权的发货请求' \}/.test(quotaIdx)
+    && /deliver_\$\{orderNo\}/.test(quotaIdx));
 
 ok('生成入口落库成功后才扣费（大纲/中途失败不收钱）',
   /action: 'consume', scene: 'plan', bizKey: `plan:\$\{data\.tripId\}`/.test(genPlanIdx)
     && /action: 'consume', scene: 'parse', bizKey: `parse:\$\{tripId\}`/.test(ptpIdx));
 
-ok('额度服务不可用时放行（新功能不能把生成功能搞挂）',
-  /额度服务不可用，本次不计费/.test(genPlanIdx) && /额度服务不可用，本次不计费/.test(ptpIdx));
+ok('额度服务不可用时暂停收费生成（不能静默漏收）',
+  /throw e/.test(genPlanIdx.slice(genPlanIdx.indexOf('async function quotaCall'), genPlanIdx.indexOf('async function quotaCall') + 650))
+    && /throw e/.test(ptpIdx.slice(ptpIdx.indexOf('async function quotaCall'), ptpIdx.indexOf('async function quotaCall') + 650)));
 
 ok('防刷：大纲换版本 / 建议刷新有日限额（不扣额度但计次）',
   /action: 'hit', scene: 'outline'/.test(genPlanIdx)
@@ -572,6 +575,14 @@ ok('signData 字段顺序固定（前端透传，重新 stringify 会验签失�
 ok('发货不只信前端 success（confirm 查单 + 回调 notify 两条路）',
   /action === 'confirm'/.test(payIdx) && /actionNotify/.test(payIdx)
     && /status === 'delivered'/.test(payIdx));
+
+ok('微信发货回调支持 OutTradeNo、JSON/XML 响应并校验消息 Token',
+  /OutTradeNo/.test(payX) && /notifyResponse/.test(payX)
+    && /WX_MSG_TOKEN/.test(payIdx) && /回调签名校验失败/.test(payIdx)
+    && !/if \(action === 'notify'\)/.test(payIdx));
+
+ok('建议刷新在额度服务异常时不会放行刷模型',
+  /暂时无法核实刷新次数/.test(sugIdx) && /if \(hit\.code !== 0\)/.test(sugIdx));
 
 ok('虚拟支付与额度中心商品表同源（改一处必须同步）',
   JSON.stringify(require('../cloudfunctions/quota/rules').GOODS)
@@ -607,8 +618,8 @@ ok('订单中心：取消订单仅允许本人待支付，且软取消保留记�
     && /status: 'cancelled'/.test(payIdx)
     && /quota\.cancelOrder\(/.test(ordersPageJs) && /onCancel/.test(ordersPageJs)
     && !/\.remove\(\)/.test(payIdx.slice(payIdx.indexOf('actionCancelOrder'), payIdx.indexOf('actionConfirm'))));
-ok('订单中心：已取消的订单不出现在列表，且不能再被续付',
-  /status !== 'cancelled'/.test(payIdx)
+ok('订单中心：已取消的订单保留在列表用于对账，且不能再被续付',
+  /list: \(list \|\| \[\]\)\.map/.test(payIdx)
     && /order\.status === 'cancelled'/.test(payIdx) && /已取消，请回到付费页重新下单/.test(payIdx));
 
 ok('付费页已注册且展示计费说明（避免"为什么又扣钱"的投诉）',

@@ -98,8 +98,7 @@ function prepareAlarmRecords(list, openid, tripId, now, preferredLead) {
 
 /**
  * 调额度中心（quota 云函数）。
- * 约定同 generatePlan：**额度服务不可用时一律放行**，
- * 它挂了最多少收一次钱，不能让用户连攻略都传不了。
+ * 额度校验/扣减不可用时暂停收费生成，避免静默漏收。
  */
 async function quotaCall(openid, data) {
   try {
@@ -107,10 +106,14 @@ async function quotaCall(openid, data) {
       name: 'quota',
       data: Object.assign({ openid }, data),
     });
-    return (res && res.result) || {};
+    const result = (res && res.result) || {};
+    if (result.code !== 0 && !(data.action === 'check' && [-2, -3].includes(result.code))) {
+      throw new Error(result.msg || '额度服务拒绝操作');
+    }
+    return result;
   } catch (e) {
-    console.warn('[parseTravelPlan] 额度服务不可用，本次不计费:', e.message);
-    return {};
+    console.error('[parseTravelPlan] 额度服务不可用:', e.message);
+    throw e;
   }
 }
 
@@ -263,6 +266,10 @@ exports.main = async (event, context) => {
   }
 
   try {
+    // 兼容旧版直接解析入口；前端不用它也必须在云端校验，防止直调绕过额度。
+    const checked = await quotaCall(openid, { action: 'check', scene: 'parse' });
+    if (checked.code === -2) return { code: -2, msg: checked.msg || '次数用完了，买个套餐继续吧', needPay: true };
+    if (checked.code === -3) return { code: -3, msg: checked.msg || '暂时无法生成' };
     // 1. 下载 docx
     const dlRes = await cloud.downloadFile({ fileID });
     const buffer = dlRes.fileContent;
@@ -443,6 +450,7 @@ exports.main = async (event, context) => {
       });
     }
 
+    await quotaCall(openid, { action: 'consume', scene: 'parse', bizKey: `parse:${tripId}`, tripId });
     return {
       code: 0,
       data: {

@@ -11,12 +11,13 @@
 //    两个集合不存在也没关系，本函数会自动建（initdb 里也补上了）
 //
 // 安全约定（重要）：
-//   加额度的操作（refund / deliver / 邀请奖励）只认微信上下文里的 openid，
-//   不接受参数传进来的 openid —— 否则任何人都能给自己加次数。
+//   付费发货和退款只接受内部令牌；登录态本身不构成发货授权。
+//   邀请奖励只认微信上下文里的 openid。
 //   扣减类操作允许云函数间调用时带 openid（最坏结果是帮别人多扣一次，
 //   攻击者没有收益）。
 
 const cloud = require('wx-server-sdk');
+const crypto = require('crypto');
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 const R = require('./rules');
 
@@ -216,24 +217,42 @@ async function actionConsume(openid, event) {
 
   const u = await ensureUser(openid);
   const scene = String(event.scene || 'plan');
-  // 特权用户：不扣任何人/任何池子的额度，但仍写一条流水，保证幂等与统计口径一致
-  if (isPrivileged(u)) {
-    await addLog(openid, bizKey, 'consume', { scene, source: 'privileged', tripId: event.tripId || '' });
-    return { code: 0, data: { ok: true, source: 'privileged', left: PRIVILEGED_TOTAL } };
+  const logId = `consume_${crypto.createHash('sha256').update(`${openid}|${bizKey}`).digest('hex').slice(0, 48)}`;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await db.runTransaction(async (transaction) => {
+        const current = (await transaction.collection(COL_USER).doc(u._id).get()).data;
+        const now = Date.now();
+        const privileged = isPrivileged(current);
+        const can = privileged ? { ok: true } : R.canConsume(current, now, scene);
+        if (!can.ok) return { code: can.needPay ? -2 : -3, msg: can.msg, data: { needPay: !!can.needPay } };
+        const result = privileged ? { patch: {}, source: 'privileged' } : R.applyConsume(current, now);
+        await transaction.collection(COL_LOG).add({
+          data: {
+            _id: logId, _openid: openid, bizKey, action: 'consume', scene,
+            source: result.source, tripId: event.tripId || '', ts: now,
+          },
+        });
+        if (!privileged) await transaction.collection(COL_USER).doc(u._id).update({ data: result.patch });
+        return {
+          code: 0,
+          data: {
+            ok: true, source: result.source,
+            left: privileged ? PRIVILEGED_TOTAL : R.available(Object.assign({}, current, result.patch), now).total,
+          },
+        };
+      });
+    } catch (e) {
+      const logged = await db.collection(COL_LOG).doc(logId).get().catch(() => ({ data: null }));
+      if (logged.data) return { code: 0, data: { ok: true, duplicated: true, source: logged.data.source || '' } };
+      if (attempt === 2) throw e;
+    }
   }
-  const can = R.canConsume(u, Date.now(), scene);
-  if (!can.ok) {
-    return { code: can.needPay ? -2 : -3, msg: can.msg, data: { needPay: !!can.needPay } };
-  }
-  const { patch, source } = R.applyConsume(u, Date.now());
-  await patchUser(u._id, patch);
-  await addLog(openid, bizKey, 'consume', { scene, source, tripId: event.tripId || '' });
-  return { code: 0, data: { ok: true, source, left: R.available(Object.assign({}, u, patch), Date.now()).total } };
 }
 
-/** 生成失败退回（只认真实登录态，防止自己给自己退） */
+/** 生成失败退回：必须是持内部令牌的后端调用。 */
 async function actionRefund(openid, event, trusted) {
-  if (!trusted) return { code: -1, msg: '未登录，不能退额度' };
+  if (!trusted) return { code: -1, msg: '未授权的退额度请求' };
   const bizKey = String(event.bizKey || '').trim();
   if (!bizKey) return { code: -1, msg: '缺少 bizKey' };
   const log = await findLog(openid, bizKey, 'consume');
@@ -259,14 +278,41 @@ async function actionHit(openid, event) {
   return { code: 0, data: { ok: true, left: can.left - 1 } };
 }
 
-/** 发货（支付成功后调）：加次数或延长会员期 */
-async function actionDeliver(openid, event, trusted) {
-  if (!trusted) return { code: -1, msg: '未登录，不能发货' };
+/** 只有持内部令牌的支付函数能发货，订单号在事务中保证只发一次。 */
+async function actionDeliver(openid, event, internal) {
+  if (!internal) return { code: -1, msg: '未授权的发货请求' };
+  const orderNo = String(event.orderNo || '');
+  const goodsId = String(event.goodsId || '');
+  if (!/^[A-Za-z0-9_\-|*@]{8,32}$/.test(orderNo) || !R.goodsById(goodsId)) {
+    return { code: -1, msg: '订单号或商品无效' };
+  }
   const u = await ensureUser(openid);
-  const r = R.applyDeliver(u, Date.now(), String(event.goodsId || ''));
-  if (!r.ok) return { code: -1, msg: r.msg };
-  await patchUser(u._id, r.patch);
-  return { code: 0, data: publicInfo(Object.assign({}, u, r.patch), Date.now()) };
+  await findLog(openid, orderNo, 'deliver'); // 首次使用时创建 quota_logs 集合
+  const logId = `deliver_${orderNo}`;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const result = await db.runTransaction(async (transaction) => {
+        const current = (await transaction.collection(COL_USER).doc(u._id).get()).data;
+        const r = R.applyDeliver(current, Date.now(), goodsId);
+        if (!r.ok) throw new Error(r.msg);
+        await transaction.collection(COL_LOG).add({
+          data: { _id: logId, _openid: openid, bizKey: orderNo, action: 'deliver', goodsId, ts: Date.now() },
+        });
+        await transaction.collection(COL_USER).doc(u._id).update({ data: r.patch });
+        return { code: 0, data: publicInfo(Object.assign({}, current, r.patch), Date.now()) };
+      });
+      return result;
+    } catch (e) {
+      const logged = await db.collection(COL_LOG).doc(logId).get().catch(() => ({ data: null }));
+      if (logged.data) {
+        if (logged.data._openid !== openid || logged.data.goodsId !== goodsId) {
+          return { code: -1, msg: '订单号对应的用户或商品不一致' };
+        }
+        return { code: 0, data: Object.assign(publicInfo(await ensureUser(openid), Date.now()), { duplicated: true }) };
+      }
+      if (attempt === 2) throw e;
+    }
+  }
 }
 
 /** 我的邀请信息 */
@@ -378,9 +424,9 @@ exports.main = async (event, context) => {
       case 'info': return await actionInfo(openid);
       case 'check': return await actionCheck(openid, event);
       case 'consume': return await actionConsume(openid, event);
-      case 'refund': return await actionRefund(openid, event, trusted);
+      case 'refund': return await actionRefund(openid, event, internal);
       case 'hit': return await actionHit(openid, event);
-      case 'deliver': return await actionDeliver(openid, event, trusted);
+      case 'deliver': return await actionDeliver(openid, event, internal);
       case 'inviteInfo': return await actionInviteInfo(openid);
       case 'bindInvite': return await actionBindInvite(openid, event, trusted);
       case 'devGrant': return await actionDevGrant(openid);

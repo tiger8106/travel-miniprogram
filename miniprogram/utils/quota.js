@@ -40,10 +40,9 @@ async function info(force) {
  */
 async function ensure(scene) {
   const r = await callFnKeepCode('quota', { action: 'check', scene: scene || 'plan' });
-  // 额度云函数还没部署/网络异常 → 放行（新功能不能把老功能搞挂）
+  // 无法核实额度时暂停新生成，防止云函数故障时无限免费生成。
   if (r.code === -999 || r.code === -1) {
-    console.warn('[quota] 守卫不可用，放行:', r.msg);
-    return { ok: true, info: null };
+    return { ok: false, needPay: false, msg: '暂时无法核实使用次数，请稍后重试', info: null };
   }
   if (r.code === 0 && r.data && r.data.ok) return { ok: true, info: r.data };
   return {
@@ -145,8 +144,7 @@ async function confirmOrder(outTradeNo) {
     clear();
     return { ok: true };
   }
-  // 查单不可用（没配 MP_APPSECRET）时靠平台回调发货：提示用户可以手动刷新
-  return { ok: false, pending: true, msg: (r.data && r.data.msg) || '支付成功，额度稍后自动到账' };
+  return { ok: false, pending: true, msg: (r.data && r.data.msg) || '支付状态待核实，请到我的订单同步' };
 }
 
 /**
@@ -212,23 +210,19 @@ async function cancelOrder(outTradeNo) {
 
 /**
  * 我的订单列表（订单中心页用）
- * 只读展示用，出错返回空数组（订单页会显示空态，不挡路）
+ * 只读展示用；读取失败应提示错误，不能伪装成空订单。
  */
 async function orderList() {
-  try {
-    const d = await callFn('virtualPay', { action: 'orderList' });
-    return (d && d.list) || [];
-  } catch (e) {
-    console.warn('[quota] 订单列表读取失败:', e.message);
-    return [];
-  }
+  const d = await callFn('virtualPay', { action: 'orderList' });
+  return (d && d.list) || [];
 }
 
 /** 手动补发：付了钱但额度没到账时点「刷新」用它 */
 async function syncOrders() {
   const r = await callFnKeepCode('virtualPay', { action: 'sync' });
+  if (r.code !== 0) throw new Error(r.msg || '订单同步失败');
   clear();
-  return (r.code === 0 && r.data) || { delivered: 0, pending: 0 };
+  return r.data || { delivered: 0, pending: 0, verified: 0, checked: 0 };
 }
 
 // ============================================================

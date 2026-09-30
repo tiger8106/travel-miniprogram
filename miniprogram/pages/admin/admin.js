@@ -27,6 +27,7 @@ function bodyOf(r) {
 
 const TABS = [
   { key: 'users', label: '👥 授权' },
+  { key: 'payments', label: '💰 对账' },
   { key: 'config', label: '🔧 配置' },
   { key: 'staff', label: '🛡 管理员' },
   { key: 'audit', label: '📜 日志' },
@@ -59,7 +60,11 @@ Page({
     tab: 'users',
     tabs: TABS,
     // 各页签数据是否已加载过（按需加载，见 ensureTabData）
-    loadedTabs: { users: false, config: false, staff: false, audit: false },
+    loadedTabs: { users: false, payments: false, config: false, staff: false, audit: false },
+
+    paymentSummary: null,
+    paymentOrders: [],
+    paymentError: '',
 
     // 用户授权
     keyword: '',
@@ -140,6 +145,8 @@ Page({
     const jobs = [];
     if (tab === 'users' && !loaded.users) {
       jobs.push(this.loadUsers().then(() => { loaded.users = true; }));
+    } else if (tab === 'payments' && !loaded.payments) {
+      jobs.push(this.loadPayments(false).then(() => { loaded.payments = true; }));
     } else if (tab === 'config' && !loaded.config) {
       jobs.push(this.loadConfig().then(() => { loaded.config = true; }));
     } else if (tab === 'staff' && !loaded.staff) {
@@ -156,6 +163,46 @@ Page({
     const key = e.currentTarget.dataset.key;
     this.setData({ tab: key });
     this.ensureTabData(key);
+  },
+
+  async loadPayments(refresh) {
+    try {
+      const d = bodyOf(await api.adminPaymentLedger(!!refresh));
+      const money = (fen) => `¥${(Number(fen || 0) / 100).toFixed(2)}`;
+      this.setData({
+        paymentError: '',
+        paymentSummary: {
+          scope: d.scope || '最近50笔本地订单',
+          total: d.total || 0,
+          verified: d.verified || 0,
+          settled: d.settled || 0,
+          verifiedPaid: money(d.verifiedPaidFen),
+          settledGross: money(d.settledGrossFen),
+          settledNetEstimate: money(d.settledNetEstimateFen),
+        },
+        paymentOrders: (d.list || []).map((o) => Object.assign({}, o, {
+          amountText: money(o.amountFen),
+          paidText: money(o.paidFee),
+          refundText: o.refundFee ? money(o.refundFee) : '',
+          timeText: this.timeText(o.createdAt),
+          platformText: [2, 3, 4].includes(Number(o.platformStatus)) ? '微信已确认支付'
+            : (o.platformStatus === null ? '微信侧未查到状态' : `微信状态 ${o.platformStatus}`),
+          settleText: Number(o.settlementState) === 2 ? '平台已结算'
+            : (Number(o.settlementState) === 1 ? '结算中' : '未显示结算完成'),
+        })),
+      });
+    } catch (e) {
+      this.setData({ paymentError: e.message || '支付对账读取失败' });
+    }
+  },
+
+  async onReconcilePayments() {
+    if (this._reconciling) return;
+    this._reconciling = true;
+    wx.showLoading({ title: '核对近期订单…', mask: true });
+    await this.loadPayments(true);
+    wx.hideLoading();
+    this._reconciling = false;
   },
 
   // ---------- 认领管理员 ----------
