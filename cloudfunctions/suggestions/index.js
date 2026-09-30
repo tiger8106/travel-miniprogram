@@ -23,7 +23,7 @@ const COL_TRIP = 'trips';
 
 /**
  * 建议刷新日限额（不扣额度，只计次）：
- * 每次刷新都要调 LLM，放任点一天能刷几百次。额度服务挂了就放行，不拦用户。
+ * 每次刷新都要调 LLM，额度服务不可用时暂停刷新，避免被绕过日限额刷穿成本。
  */
 async function quotaHit(openid) {
   try {
@@ -31,10 +31,12 @@ async function quotaHit(openid) {
       name: 'quota',
       data: { openid, action: 'hit', scene: 'tips' },
     });
-    return (res && res.result) || {};
+    const result = (res && res.result) || {};
+    if (result.code !== 0) return result;
+    return result;
   } catch (e) {
-    console.warn('[suggestions] 额度服务不可用，本次不限次:', e.message);
-    return {};
+    console.error('[suggestions] 额度服务不可用:', e.message);
+    return { code: -1, msg: '暂时无法核实刷新次数，请稍后重试' };
   }
 }
 
@@ -55,14 +57,14 @@ exports.main = async (event, context) => {
         return await get(db, userOpenid, event.tripId);
       case 'refresh': {
         const hit = await quotaHit(userOpenid);
-        if (hit.code === -3) return { code: -3, msg: hit.msg || '今天刷新建议的次数用完了' };
+        if (hit.code !== 0) return { code: hit.code || -1, msg: hit.msg || '暂时无法刷新建议' };
         return await refresh(db, userOpenid, event.tripId);
       }
       case 'dayTips': {
         // force=true 才会重新生成（缓存命中不烧 token，也就不占次数）
         if (event.force) {
           const hit = await quotaHit(userOpenid);
-          if (hit.code === -3) return { code: -3, msg: hit.msg || '今天刷新建议的次数用完了' };
+          if (hit.code !== 0) return { code: hit.code || -1, msg: hit.msg || '暂时无法刷新建议' };
         }
         return await dayTips(db, userOpenid, event.tripId, event.dayIndex, event.force);
       }

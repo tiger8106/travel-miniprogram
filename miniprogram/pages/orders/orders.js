@@ -10,12 +10,14 @@
 const quota = require('../../utils/quota');
 const auth = require('../../utils/auth');
 
-const STATUS_TEXT = { delivered: '已到账', paid: '处理中', created: '待支付', cancelled: '已取消' };
+const STATUS_TEXT = { delivered: '权益已到账', refunded: '已退款', paid: '发放中', verifying: '支付确认中', created: '待支付', cancelled: '已取消' };
 const STATUS_HINT = {
-  delivered: '额度已到账，可以直接去生成行程了',
-  paid: '支付已成功，额度正在发放（一般几分钟内到账）',
-  created: '这笔订单没有完成支付，不会扣费',
-  cancelled: '这笔订单已取消，不会扣费',
+  delivered: '权益已到账，可以使用',
+  refunded: '订单已退款；如权益状态有疑问，请联系客服',
+  paid: '支付已完成，权益正在发放，请稍后同步订单',
+  verifying: '正在确认支付结果，请勿重复付款',
+  created: '尚未完成支付，可以继续支付',
+  cancelled: '订单已取消；如已扣款，请联系客服',
 };
 
 function pad(n) { return String(n).padStart(2, '0'); }
@@ -26,14 +28,35 @@ function timeText(ts) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+function moneyText(fen) {
+  const n = Number(fen || 0);
+  return n ? `¥${(n / 100).toFixed(n % 100 === 0 ? 0 : 2)}` : '';
+}
+
 function decorate(o) {
   const status = STATUS_TEXT[o.status] ? o.status : 'created';
+  const noticeType = o.noticeType === 'warning' ? 'warning' : 'normal';
+  const support = o.support || {};
   return Object.assign({}, o, {
     status,
     statusText: STATUS_TEXT[status],
-    statusHint: STATUS_HINT[status],
+    userNotice: o.userNotice || STATUS_HINT[status],
+    noticeClass: noticeType === 'warning' ? 'order-note-warning' : '',
     createdText: timeText(o.createdAt),
     deliveredText: o.deliveredAt ? `到账 ${timeText(o.deliveredAt)}` : '',
+    refundText: o.status === 'refunded' && o.refundFee
+      ? `退款 ${moneyText(o.refundFee)}` : '',
+    detailsOpen: false,
+    supportMerchantOrderNo: support.merchantOrderNo || o.outTradeNo || '',
+    supportPlatformOrderNo: support.platformOrderNo || '',
+    supportChannelOrderNo: support.channelOrderNo || '',
+    supportWxTransactionNo: support.wxTransactionNo || '',
+    supportPaidText: moneyText(support.paidFee),
+    supportPaidAtText: timeText(support.paidAt),
+    supportRefundOrderNo: support.refundOrderNo || '',
+    supportRefundWxTransactionNo: support.refundWxTransactionNo || '',
+    supportRefundText: moneyText(support.refundFee),
+    supportRefundAtText: timeText(support.refundAt),
   });
 }
 
@@ -45,6 +68,7 @@ Page({
     pendingCount: 0,   // 「处理中」的笔数，>0 才显示同步按钮
     syncing: false,
     paying: false,     // 正在拉起支付，防连点出两个支付弹窗
+    loadError: '',
   },
 
   onLoad() {
@@ -57,16 +81,30 @@ Page({
   },
 
   async refresh() {
+    if (this._refreshing) return;
+    this._refreshing = true;
     const logged = auth.isLoggedIn();
     this.setData({ loggedIn: logged, loading: true });
     if (!logged) {
       this.setData({ list: [], pendingCount: 0, loading: false });
+      this._refreshing = false;
       return;
     }
-    const raw = await quota.orderList();
-    const list = (raw || []).map(decorate);
-    const pendingCount = list.filter((o) => o.status === 'paid').length;
-    this.setData({ list, pendingCount, loading: false });
+    let syncError = '';
+    try {
+      if (!this._lastSyncAt || Date.now() - this._lastSyncAt > 60000) {
+        this._lastSyncAt = Date.now();
+        try { await quota.syncOrders(); } catch (e) { syncError = e.message || '同步失败'; }
+      }
+      const raw = await quota.orderList();
+      const list = (raw || []).map(decorate);
+      const pendingCount = list.filter((o) => o.status === 'paid' || o.status === 'verifying').length;
+      this.setData({ list, pendingCount, loadError: syncError, loading: false });
+    } catch (e) {
+      this.setData({ loadError: e.message || '订单读取失败', loading: false });
+    } finally {
+      this._refreshing = false;
+    }
   },
 
   async onLogin() {
@@ -81,9 +119,10 @@ Page({
     wx.showLoading({ title: '同步中…', mask: true });
     try {
       const r = await quota.syncOrders();
+      this._lastSyncAt = Date.now();
       wx.hideLoading();
       wx.showToast({
-        title: r.delivered ? `已补发 ${r.delivered} 笔` : '暂无可补发的订单',
+        title: r.delivered ? `已补发 ${r.delivered} 笔` : `已尝试核对 ${r.checked || 0} 笔`,
         icon: r.delivered ? 'success' : 'none',
       });
     } catch (e) {
@@ -92,6 +131,25 @@ Page({
     }
     this.setData({ syncing: false });
     this.refresh();
+  },
+
+  /** 展开/收起联系客服或退款所需的订单信息 */
+  onToggleDetails(e) {
+    const no = e.currentTarget.dataset.no;
+    if (!no) return;
+    const list = (this.data.list || []).map((item) => item.outTradeNo === no
+      ? Object.assign({}, item, { detailsOpen: !item.detailsOpen }) : item);
+    this.setData({ list });
+  },
+
+  /** 复制展开区中的订单标识，方便粘贴给客服或支付平台 */
+  onCopyDetail(e) {
+    const value = String(e.currentTarget.dataset.value || '');
+    if (!value) return;
+    wx.setClipboardData({
+      data: value,
+      success: () => wx.showToast({ title: '已复制', icon: 'success' }),
+    });
   },
 
   /** 回到付费页继续买（空态时用） */
@@ -135,7 +193,7 @@ Page({
     const r = await new Promise((resolve) => {
       wx.showModal({
         title: '取消订单',
-        content: '这笔订单还没支付，不会产生扣费。取消后它会从列表里移除。也可以直接「继续支付」买完它。',
+        content: '将先向微信核实支付状态。只有微信侧确认尚未支付，才能取消这笔本地订单。',
         confirmText: '取消订单',
         confirmColor: '#e64340',
         cancelText: '再想想',

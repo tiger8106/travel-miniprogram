@@ -79,19 +79,73 @@
 .order-time { font-size: 24rpx; color: #999; }
 .order-delivered { color: #999; }
 
-.order-status {
+.order-refund {
   font-size: 22rpx;
-  padding: 4rpx 16rpx;
-  border-radius: 999rpx;
-}
-.st-delivered { background: #e8f7ee; color: #1a9c56; }
-.st-paid { background: #fff2df; color: #c47a10; }
-.st-created { background: #f2f3f5; color: #8a8f99; }
-
-.order-no {
-  font-size: 22rpx;
-  color: #bbb;
+  color: #8a5b5b;
   margin-top: 10rpx;
+}
+.order-note {
+  color: #666;
+  font-size: 24rpx;
+  line-height: 1.6;
+  margin-top: 10rpx;
+}
+.order-note-warning { color: #bd3030; }
+
+.order-details-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #5275ad;
+  font-size: 23rpx;
+  line-height: 1.5;
+  margin-top: 18rpx;
+  padding-top: 14rpx;
+  border-top: 1rpx solid #f2f4f7;
+}
+.order-details-arrow {
+  color: #8da6cc;
+  font-size: 28rpx;
+  margin-left: 12rpx;
+}
+.order-details {
+  background: #f8fafc;
+  border-radius: 12rpx;
+  padding: 16rpx 18rpx;
+  margin-top: 12rpx;
+}
+.detail-title {
+  color: #8a8f99;
+  font-size: 21rpx;
+  line-height: 1.5;
+  margin-bottom: 12rpx;
+}
+.detail-row {
+  display: flex;
+  align-items: flex-start;
+  min-height: 34rpx;
+  margin-top: 8rpx;
+}
+.detail-label {
+  flex: 0 0 150rpx;
+  color: #8a8f99;
+  font-size: 22rpx;
+  line-height: 1.5;
+}
+.detail-value {
+  flex: 1;
+  min-width: 0;
+  color: #555b66;
+  font-size: 22rpx;
+  line-height: 1.5;
+  word-break: break-all;
+}
+.detail-copy {
+  flex: 0 0 auto;
+  color: #2b7bfa;
+  font-size: 22rpx;
+  line-height: 1.5;
+  margin-left: 12rpx;
 }
 
 /* ---------- 待支付订单的操作 ---------- */

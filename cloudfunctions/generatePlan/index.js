@@ -93,8 +93,7 @@ function alarmCompletedOf(a) {
 
 /**
  * 调额度中心（quota 云函数）。
- * 关键约定：**额度服务不可用时一律放行** —— 它挂了最多少收一次钱，
- * 绝不能让用户连行程都生成不了（宁可漏收，不可误伤）。
+ * 额度校验/扣减不可用时暂停收费生成，避免静默漏收。
  */
 async function quotaCall(openid, data) {
   try {
@@ -102,10 +101,14 @@ async function quotaCall(openid, data) {
       name: 'quota',
       data: Object.assign({ openid }, data),
     });
-    return (res && res.result) || {};
+    const result = (res && res.result) || {};
+    if (result.code !== 0 && !(data.action === 'check' && [-2, -3].includes(result.code))) {
+      throw new Error(result.msg || '额度服务拒绝操作');
+    }
+    return result;
   } catch (e) {
-    console.warn('[generatePlan] 额度服务不可用，本次不计费:', e.message);
-    return {};
+    console.error('[generatePlan] 额度服务不可用:', e.message);
+    throw e;
   }
 }
 
@@ -1128,6 +1131,9 @@ exports.main = async (event, context) => {
 
   // ② 阶段一：生成路线大纲（~20s）。先给前端展示，用户不满意可以换一版。
   if (action === 'outline') {
+    const checked = await quotaCall(openid, { action: 'check', scene: 'plan' });
+    if (checked.code === -2) return { code: -2, msg: checked.msg || '次数用完了，买个套餐继续吧', needPay: true };
+    if (checked.code === -3) return { code: -3, msg: checked.msg || '暂时无法生成' };
     // 「换个方案」不扣额度、也不限次数（同一趟行程只在细化入库时收一次钱）。
     // 之前限制"非会员 5 次/天"是为了防脚本刷大纲烧 token，但副作用很致命：
     // 用户明明还有额度，却因为"今天换够了"而生成不了攻略 —— 等于收了钱不给货。

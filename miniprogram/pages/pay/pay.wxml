@@ -54,7 +54,7 @@
         </view>
       </view>
     </view>
-    <view class="refund-tip">⚠️ 虚拟商品，下单成功后不支持退款，购买前请确认好再下单</view>
+    <view class="refund-tip">⚠️ 虚拟权益到账后原则上不支持主动撤销，请确认后再下单；如重复扣款、未到账或非本人购买，请通过支付平台售后或联系客服处理，最终以平台审核结果为准</view>
     <view class="sync-row" wx:if="{{loggedIn}}">
       <text class="sync-text">付了钱额度没到账？</text>
       <text class="sync-btn" bindtap="onSync">刷新额度</text>
@@ -102,7 +102,7 @@
     <view class="rule-item">· 大纲不满意可以换方案，不额外扣次数</view>
     <view class="rule-item">· 行程没生成出来不扣次数</view>
     <view class="rule-item">· 查看行程、编辑、导航、闹钟提醒永久免费</view>
-    <view class="rule-item">· 虚拟商品，额度到账后不支持退款，请按需购买</view>
+    <view class="rule-item">· 虚拟权益到账后原则上不支持主动撤销；重复扣款、未到账或非本人购买可通过支付平台售后或联系客服处理，最终以平台审核结果为准</view>
     <view class="rule-item">· 有余额就能用，不限制每天生成几次</view>
   </view>
 

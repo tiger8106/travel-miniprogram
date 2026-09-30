@@ -70,7 +70,36 @@
       </view>
     </view>
 
-    <!-- ② 配置 -->
+    <!-- ② 支付对账 -->
+    <view wx:elif="{{tab === 'payments'}}" class="panel">
+      <view class="hint-bar">这里核对最近 50 笔本地订单。平台确认金额、平台结算与银行卡入账是不同阶段；以虚拟支付后台资金明细和银行流水为准。</view>
+      <view class="primary-btn payment-refresh" bindtap="onReconcilePayments">向微信核对近期订单</view>
+      <view wx:if="{{paymentError}}" class="payment-error">{{paymentError}}</view>
+      <view wx:if="{{paymentSummary}}" class="payment-summary">
+        <view>{{paymentSummary.scope}}：{{paymentSummary.total}} 笔</view>
+        <view>平台确认 {{paymentSummary.verified}} 笔 · 实付 {{paymentSummary.verifiedPaid}}</view>
+        <view>平台标记结算 {{paymentSummary.settled}} 笔 · 实付 {{paymentSummary.settledGross}}</view>
+        <view>扣除平台字段费用估算 {{paymentSummary.settledNetEstimate}}，不等于实际到账</view>
+      </view>
+      <view wx:if="{{!paymentOrders.length}}" class="empty">暂无本地订单；请核对云环境、AppID 和支付渠道。</view>
+      <view wx:for="{{paymentOrders}}" wx:key="outTradeNo" class="user-card payment-order">
+        <view class="user-name">{{item.amountText}} · {{item.goodsId}}</view>
+        <view class="user-meta">{{item.timeText}} · 本地 {{item.status}} · {{item.platformText}}</view>
+        <view class="user-meta">商户订单号 {{item.outTradeNo}}</view>
+        <view wx:if="{{item.platformOrderId}}" class="user-meta">微信平台单号 {{item.platformOrderId}}</view>
+        <view wx:if="{{item.channelOrderId}}" class="user-meta">渠道单号 {{item.channelOrderId}}</view>
+        <view wx:if="{{item.wxpayOrderId}}" class="user-meta">微信交易单号 {{item.wxpayOrderId}}</view>
+        <view class="user-meta">平台实付 {{item.paidText}} · {{item.settleText}}</view>
+        <view wx:if="{{item.refundText}}" class="user-meta">平台退款 {{item.refundText}}</view>
+        <view wx:if="{{item.refundOrderId}}" class="user-meta">退款单号 {{item.refundOrderId}}</view>
+        <view wx:if="{{item.status === 'refunded'}}" class="payment-error">平台已退款，已发放权益需按订单核查/回收</view>
+        <view wx:elif="{{item.paymentReview}}" class="payment-error">本地已发货但平台支付未确认，请人工核查权益</view>
+        <view wx:if="{{item.platformNotifyError}}" class="payment-error">发货回传待重试：{{item.platformNotifyError}}</view>
+        <view wx:if="{{item.lastQueryReason}}" class="user-meta">最近查单：{{item.lastQueryReason}}</view>
+      </view>
+    </view>
+
+    <!-- ③ 配置 -->
     <view wx:elif="{{tab === 'config'}}" class="panel">
       <view class="hint-bar">改动最长 60 秒内在全部云函数生效。留空并保存 = 清掉，回落到云函数环境变量。支付类密钥不允许在这里改。</view>
 

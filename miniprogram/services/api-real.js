@@ -160,6 +160,11 @@ function adminWhoami() {
   return callFn('admin', { action: 'whoami' });
 }
 
+/** 最近订单的微信侧支付和结算快照；云端再次校验管理员身份。 */
+function adminPaymentLedger(refresh) {
+  return callFn('virtualPay', { action: 'adminLedger', refresh: !!refresh });
+}
+
 /** 用一次性认领码成为超级管理员 */
 function adminClaim(code) {
   return callFn('admin', { action: 'claim', code });
@@ -243,6 +248,7 @@ module.exports = {
   uploadDoc,
   downloadFromCloud,
   adminWhoami,
+  adminPaymentLedger,
   adminClaim,
   adminSearchUsers,
   adminSetUnlimited,
