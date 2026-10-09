@@ -131,7 +131,7 @@ async function addLog(openid, bizKey, action, extra) {
  *
  * 为什么要单独一层而不是改 rules.js：
  *   现有的扣费规则（会员→赠送→次卡）是跑通了的，动它有回归风险。
- *   特权只在**进规则的门口**放行：不检查余额、不扣数、不计次。
+ *   特权只在**进规则的门口**放行：不检查余额、不扣额度，但成功生成照常计次。
  *   rights 字段由 admin 云函数写入（users.role / users.unlimited），本函数只读。
  */
 function isPrivileged(u) {
@@ -226,14 +226,14 @@ async function actionConsume(openid, event) {
         const privileged = isPrivileged(current);
         const can = privileged ? { ok: true } : R.canConsume(current, now, scene);
         if (!can.ok) return { code: can.needPay ? -2 : -3, msg: can.msg, data: { needPay: !!can.needPay } };
-        const result = privileged ? { patch: {}, source: 'privileged' } : R.applyConsume(current, now);
+        const result = privileged ? R.applyPrivilegedConsume(current, now) : R.applyConsume(current, now);
         await transaction.collection(COL_LOG).add({
           data: {
             _id: logId, _openid: openid, bizKey, action: 'consume', scene,
             source: result.source, tripId: event.tripId || '', ts: now,
           },
         });
-        if (!privileged) await transaction.collection(COL_USER).doc(u._id).update({ data: result.patch });
+        await transaction.collection(COL_USER).doc(u._id).update({ data: result.patch });
         return {
           code: 0,
           data: {

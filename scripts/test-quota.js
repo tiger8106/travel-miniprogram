@@ -98,6 +98,13 @@ console.log('== 6. 退款（生成失败不收钱）==');
   ok(r.patch.dayStat.gen === 1 && r.patch.totalGen === 6, '日计数与总计数一起回退', r.patch);
   const rv = R.applyRefund({ vipUsed: 3, vipMonth: R.monthKey(T0) }, T0, 'vip');
   ok(rv.patch.vipUsed === 2, '会员退款退回会员次数', rv.patch);
+  const privileged = R.applyPrivilegedConsume(u, T0);
+  ok(privileged.source === 'privileged' && privileged.patch.totalGen === 8
+    && privileged.patch.dayStat.gen === 3 && privileged.patch.quota === undefined,
+  '不限量用户免扣额度但累计生成次数', privileged);
+  const privilegedRefund = R.applyRefund(u, T0, 'privileged');
+  ok(privilegedRefund.patch.quota === undefined && privilegedRefund.patch.totalGen === 6,
+    '不限量用户回退统计时不凭空增加额度', privilegedRefund.patch);
 }
 
 console.log('== 7. 发货：次卡加次数、月卡延长期限 ==');

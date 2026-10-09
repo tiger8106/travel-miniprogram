@@ -263,7 +263,7 @@ Page({
         count: list.length,
         pending: list.filter((a) => !a.completed).length,
         completed: list.filter((a) => a.completed).length,
-        nextTitle: def.key === 'hotel' && upcoming ? '请在此分类逐项确认住宿预订' : (upcoming ? upcoming.title : ''),
+        nextTitle: def.key === 'hotel' && upcoming ? '查看每日住宿与预订信息' : (upcoming ? upcoming.title : ''),
         nextTime: def.key === 'hotel' || !upcoming ? '' : `提醒 ${upcoming.remindFriendly}`,
       };
     }).filter((g) => g.count);

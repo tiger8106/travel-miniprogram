@@ -81,6 +81,25 @@ ok(inferred.every((a) => a.fireAt > Date.now() && a.remindAt === a.fireAt - 5 * 
 const trainAlarm = inferred.find((a) => a.type === 'train');
 ok(trainAlarm && /08:30$/.test(trainAlarm.fireAtStr), '攻略明确起售时间时沿用来源时刻', trainAlarm && trainAlarm.fireAtStr);
 
+const bookedHotelItems = [0, 1, 2].map((dayIndex) => ({
+  dayIndex, category: 'hotel', activity: '入住桂林漓江酒店',
+  endLocation: '桂林漓江酒店', note: '酒店已预订，订单号 GL12345',
+}));
+const bookedHotelAlarms = infer.backfillRuleAlarms({ startDate, endDate, items: bookedHotelItems }, []);
+const stayAlarms = bookedHotelAlarms.filter((a) => a.type === 'hotel');
+ok(stayAlarms.length === 3 && new Set(stayAlarms.map((a) => tsToDateStr(a.fireAt))).size === 3,
+  '已预订的同一家酒店连续三晚，每天各有一条入住提醒', stayAlarms.map((a) => a.fireAtStr));
+ok(stayAlarms.every((a) => /桂林漓江酒店/.test(a.title) && /GL12345/.test(a.note)),
+  '酒店提醒保留酒店名称和订单信息');
+ok(!bookedHotelAlarms.some((a) => /预订/.test(a.title)), '已订酒店不会再产生预订待办');
+const unbookedHotelAlarms = infer.backfillRuleAlarms({ startDate, endDate,
+  items: [{ dayIndex: 0, category: 'hotel', activity: '入住桂林漓江酒店' }] }, []);
+ok(unbookedHotelAlarms.some((a) => /入住/.test(a.title)) && unbookedHotelAlarms.some((a) => /预订/.test(a.title)),
+  '未订酒店同时保留入住信息和提前预订待办');
+const hotelTransit = infer.backfillRuleAlarms({ startDate, endDate,
+  items: [{ dayIndex: 0, category: 'transport', activity: '打车前往锦江都城酒店乘坐直通车' }] }, []);
+ok(!hotelTransit.some((a) => a.type === 'hotel'), '酒店仅是乘车地点时不误建入住提醒');
+
 const detailed = plan.backfillDetailAlarms(
   { startDate, endDate },
   { days: [{ date: startDate }, { date: plan.shiftDate(startDate, 1) }] },

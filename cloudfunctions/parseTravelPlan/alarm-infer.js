@@ -58,6 +58,31 @@ function ruleAlarm(title, dateStr, timeStr, type, note) {
   };
 }
 
+function hotelStayAlarm(item, date) {
+  const location = /酒店|民宿|客栈|宾馆/.test(String(item.endLocation || ''))
+    ? item.endLocation : (item.activity || item.endLocation || item.startLocation || '住宿');
+  const name = String(location).trim()
+    .replace(/^(?:办理入住|入住|返回|回到|回|前往|抵达|到达|住在)\s*/, '')
+    .replace(/(?:办理入住|入住|休息|睡觉|放行李).*$/, '').slice(0, 48) || '住宿';
+  const clock = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(item.startTime || '')) ? item.startTime : '14:00';
+  const fireAt = parseCnTime(`${date}T${clock}:00`);
+  if (!fireAt) return null;
+  const detail = [item.activity, item.startLocation, item.endLocation, item.note]
+    .filter(Boolean).join('；').slice(0, 240);
+  return {
+    title: `入住${date} ${name}`.slice(0, 100),
+    note: detail || '查看当天住宿信息，入住前核对酒店地址与订单。',
+    fireAt,
+    fireAtStr: tsToCnDateTimeStr(fireAt),
+    leadMinutes: 5,
+    remindAt: fireAt - 5 * 60 * 1000,
+    completed: fireAt < Date.now(),
+    type: 'hotel',
+    source: 'rule',
+    dayIndex: Number(item.dayIndex) || 0,
+  };
+}
+
 /**
  * 从已经解析出的详细行程做一次确定性查漏。
  * LLM 提名可能只返回部分事项，不能因为数量已经达到阈值就跳过车票/酒店/门票。
@@ -86,8 +111,23 @@ function backfillRuleAlarms(ctx, existing) {
 
   items.forEach((it) => {
     const text = textOf(it);
-    if (/已(经)?(购买|预订|预约|订好)|无需(购买|预约|预订)|不需要(购买|预约|预订)/.test(text)) return;
     const date = dayDate(it);
+    const isHotel = it.category === 'hotel'
+      || /入住|住宿|住在|住进|(?:酒店|民宿|客栈|宾馆).*?(?:睡觉|休息|过夜)/.test(String(it.activity || ''));
+    if (isHotel) {
+      // 住宿即使已订也要在入住日留下可查看的酒店卡片，且每晚单独一条。
+      const stay = hotelStayAlarm(it, date);
+      if (stay && !base.concat(out).some((a) => a.type === 'hotel' && a.title === stay.title && dateOf(a.fireAt) === date)) {
+        out.push(stay);
+      }
+      if (/已(经)?(购买|预订|预定|预约|订好|确认)|已订|订妥|订单号|无需(购买|预约|预订)|不需要(购买|预约|预订)/.test(text)) return;
+      const booking = ruleAlarm(`预订${date} ${String(it.activity || it.endLocation || '住宿').slice(0, 28)}住宿`,
+        shiftDate(date, -7), '20:00', 'hotel',
+        '根据详细行程自动补齐，优先锁定可免费取消房型。具体房态和价格以下单平台为准。');
+      add(booking, String(it.activity || it.endLocation || '住宿'));
+      return;
+    }
+    if (/已(经)?(购买|预订|预约|订好)|已订|订妥|无需(购买|预约|预订)|不需要(购买|预约|预订)/.test(text)) return;
     const activity = String(it.activity || it.endLocation || it.startLocation || '该事项').slice(0, 28);
     const mode = String(it.transportType || '').toLowerCase();
     const rail = /train|高铁|动车|火车/.test(mode + text);
@@ -118,18 +158,6 @@ function backfillRuleAlarms(ctx, existing) {
         clock,
         'ticket',
         '根据详细行程自动补齐，热门项目通常提前 1-7 天放票或预约。具体开放时间以景区官方公告为准，下单前请核对。'
-      );
-      add(candidate, activity);
-      return;
-    }
-
-    if (it.category === 'hotel' || /入住|酒店|民宿|住宿/.test(text)) {
-      const candidate = ruleAlarm(
-        `预订${date} ${activity}住宿`,
-        shiftDate(date, -7),
-        '20:00',
-        'hotel',
-        '根据详细行程自动补齐，优先锁定可免费取消房型。具体房态和价格以下单平台为准。'
       );
       add(candidate, activity);
       return;
@@ -171,7 +199,8 @@ function dayBrief(items, startDate) {
     if (!byDay.has(di)) byDay.set(di, []);
     const arr = byDay.get(di);
     if (arr.length < 6) {
-      arr.push(`${it.startTime || ''}${it.endTime ? '-' + it.endTime : ''} ${String(it.activity || '').slice(0, 40)}`);
+      const hotelInfo = it.category === 'hotel' && it.note ? `（${String(it.note).slice(0, 50)}）` : '';
+      arr.push(`${it.startTime || ''}${it.endTime ? '-' + it.endTime : ''} ${String(it.activity || '').slice(0, 40)}${hotelInfo}`);
     }
   });
   const keys = [...byDay.keys()].sort((a, b) => a - b);
@@ -239,7 +268,7 @@ ${brief}
 - 火车票 12306 预售 15 天（含乘车当日）：乘车日减 14 天 = 开票日，取 09:00。
 - 机票：提前 30 天起关注，取 10:00。
 - 长途汽车票：提前 5 天，取 09:00。
-- 酒店：出发前 7 天 20:00 锁定可免费取消房型。
+- 酒店：尚未预订时，出发前 7 天 20:00 锁定可免费取消房型；已预订则不要生成重复预订待办，入住信息由系统逐日补齐。
 - 景区门票：热门提前 7 天开始盯，取 09:00。
 - 行前准备：出发前 2-5 天。
 

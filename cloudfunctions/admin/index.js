@@ -19,6 +19,7 @@ cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 const https = require('https');
 const http = require('http');
 const { allowed, COL_CONFIG, DOC_ID, resetCache } = require('./cloudCfg');
+const { generationCount } = require('./generation-count');
 
 const ADMIN_VERSION = 'v1.0-admin';
 
@@ -181,6 +182,13 @@ function publicUser(u) {
   };
 }
 
+/** 旧版特权账号写了成功生成流水却未增加 users.totalGen，展示时用流水补齐。 */
+async function publicUserWithHistory(u) {
+  const info = publicUser(u);
+  info.totalGen = await generationCount(db, u);
+  return info;
+}
+
 // ============================================================
 // Actions
 // ============================================================
@@ -211,7 +219,7 @@ async function actionWhoami(openid) {
       isAdmin: isAdminUser(u),
       isSuper: u.role === 'super',
       role: u.role || '',
-      me: publicUser(u),
+      me: await publicUserWithHistory(u),
       claimEnabled: !!process.env.ADMIN_CLAIM_CODE,
       stats: {
         users: userCount.total || 0,
@@ -274,14 +282,14 @@ async function actionSearchUsers(actorOpenid, event) {
     // 不给关键词时返回最近注册的一批，方便直接操作
     const res = await db.collection(COL_USER)
       .orderBy('createdAt', 'desc').limit(20).get().catch(() => ({ data: [] }));
-    return { code: 0, data: { list: (res.data || []).map(publicUser) } };
+    return { code: 0, data: { list: await Promise.all((res.data || []).map(publicUserWithHistory)) } };
   }
   const res = await db.collection(COL_USER)
     .where({ nickname: db.RegExp({ regexp: kw, options: 'i' }) })
     .limit(20)
     .get()
     .catch(() => ({ data: [] }));
-  return { code: 0, data: { list: (res.data || []).map(publicUser) } };
+  return { code: 0, data: { list: await Promise.all((res.data || []).map(publicUserWithHistory)) } };
 }
 
 /** 授权 / 取消授权「不限量使用」 */

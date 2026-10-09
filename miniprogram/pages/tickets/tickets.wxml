@@ -57,7 +57,7 @@
     </view>
 
     <view wx:if="{{hotelHint}}" class="card hotel-booking-hint">
-      🏨 酒店可随时提前预订，越早确认越好。请到下方「酒店住宿」分类逐项核对并确定预订。
+      🏨 每日酒店名称与入住信息见下方「酒店住宿」分类；尚未预订的住宿请提前确认。
     </view>
 
     <!-- ===== 正在进行 / 即将进行（和首页「此刻行程」同一套视觉） ===== -->
@@ -97,7 +97,7 @@
     <view wx:else class="card now-empty">
       <view class="now-empty-icon">🚩</view>
       <view class="now-empty-text">没有正在进行或即将进行的提醒</view>
-      <view class="now-empty-sub">{{hotelHint ? '酒店预订请到下方「酒店住宿」分类逐项确认' : (alarms.length ? '所有事项都还早，见下方分类待办' : '还没有任何提醒事项')}}</view>
+      <view class="now-empty-sub">{{hotelHint ? '每日住宿信息见下方「酒店住宿」分类' : (alarms.length ? '所有事项都还早，见下方分类待办' : '还没有任何提醒事项')}}</view>
     </view>
 
     <!-- ===== 分类待办：折叠卡，点击进入分类详情页 ===== -->
