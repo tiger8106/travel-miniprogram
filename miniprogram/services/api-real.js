@@ -176,6 +176,14 @@ function adminRole() {
   return callFn('admin', { action: 'role' });
 }
 
+function adminIdentity() {
+  return callFn('admin', { action: 'identity' });
+}
+
+function adminOverview() {
+  return callFn('admin', { action: 'overview' });
+}
+
 /** 最近订单的微信侧支付和结算快照；云端再次校验管理员身份。 */
 function adminPaymentLedger(refresh) {
   return callFn('virtualPay', { action: 'adminLedger', refresh: !!refresh });
@@ -268,6 +276,8 @@ module.exports = {
   downloadFromCloud,
   adminWhoami,
   adminRole,
+  adminIdentity,
+  adminOverview,
   adminPaymentLedger,
   adminClaim,
   adminSearchUsers,

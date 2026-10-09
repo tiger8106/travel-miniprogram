@@ -10,22 +10,32 @@ const { callFn, callFnKeepCode } = require('./request');
 
 let _cache = null;
 let _cacheAt = 0;
+let _cacheOpenid = '';
+let _epoch = 0;
 const CACHE_MS = 30 * 1000;      // 30 秒内不重复查，省调用次数
 
 function clear() {
   _cache = null;
   _cacheAt = 0;
+  _cacheOpenid = '';
+  _epoch++;
+  try { require('./homecache').clearPage('pay'); } catch (e) {}
 }
 
 /** 查额度（带短缓存） */
 async function info(force) {
   const now = Date.now();
-  if (!force && _cache && now - _cacheAt < CACHE_MS) return _cache;
+  const openid = wx.getStorageSync('__openid_cache__') || '';
+  if (!force && _cache && _cacheOpenid === openid && now - _cacheAt < CACHE_MS) return _cache;
+  const epoch = _epoch;
   try {
     const d = await callFn('quota', { action: 'info' });
-    _cache = d || null;
-    _cacheAt = now;
-    return _cache;
+    if (_epoch === epoch && (wx.getStorageSync('__openid_cache__') || '') === openid) {
+      _cache = d || null;
+      _cacheAt = now;
+      _cacheOpenid = openid;
+    }
+    return d || null;
   } catch (e) {
     // 额度服务没部署/出错时返回 null：调用方按"放行"处理，不能挡住用户
     console.warn('[quota] 查询失败（本次不拦截）:', e.message);
@@ -212,17 +222,19 @@ async function cancelOrder(outTradeNo) {
  * 我的订单列表（订单中心页用）
  * 只读展示用；读取失败应提示错误，不能伪装成空订单。
  */
-async function orderList() {
-  const d = await callFn('virtualPay', { action: 'orderList' });
-  return (d && d.list) || [];
+async function orderList(page) {
+  const d = await callFn('virtualPay', { action: 'orderList', page: Math.max(1, Number(page) || 1) });
+  return d || { list: [], hasMore: false, page: 1 };
 }
 
 /** 手动补发：付了钱但额度没到账时点「刷新」用它 */
 async function syncOrders() {
   const r = await callFnKeepCode('virtualPay', { action: 'sync' });
   if (r.code !== 0) throw new Error(r.msg || '订单同步失败');
-  clear();
-  return r.data || { delivered: 0, pending: 0, verified: 0, checked: 0 };
+  const result = r.data || { delivered: 0, pending: 0, verified: 0, checked: 0 };
+  // 只有权益真的变化才让额度页首屏快照失效；普通查单不能每次都造成下次进页转圈。
+  if (result.delivered) clear();
+  return result;
 }
 
 // ============================================================

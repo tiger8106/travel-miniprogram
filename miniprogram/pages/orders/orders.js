@@ -9,6 +9,8 @@
 
 const quota = require('../../utils/quota');
 const auth = require('../../utils/auth');
+const homeCache = require('../../utils/homecache');
+const CACHE_KEY = 'orders';
 
 const STATUS_TEXT = { delivered: '权益已到账', refunded: '已退款', paid: '发放中', verifying: '支付确认中', created: '待支付', cancelled: '已取消' };
 const STATUS_HINT = {
@@ -69,42 +71,102 @@ Page({
     syncing: false,
     paying: false,     // 正在拉起支付，防连点出两个支付弹窗
     loadError: '',
-  },
-
-  onLoad() {
-    this.refresh();
+    page: 0,
+    hasMore: false,
+    loadingMore: false,
   },
 
   onShow() {
     // 从别处回来（比如刚买完）刷新一次，保证到账状态是新的
+    const openid = auth.getOpenid();
+    if (this._account && this._account !== openid) {
+      this._epoch = (this._epoch || 0) + 1;
+      this._refreshing = false;
+      this.setData({ list: [], pendingCount: 0, page: 0, hasMore: false, loading: true });
+    }
+    if (!this.data.page) this.showCached();
     this.refresh();
+  },
+
+  showCached() {
+    const openid = auth.getOpenid();
+    const snap = openid && homeCache.readPage(CACHE_KEY);
+    if (!snap || snap.openid !== openid || !Array.isArray(snap.list)) return false;
+    this._account = openid;
+    this.setData({ loggedIn: true, loading: false, list: snap.list,
+      pendingCount: snap.pendingCount || 0, page: snap.page || 1, hasMore: !!snap.hasMore });
+    return true;
   },
 
   async refresh() {
     if (this._refreshing) return;
     this._refreshing = true;
+    const epoch = this._epoch || 0;
     const logged = auth.isLoggedIn();
-    this.setData({ loggedIn: logged, loading: true });
+    const openid = auth.getOpenid();
+    const hasContent = !!this.data.page || this.showCached();
+    this.setData({ loggedIn: logged, loading: logged && !hasContent });
     if (!logged) {
-      this.setData({ list: [], pendingCount: 0, loading: false });
+      this.setData({ list: [], pendingCount: 0, page: 0, hasMore: false, loading: false });
       this._refreshing = false;
       return;
     }
-    let syncError = '';
     try {
-      if (!this._lastSyncAt || Date.now() - this._lastSyncAt > 60000) {
-        this._lastSyncAt = Date.now();
-        try { await quota.syncOrders(); } catch (e) { syncError = e.message || '同步失败'; }
-      }
-      const raw = await quota.orderList();
-      const list = (raw || []).map(decorate);
+      // 先读订单再后台补发；原先 await syncOrders 会把首屏挡住一整次云调用。
+      const result = await quota.orderList(1);
+      if (auth.getOpenid() !== openid || (this._epoch || 0) !== epoch) return;
+      this._account = openid;
+      const first = (result.list || []).map(decorate);
+      const seen = new Set(first.map((o) => o.outTradeNo));
+      // 后台对账更新首批状态时，不把用户已滚动展开的历史订单突然收回去。
+      const older = this.data.page > 1 ? this.data.list.filter((o) => !seen.has(o.outTradeNo)) : [];
+      const list = first.concat(older);
       const pendingCount = list.filter((o) => o.status === 'paid' || o.status === 'verifying').length;
-      this.setData({ list, pendingCount, loadError: syncError, loading: false });
+      const hasMore = !!result.hasMore;
+      this.setData({ list, pendingCount, page: older.length ? this.data.page : 1,
+        hasMore: older.length ? this.data.hasMore : hasMore, loadError: '', loading: false });
+      homeCache.writePage(CACHE_KEY, { openid, list: first,
+        pendingCount: first.filter((o) => o.status === 'paid' || o.status === 'verifying').length,
+        page: 1, hasMore });
+      this._refreshing = false;
+      this.syncInBackground(openid);
     } catch (e) {
+      if (auth.getOpenid() !== openid || (this._epoch || 0) !== epoch) return;
       this.setData({ loadError: e.message || '订单读取失败', loading: false });
     } finally {
-      this._refreshing = false;
+      if ((this._epoch || 0) === epoch) this._refreshing = false;
     }
+  },
+
+  async syncInBackground(openid) {
+    if (this._lastSyncAt && Date.now() - this._lastSyncAt < 60000) return;
+    this._lastSyncAt = Date.now();
+    try {
+      const r = await quota.syncOrders();
+      if (auth.getOpenid() === openid && r.delivered) this.refresh();
+    } catch (e) {
+      if (auth.getOpenid() === openid) this.setData({ loadError: e.message || '订单同步失败' });
+    }
+  },
+
+  onReachBottom() { this.loadMore(); },
+
+  async loadMore() {
+    if (!this.data.hasMore || this.data.loadingMore || this._refreshing) return;
+    const openid = auth.getOpenid();
+    const page = this.data.page + 1;
+    this.setData({ loadingMore: true });
+    try {
+      const result = await quota.orderList(page);
+      if (auth.getOpenid() !== openid || page !== this.data.page + 1) return;
+      const seen = new Set(this.data.list.map((o) => o.outTradeNo));
+      const extra = (result.list || []).map(decorate).filter((o) => !seen.has(o.outTradeNo));
+      const list = this.data.list.concat(extra);
+      this.setData({ list, page, hasMore: !!result.hasMore,
+        pendingCount: list.filter((o) => o.status === 'paid' || o.status === 'verifying').length });
+    } catch (e) {
+      wx.showToast({ title: e.message || '加载更多订单失败', icon: 'none' });
+    } finally { this.setData({ loadingMore: false }); }
   },
 
   async onLogin() {

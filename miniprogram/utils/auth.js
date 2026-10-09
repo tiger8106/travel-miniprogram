@@ -90,6 +90,8 @@ function silentLogin(force) {
           const prev = wx.getStorageSync(KEY_OPENID);
           if (prev && prev !== openid) {
             try { require('./admin-role').clear(prev); } catch (e) {}
+            try { require('./avatar-cache').clear(prev); } catch (e) {}
+            try { require('./quota').clear(); } catch (e) {}
             try { require('./homecache').clearAll(); } catch (e) {}
             try { require('./genrunner').reset(); } catch (e) {}
           }
@@ -193,6 +195,8 @@ function logout() {
   wx.removeStorageSync(KEY_OPENID);
   wx.removeStorageSync(KEY_PROFILE);
   try { require('./admin-role').clear(oldOpenid); } catch (e) {}
+  try { require('./avatar-cache').clear(oldOpenid); } catch (e) {}
+  try { require('./quota').clear(); } catch (e) {}
   // 退出后立即清掉首页/闹钟/建议快照，避免下一个账号在网络刷新前看到上一个账号的内容。
   try { require('./homecache').clearAll(); } catch (e) {}
   try { require('./genrunner').reset(); } catch (e) {}

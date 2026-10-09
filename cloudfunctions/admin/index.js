@@ -21,7 +21,7 @@ const http = require('http');
 const { allowed, COL_CONFIG, DOC_ID, resetCache } = require('./cloudCfg');
 const { generationCount } = require('./generation-count');
 
-const ADMIN_VERSION = 'v1.1-fast-role';
+const ADMIN_VERSION = 'v1.2-progressive-admin';
 
 const COL_USER = 'users';
 const COL_AUDIT = 'admin_audit';
@@ -230,6 +230,30 @@ async function actionWhoami(openid) {
   };
 }
 
+/** 首屏身份：只读本人资料，不等平台统计和历史流水。 */
+async function actionIdentity(openid) {
+  const u = await loadUserByOpenid(openid);
+  return { code: 0, data: {
+    version: ADMIN_VERSION, loggedIn: !!u, isAdmin: isAdminUser(u),
+    isSuper: !!u && u.role === 'super', claimEnabled: !!process.env.ADMIN_CLAIM_CODE,
+    me: u ? publicUser(u) : null,
+  } };
+}
+
+async function actionOverview(openid) {
+  const auth = await requireAdmin(openid);
+  if (!auth.ok) return { code: -1, msg: auth.msg };
+  const [userCount, adminCount, unlimitedCount, totalGen] = await Promise.all([
+    db.collection(COL_USER).count(),
+    db.collection(COL_USER).where({ role: db.command.in(['admin', 'super']) }).count(),
+    db.collection(COL_USER).where({ unlimited: true }).count(),
+    generationCount(db, auth.user),
+  ]);
+  return { code: 0, data: { stats: {
+    users: userCount.total || 0, admins: adminCount.total || 0, unlimited: unlimitedCount.total || 0,
+  }, totalGen } };
+}
+
 /**
  * 认领超级管理员。
  * 只有环境变量 ADMIN_CLAIM_CODE 配了、且这个码还没被用过时才成功。
@@ -279,7 +303,7 @@ async function actionSearchUsers(actorOpenid, event) {
   if (!auth.ok) return { code: -1, msg: auth.msg };
   const kw = String((event && event.keyword) || '').trim();
   const page = Math.max(1, Math.min(100000, Math.floor(Number(event && event.page) || 1)));
-  const pageSize = 20;
+  const pageSize = 10;
   const query = kw
     ? db.collection(COL_USER).where({ nickname: db.RegExp({ regexp: kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), options: 'i' }) })
     : db.collection(COL_USER);
@@ -619,6 +643,8 @@ exports.main = async (event, context) => {
         const user = await loadUserByOpenid(openid);
         return { code: 0, data: { isAdmin: isAdminUser(user) } };
       }
+      case 'identity': return await actionIdentity(openid);
+      case 'overview': return await actionOverview(openid);
       case 'whoami': return await actionWhoami(openid);
       case 'claim': return await actionClaim(openid, event);
       case 'searchUsers': return await actionSearchUsers(openid, event);

@@ -105,6 +105,10 @@
       </view>
     </view>
 
+    <view class="card" wx:if="{{hasMore || loadingMore}}" bindtap="loadMore">
+      <view class="empty-sub" style="text-align:center">{{loadingMore ? '正在加载更多订单…' : '继续上滑查看更早订单'}}</view>
+    </view>
+
     <!-- 空态 -->
     <view class="card" wx:if="{{!loading && !list.length}}">
       <view class="empty">

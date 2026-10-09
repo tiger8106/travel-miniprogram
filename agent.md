@@ -33,8 +33,9 @@
 
 ### 后台、权限、配置、部署
 
-- 管理员身份查 `users.role`，不限量授权查 `users.unlimited`，不硬编码 openid；分页数据与总量分开核对，每页最多 20 条。生成次数按**最终成功入库**统计，既不能漏计后台接力，也不能在失败/重试中重复计数。
+- 管理员身份查 `users.role`，不限量授权查 `users.unlimited`，不硬编码 openid；大量用户与历史订单采用**服务端小批读取、前端单页滚动追加**，禁止回退到一次性全量读取或上一页/下一页翻页界面。生成次数按**最终成功入库**统计，既不能漏计后台接力，也不能在失败/重试中重复计数。
 - 管理入口首帧可读**按 openid 隔离的上次服务端身份提示**，后台用轻量角色接口校准；不要每次进页先清空入口再等全站统计返回。此缓存只改善展示，管理页与每个写操作仍须云端重新鉴权；退出、换账号、角色变更需核对缓存更新。
+- 额度、订单、行程详情和管理页有可信的按账号快照时，首帧先恢复，网络请求后台校准；独立数据源不要互相串行阻塞（例如订单列表不能先等支付补发、额度不能等邀请信息）。管理员面板快照只能缓存已脱敏的服务端值，不缓存配置输入中的未保存密钥；身份被撤销时清除快照。头像可保存小程序本地展示文件，云 fileID 仍是资料来源，退出/换账号需清理本地文件引用。
 - `cloudCfg.js` 在多个云函数目录有副本，改配置下发要同步并跑绑定检查；密钥只存云函数环境变量或受控配置。开发者工具选择的 AppID、云环境、登录账号必须一致；开发版无法直接等同生产版。
 - **上传函数和上传触发器是两步。** `sendAlarm`、`genWorker`、`parseWorker` 均先右键云函数**目录**上传部署，再右键同一目录“上传触发器”，控制台核对启用状态；`config.json` 是配置文件，不必右键它。新环境要重建/上传触发器；本地 commit 不等于部署。工具菜单变化时以云开发控制台实际状态为准。
 - 新增后台 worker 时核对函数超时、环境变量、云数据库集合/索引、云函数权限、触发器 cron、租约过期恢复和日志版本。没有触发器时，前台看似正常但退出后不会继续。
@@ -61,7 +62,7 @@
 | 云函数、触发器、环境 | [上线部署清单](上线部署清单.md)、[外部资源与配置总览](外部资源与配置总览.md) | 控制台版本和触发器状态 |
 | 上传解析、酒店、定位 | [开发与回归注意事项](开发与回归注意事项.md)、`cloudfunctions/parseTravelPlan/` | `test-parse-background.js`、`test-hotel-stays.js`、`test-upload-geocode.js` |
 | 新攻略大纲/详细生成 | `cloudfunctions/generatePlan/`、[开发与回归注意事项](开发与回归注意事项.md) | `test-generation-completion.js`、`test-generate.js --unit` |
-| 首页选择、冷启动首帧与账号隔离 | `miniprogram/app.js`、`miniprogram/pages/index/`、`utils/homecache.js` | `test-home-selection.js`、`test-first-frame-cache.js` |
-| 管理、额度和提醒 | [管理后台使用说明](管理后台使用说明.md) | `test-admin-role-fast.js`、`test-admin-pagination.js`、`test-hotel-reminder-placement.js`、`test-quota.js`、`test-alarm-state.js`、`test-booking-sync.js` |
+| 首页选择、冷启动首帧与账号隔离 | `miniprogram/app.js`、`miniprogram/pages/index/`、`utils/homecache.js` | `test-home-selection.js`、`test-first-frame-cache.js`、`test-itinerary-first-frame.js` |
+| 管理、额度、订单和提醒 | [管理后台使用说明](管理后台使用说明.md) | `test-progressive-pages.js`、`test-avatar-cache.js`、`test-order-scroll.js`、`test-admin-role-fast.js`、`test-admin-pagination.js`、`test-hotel-reminder-placement.js`、`test-quota.js`、`test-alarm-state.js`、`test-booking-sync.js` |
 
 `截图/国庆七天广西旅游攻略.docx` 是上传解析的真实回归样本。`scripts/test-parse-word-live.js` 会调用项目配置的大模型；运行前确认密钥与费用，验收时逐日核对酒店、非连续入住归并和返程日无酒店。`node scripts/check-bindings.js` 是通用基线；若受环境限制出现子进程 `EBUSY`，单独用 `node --check` 验证相关文件，不能把环境错误写成代码通过或失败。

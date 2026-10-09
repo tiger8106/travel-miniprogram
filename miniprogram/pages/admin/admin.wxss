@@ -364,6 +364,4 @@
   font-weight: 400;
   color: #6b7386;
 }
-.user-pagination { display: flex; align-items: center; justify-content: space-between; gap: 12rpx; color: #aeb4ca; font-size: 23rpx; margin: 20rpx 0; }
-.page-btn { padding: 12rpx 18rpx; border-radius: 10rpx; background: #2b3050; color: #fff; }
-.page-disabled { opacity: .4; }
+.user-pagination { text-align: center; color: #aeb4ca; font-size: 23rpx; margin: 20rpx 0; padding: 16rpx; }

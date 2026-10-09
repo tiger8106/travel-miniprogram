@@ -79,10 +79,10 @@ async function loadOrder(outTradeNo) {
   return (res.data && res.data[0]) || null;
 }
 
-async function loadOrderByOpenid(openid, limit) {
+async function loadOrderByOpenid(openid, limit, skip) {
   await ensureColl(COL_ORDER);
   const res = await db.collection(COL_ORDER)
-    .where({ _openid: openid }).orderBy('createdAt', 'desc').limit(limit || 20).get();
+    .where({ _openid: openid }).orderBy('createdAt', 'desc').skip(skip || 0).limit(limit || 20).get();
   return res.data || [];
 }
 
@@ -612,9 +612,15 @@ function userOrderNoticeType(order) {
     || [5, 8].includes(Number(order.platformStatus))) ? 'warning' : 'normal';
 }
 
-async function actionOrderList(openid) {
+async function actionOrderList(openid, event) {
   // 包含取消订单，方便用户确认自己的购买状态。
-  const list = await loadOrderByOpenid(openid, 50);
+  // 旧小程序不传 page，仍返回原来的最近 50 笔；新版显式传页码才小批读取。
+  const paged = event && event.page !== undefined;
+  const pageSize = paged ? 10 : 50;
+  const page = Math.max(1, Math.min(100000, Math.floor(Number(event && event.page) || 1)));
+  const rows = await loadOrderByOpenid(openid, pageSize + (paged ? 1 : 0), (page - 1) * pageSize);
+  const hasMore = paged && rows.length > pageSize;
+  const list = rows.slice(0, pageSize);
   const money = (fen) => {
     const n = Number(fen || 0);
     return `¥${(n / 100).toFixed(n % 100 === 0 ? 0 : 2)}`;
@@ -622,6 +628,7 @@ async function actionOrderList(openid) {
   return {
     code: 0,
     data: {
+      page, pageSize, hasMore,
       list: (list || []).map((o) => {
         const g = R.goodsById(o.goodsId);
         return {
@@ -857,7 +864,7 @@ function actionDiag() {
   return {
     code: 0,
     data: {
-      version: 'v1.2-reconcile',
+      version: 'v1.3-order-scroll',
       env: ENV,
       envText: ENV === 1 ? '沙箱（安卓可自测）' : '现网',
       offerId: OFFER_ID ? `${OFFER_ID.slice(0, 4)}****` : '',
@@ -928,7 +935,7 @@ exports.main = async (event, context) => {
     if (action === 'createOrder') return await actionCreateOrder(openid, event);
     if (action === 'confirm') return await actionConfirm(openid, event);
     if (action === 'sync') return await actionSync(openid);
-    if (action === 'orderList') return await actionOrderList(openid);
+    if (action === 'orderList') return await actionOrderList(openid, event);
     if (action === 'adminLedger') return await actionAdminLedger(openid, event);
     if (action === 'repay') return await actionRepay(openid, event);
     if (action === 'cancelOrder') return await actionCancelOrder(openid, event);

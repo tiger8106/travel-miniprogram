@@ -33,6 +33,8 @@ vm.runInNewContext(fs.readFileSync('miniprogram/pages/mine/mine.js', 'utf8'), {
   require(name) {
     if (name.endsWith('/auth')) return auth;
     if (name.endsWith('/admin-role')) return adminRole;
+    if (name.endsWith('/homecache')) return { readPage: () => null };
+    if (name.endsWith('/avatar-cache')) return { cached: () => '', warm: async () => '' };
     if (name.endsWith('/quota')) return { info: async () => null };
     if (name.endsWith('/privacy')) return { diagnose: async () => {}, ensure: async () => true };
     return {};

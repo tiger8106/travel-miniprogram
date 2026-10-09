@@ -49,7 +49,7 @@
                bindinput="onKeywordInput" confirm-type="search" bindconfirm="onSearch" />
         <view class="search-btn" bindtap="onSearch">搜索</view>
       </view>
-      <view wx:if="{{!users.length}}" class="empty">没有匹配的用户</view>
+      <view wx:if="{{!users.length && loadedTabs.users && !loadingUsers}}" class="empty">没有匹配的用户</view>
       <view wx:for="{{users}}" wx:key="userId" class="user-card">
         <view class="user-top">
           <view class="user-main">
@@ -68,10 +68,8 @@
                 data-index="{{index}}" bindtap="onMakeAdmin">设为管理员</view>
         </view>
       </view>
-      <view class="user-pagination" wx:if="{{userTotalPages > 1}}">
-        <view class="page-btn {{userPage <= 1 ? 'page-disabled' : ''}}" bindtap="onUserPrev">上一页</view>
-        <text>第 {{userPage}} / {{userTotalPages}} 页 · 共 {{userTotal}} 人</text>
-        <view class="page-btn {{userPage >= userTotalPages ? 'page-disabled' : ''}}" bindtap="onUserNext">下一页</view>
+      <view class="user-pagination" wx:if="{{userTotalPages > 1 || loadingUsers}}" bindtap="loadMoreUsers">
+        <text>{{loadingUsers ? '正在加载更多用户…' : (userPage < userTotalPages ? '继续上滑查看 · 共 ' + userTotal + ' 人' : '已显示全部 ' + userTotal + ' 人')}}</text>
       </view>
     </view>
 
@@ -86,7 +84,7 @@
         <view>平台标记结算 {{paymentSummary.settled}} 笔 · 实付 {{paymentSummary.settledGross}}</view>
         <view>扣除平台字段费用估算 {{paymentSummary.settledNetEstimate}}，不等于实际到账</view>
       </view>
-      <view wx:if="{{!paymentOrders.length}}" class="empty">暂无本地订单；请核对云环境、AppID 和支付渠道。</view>
+      <view wx:if="{{!paymentOrders.length && loadedTabs.payments}}" class="empty">暂无本地订单；请核对云环境、AppID 和支付渠道。</view>
       <view wx:for="{{paymentOrders}}" wx:key="outTradeNo" class="user-card payment-order">
         <view class="user-name">{{item.amountText}} · {{item.goodsId}}</view>
         <view class="user-meta">{{item.timeText}} · 本地 {{item.status}} · {{item.platformText}}</view>
@@ -186,7 +184,7 @@
     <!-- ④ 日志 -->
     <view wx:else class="panel">
       <view wx:if="{{isSuper && logs.length}}" class="danger-btn" bindtap="onClearLogs">🗑 清空日志</view>
-      <view wx:if="{{!logs.length}}" class="empty">暂无操作记录</view>
+      <view wx:if="{{!logs.length && loadedTabs.audit}}" class="empty">暂无操作记录</view>
       <view wx:for="{{logs}}" wx:key="ts" class="log-row">
         <view class="log-main">
           <text class="log-action">{{item.actionText}}</text>

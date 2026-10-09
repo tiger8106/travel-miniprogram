@@ -37,9 +37,14 @@ const jsFiles = [
   'pages/planner/planner.js',
   'pages/mytrips/mytrips.js',
   'pages/mine/mine.js',
+  'pages/pay/pay.js',
+  'pages/orders/orders.js',
+  'pages/admin/admin.js',
   'utils/genrunner.js',
   'utils/admin-role.js',
+  'utils/avatar-cache.js',
   'utils/auth.js',
+  'utils/quota.js',
   'utils/eta.js',
   'utils/cloud.js',
   'utils/request.js',
@@ -606,7 +611,7 @@ const ordersPageJs = fs.readFileSync(path.join(MP, 'pages/orders/orders.js'), 'u
 ok('订单中心：云函数提供 orderList 且只返回本人订单',
   /action === 'orderList'/.test(payIdx) && /loadOrderByOpenid/.test(payIdx));
 ok('订单中心：订单页已创建并在 app.json 注册，付费页有入口',
-  /quota\.orderList\(\)/.test(ordersPageJs)
+  /quota\.orderList\(\s*1\s*\)/.test(ordersPageJs)
     && /pages\/orders\/orders/.test(appJson2)
     && /onTapOrders/.test(payPageJs) && /onTapOrders/.test(payPageWxml));
 

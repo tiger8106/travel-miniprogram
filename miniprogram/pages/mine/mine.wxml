@@ -15,10 +15,10 @@
       <!-- 头像：button 自己当圆形容器（官方 chooseAvatar 写法）。
            注意 chooseAvatar 是隐私接口，未同意隐私指引时点击会被微信静默拦截 -->
       <button class="avatar-btn" open-type="chooseAvatar" bindchooseavatar="onChooseAvatar">
-        <image wx:if="{{profile.avatarUrl}}" src="{{profile.avatarUrl}}" class="avatar-img" mode="aspectFill" />
-        <view wx:else class="avatar-placeholder">
+        <view class="avatar-placeholder">
           <text class="avatar-emoji">🐯</text>
         </view>
+        <image wx:if="{{avatarView}}" src="{{avatarView}}" class="avatar-img" mode="aspectFill" binderror="onAvatarError" />
       </button>
       <view class="profile-info">
         <!-- 昵称行内直接编辑（微信官方 nickname 输入框；真机键盘上方有「使用微信昵称」） -->
