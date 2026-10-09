@@ -18,7 +18,8 @@ const outline = { executionSuggestions: {}, days: Array.from({ length: 6 }, (_, 
 const collections = { trips: [{ _id: 'trip', _openid: 'user', sourceType: 'ai', genStatus: 'generating',
   items: [0, 1, 2, 3].map((di) => row(di, true)), genProgress: { done: 4, total: 6 } }],
 gen_jobs: [{ _id: 'job', _openid: 'user', tripId: 'trip', status: 'running', round: 4,
-  createdAt: Date.now(), updatedAt: Date.now(), leaseUntil: 0, schedDone: true, input: Object.assign({}, input, { outline }), attempts: {} }] };
+  createdAt: Date.now(), updatedAt: Date.now(), leaseUntil: 0, schedDone: true, hotelDone: false,
+  input: Object.assign({}, input, { outline }), attempts: {} }] };
 let tripReadError = null;
 const db = { command: { lt: (value) => ({ lt: value }) }, collection(name) {
   const rows = collections[name] || (collections[name] = []);
@@ -49,12 +50,22 @@ const db = { command: { lt: (value) => ({ lt: value }) }, collection(name) {
   };
 } };
 let buildCalls = 0;
+let outlineCalls = 0;
 const fakeCloud = { init() {}, DYNAMIC_CURRENT_ENV: 'test', getWXContext: () => ({ OPENID: 'user' }),
   database: () => db, callFunction: async () => ({ result: { code: 0, data: {} } }) };
 const originalLoad = Module._load;
 Module._load = function (request, parent, isMain) {
   if (request === 'wx-server-sdk') return fakeCloud;
   if (parent && /generatePlan\/index\.js$/.test(parent.filename) && request === './plan') return Object.assign({}, P, {
+    generateOutline: async (profile, options) => {
+      outlineCalls++;
+      assert.equal(collections.gen_jobs.find((entry) => entry.kind === 'outline').outlineAttempts, outlineCalls,
+        '模型请求前须记录尝试次数，以便硬超时后续跑');
+      if (outlineCalls === 1) throw new Error('模拟大纲首轮超时');
+      assert(options.compact, '续跑大纲应采用更短输出');
+      return { outline: copy(outline), title: '续跑后大纲', summary: '可编辑路线',
+        startDate: profile.startDate, endDate: profile.endDate, days: 6 };
+    },
     buildPlan: async (profile, data, opts) => {
       buildCalls++;
       assert(opts.preservePublishedDays);
@@ -67,6 +78,9 @@ Module._load = function (request, parent, isMain) {
     },
   });
   if (parent && /generatePlan\/index\.js$/.test(parent.filename) && request === './schedule') return { canLookupSchedules: () => false, canSearch: () => false };
+  if (parent && /generatePlan\/index\.js$/.test(parent.filename) && request === './hotel-validation') {
+    return { validateOutlineHotels: async (result) => result };
+  }
   return originalLoad.call(this, request, parent, isMain);
 };
 const generate = require('../cloudfunctions/generatePlan/index');
@@ -76,6 +90,9 @@ Module._load = originalLoad;
 (async () => {
   const trip = collections.trips[0], job = collections.gen_jobs[0];
   let result = await generate.main({ action: 'resume', jobId: 'job', expectRound: 4, runnerId: 'test' });
+  assert.equal(result.code, 0); assert.equal(job.hotelDone, true);
+  assert.equal(buildCalls, 0, '酒店核验须占独立一轮，不能挤进细化轮');
+  result = await generate.main({ action: 'resume', jobId: 'job', expectRound: job.round, runnerId: 'test' });
   assert.equal(result.code, 0); assert.equal(trip.items.length, 4); assert.equal(trip.genProgress.done, 4);
   assert.equal(job.status, 'running', '生成器误报完成仍以已发布天数为准');
   assert.equal(trip.genDraftItems.length, 1); assert.equal(trip.genDraftItems[0].dayIndex, 4);
@@ -94,6 +111,22 @@ Module._load = originalLoad;
   assert(trip.items.some((it) => it.dayIndex === 5 && /待确认/.test(it.note)));
   assert.equal(trip.genWarningCount, 1);
   console.log('✓ 实际云函数续跑：候选隐藏、4→5→6进度不回退、限时收尾完整且备注待确认');
+
+  const tripCount = collections.trips.length;
+  const madeOutline = await generate.main(Object.assign({ action: 'outlineStart' }, input));
+  assert.equal(madeOutline.code, 0);
+  const outlineJobId = madeOutline.data.jobId;
+  assert.equal((await generate.main({ action: 'jobStatus' })).data.job, null,
+    '大纲任务不能出现在详细行程进度列表');
+  let outlineRun = await generate.main({ action: 'resume', jobId: outlineJobId, expectRound: 0, runnerId: 'outline-test' });
+  assert.equal(outlineRun.data.status, 'running');
+  assert.equal(collections.trips.length, tripCount, '大纲超时不能创建详细行程');
+  outlineRun = await generate.main({ action: 'resume', jobId: outlineJobId, expectRound: 1, runnerId: 'outline-test' });
+  assert.equal(outlineRun.data.status, 'done');
+  const savedOutline = await generate.main({ action: 'outlineStatus', jobId: outlineJobId });
+  assert.equal(savedOutline.data.outlineResult.outline.days.length, 6);
+  assert.equal(collections.trips.length, tripCount, '大纲完成仍需用户确认才可细化');
+  console.log('✓ 大纲首轮超时后自动续跑，保存并返回可编辑大纲，无自动入库');
 
   Object.assign(job, { status: 'failed', revivals: 2, round: 30, createdAt: Date.now() - 3600000, leaseUntil: 0 });
   Object.assign(trip, { genStatus: 'failed' });
@@ -189,16 +222,30 @@ Module._load = originalLoad;
   assert.equal(Pub.publicationState({ items: [row(0, true)] }, { items: [row(0)] }, outline).progress.done, 1);
   const legacy = Pub.publicationState({ items: [row(0, true), row(1)] }, { items: [], partial: true }, outline);
   assert.equal(legacy.progress.done, 1); assert.equal(legacy.pending.length, 1, '旧未复核内容迁移为候选而非丢弃重做');
-  let page, submitted;
+  let page, submitted, outlineShouldTimeout = false, timedOut = false;
+  const localStorage = new Map();
   const outlineResponse = { title: '原路线标题', summary: '原摘要', outline: { days: [
     { d: '2026-12-20', t: '抵达', city: '甲城', ov: '甲城', hl: ['甲景点'], mv: [{ f: '起点站', to: '终点站', s: '13:00', e: '16:00' }], hotel: '原酒店' },
     { date: '2026-12-21', theme: '返程', city: '乙城', overnight: '返程', highlights: ['乙景点'], moves: [], sched: [{ code: '官方班次' }] },
   ] } };
   vm.runInNewContext(fs.readFileSync('miniprogram/pages/planner/planner.js', 'utf8'), {
-    Date, Math, setInterval: () => 1, clearInterval() {}, Page(value) { page = value; },
-    getApp: () => ({ globalData: {} }), wx: { showToast() {} },
+    Date, Math, setInterval: () => 1, clearInterval() {}, setTimeout(callback) { callback(); }, Page(value) { page = value; },
+    getApp: () => ({ globalData: {} }), wx: {
+      showToast() {}, getStorageSync(key) { return localStorage.get(key); },
+      setStorageSync(key, value) { localStorage.set(key, value); }, removeStorageSync(key) { localStorage.delete(key); },
+    },
     require(name) {
-      if (name.includes('services/api')) return { generateOutline: async () => copy(outlineResponse) };
+      if (name.includes('/auth')) return { requireLogin: async () => true };
+      if (name.includes('services/api')) return {
+        startOutline: async () => ({ jobId: 'outline-job', round: 0 }),
+        outlineStatus: async () => outlineShouldTimeout && !timedOut
+          ? { status: 'running', round: 0, resumable: true }
+          : { status: 'done', outlineResult: copy(outlineResponse) },
+        resumeOutline: async () => {
+          timedOut = true;
+          throw new Error('「generatePlan」本轮执行超时');
+        },
+      };
       if (name.includes('/eta')) return { estimate: () => 1000, footerText: () => '', record() {} };
       if (name.includes('/genrunner')) return { subscribe: () => () => {}, start: async (payload) => {
         submitted = payload; return { partial: true, tripId: 'new-trip' };
@@ -215,9 +262,24 @@ Module._load = originalLoad;
     if (callback) callback();
   };
   page.data = copy(page.data);
+  page._outlineToken = 0;
+  page._destroyed = false;
   Object.assign(page.data, { origin: input.origin, dest: input.dest, startDate: input.startDate, endDate: input.endDate,
     goTime: '12:00', backTime: '17:00', extra: '已购票，优先公共交通', interestItems: [{ name: '当地美食', on: true }] });
   page._input = page.buildInput();
+  outlineShouldTimeout = true;
+  await page.genOutline();
+  assert(timedOut, '第一轮大纲请求应模拟 60 秒超时');
+  assert.equal(page.data.step, 'outline', '超时续跑完成后仍须展示可编辑大纲');
+  assert.equal(page.data.generating, false);
+  assert.equal(submitted, undefined, '未确认大纲不得启动详情生成');
+  localStorage.set('planner_outline_job', { jobId: 'outline-job', input: page._input });
+  page.setData({ step: 'form', outline: null });
+  await page.onShow();
+  assert.equal(page.data.step, 'outline', '返回页面后仍能恢复并展示后台完成的大纲');
+  assert.equal(localStorage.has('planner_outline_job'), false);
+  outlineShouldTimeout = false;
+  timedOut = false;
   await page.genOutline();
   assert.deepStrictEqual(copy(page.data.outline), outlineResponse.outline, '去掉拖动不改模型原始大纲');
   assert.deepStrictEqual(page.data.outlineDays.map((day) => day.date).join(','), '2026-12-20,2026-12-21');

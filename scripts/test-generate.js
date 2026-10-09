@@ -107,7 +107,10 @@ ok(!!hotelReminder && /随时提前预订/.test(hotelReminder.note) && /酒店�
   '酒店提醒说明可随时预订并指向酒店分类', hotelReminder && hotelReminder.note);
 
 // 4b. 开票日已过但行程未出发 → 降级成"赶紧去抢"的近期提醒（用户临时才规划的常见场景）
-const late = buildFallbackAlarms({ startDate: '2026-09-30', endDate: '2026-10-07' }, mkOutline('2026-09-30', '2026-10-07'));
+const chinaToday = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
+const lateStart = shiftDate(chinaToday, 7);
+const lateEnd = shiftDate(chinaToday, 14);
+const late = buildFallbackAlarms({ startDate: lateStart, endDate: lateEnd }, mkOutline(lateStart, lateEnd));
 ok(late.every((a) => a.fireAt > Date.now()), '开票日已过时，闹钟被顺延到现在之后而不是消失', late.length);
 ok(late.some((a) => ['train', 'plane', 'bus', 'ticket'].includes(a.type)
   && a.fireAt < Date.now() + 10 * 60 * 1000
@@ -118,9 +121,9 @@ ok(late.some((a) => ['train', 'plane', 'bus', 'ticket'].includes(a.type)
 const clean = sanitizeAlarmCandidates([
   { title: '过去的票', fireAt: '2020-01-01 09:00', type: 'train' },
   { title: '行程结束后', fireAt: '2030-01-01 09:00', type: 'train' },
-  { title: '未来的票', fireAt: '2026-10-06 09:00', type: 'train' },
-  { title: '未来的票', fireAt: '2026-10-06 09:00', type: 'train' }, // 重复
-], { startDate: '2026-09-30', endDate: '2026-10-07' });
+  { title: '未来的票', fireAt: `${shiftDate(chinaToday, 9)} 09:00`, type: 'train' },
+  { title: '未来的票', fireAt: `${shiftDate(chinaToday, 9)} 09:00`, type: 'train' }, // 重复
+], { startDate: lateStart, endDate: lateEnd });
 ok(clean.length === 1 && clean[0].title === '未来的票', '闹钟清洗：过去/超期/重复各被拦掉', clean.length);
 const typedBookingAlarms = P.normalizeBookingAlarmKinds([
   { type: 'ticket', title: '预约2027-01-02 乘坐包车前往毕棚沟游客中心', dayIndex: 0, linkedItemId: 'chauffeur' },

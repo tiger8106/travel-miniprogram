@@ -1553,7 +1553,7 @@ function warnDetourTransfers(outline) {
   return outline;
 }
 
-async function genOutline(p) {
+async function genOutline(p, opts = {}) {
   // 交通偏好的硬约束：用户选了「高铁/动车优先」就全程不许飞（长距离也一样），
   // 改走近目的地的高铁站 + 短途接驳；选了自驾出行则全程由用户本人驾驶。
   const railFirst = /高铁|动车/.test(p.transport);
@@ -1634,14 +1634,29 @@ ${lijiangCruiseRule ? `0.8 **漓江游船专门约束**：${lijiangCruiseRule}` 
    7.4 **全程体验要差异化（铁律）**：同一类餐饮（如火锅、烧烤、米粉、小吃）全程**最多安排 2 次**，同一类游览体验（如古镇老街、博物馆、夜市、山岳徒步、主题乐园）也**最多 2 次**。多天行程时每天换花样：逛了老街就换个公园/展馆，吃了火锅就换家常菜/地方菜，让用户每天有新鲜感，而不是换了个地方重复同一种玩法。
    7.3 **市内/短途交通按预算选型**：预算以用户填写的「${p.budget}」为准。经济实惠→ 3km 内步行、地铁/公交/景区接驳优先，打车只留给公共交通到不了或明显不便的路段；舒适适中→ 轨道交通优先，赶时间或携带行李且公共交通不便时打车/包车；品质优选→ 可增加打车/包车。除用户选择「自驾出行」或补充要求点名路段外，不安排用户本人开车。选定的基调写进当天 n 提示。
 8. ov 写住宿城市或片区（最后一天写"返程"）；h 每晚一家；nt 长度 = ${p.days - 1} 晚。
-9. 所有文本简体中文，n 字段控制在 30 字以内。只输出 JSON 对象。`;
+9. 所有文本简体中文，n 字段控制在 30 字以内。只输出 JSON 对象。
+${opts.compact ? '【本轮限时续跑】优先确保所有日期和路线完整：每一天 hl 至多 2 个，ml 置空数组，h 置空字符串，n 控制在 12 字以内；保持用户点名地点覆盖、每日住宿地和跨城交通完整。' : ''}`;
 
-  // 大纲是单独一次云函数调用（60s 上限），留 8s 给返回，单次最多等 52s
+  // 长行程或超时续跑改用真正的短提示词与短输出，避免重发上一轮同样的
+  // 大请求并再次撞上 60 秒。详细餐饮、酒店与执行信息在用户确认后补齐。
+  const requestPrompt = opts.compact || p.days >= 10
+    ? `为旅行需求生成完整路线大纲，只输出 JSON，不要解释。
+需求：${profileText(p)}
+日期：${p.startDate} 至 ${p.endDate}，恰好 ${p.days} 天。出发地 ${p.origin}，末日返回出发地。
+路线按地理顺序单向串联；每天住宿地 ov 是次日出发地，同片区可连住；用户点名地点都必须安排游玩，不得跨天重复景点。${modeRule}
+${p.mustVisit && p.mustVisit.length ? `必去：${p.mustVisit.join('、')}。` : ''}
+${p.extra ? `补充要求：${p.extra}` : ''}
+去程从家出发 ${p.goTime || '合理时刻'}，返程到家 ${p.backTime || '合理时刻'}；列车车次不确定就留空。
+输出格式：{"t":"标题","s":"路线概览","ds":[{"d":"YYYY-MM-DD","city":"城市","t":"主题","mv":[{"f":"起点","to":"终点","m":"train/plane/car/bus/ship","c":"车次或空","s":"HH:mm","e":"HH:mm"}],"hl":["具体景点1","具体景点2"],"ml":[],"ov":"当晚住宿地；末日填返程","h":"","n":"12字内提示"}]}。
+ds 必须包含连续全部 ${p.days} 天；每一天最多 2 个 hl，ml 为空数组、h 为空字符串，减少输出篇幅。`
+    : prompt;
+
+  // 大纲是单独一次云函数调用（60s 上限），给解析与返回留足时间。
   // 注意：不传 max_tokens —— 天数多的时候大纲本来就长，封顶会把后面几天从中间掐断
-  const outlineDeadline = Date.now() + 52 * 1000;
+  const outlineDeadline = Date.now() + 50 * 1000;
   const text = await llm.chatWithRetry([
     { role: 'system', content: SYS_PROMPT },
-    { role: 'user', content: prompt },
+    { role: 'user', content: requestPrompt },
   ], { deadline: outlineDeadline });
 
   // 去程开始 / 返程到达时刻由代码兜底对齐（LLM 自己常常不照办）
@@ -10082,7 +10097,7 @@ async function generateOutline(rawInput, opts = {}) {
   const p = normalizeInput(rawInput);
   if (!p.dest) throw new Error('请填写目的地');
   const t0 = Date.now();
-  const outline = await genOutline(p);
+  const outline = await genOutline(p, opts);
   ensureOvernightMoveContinuity(outline, p);
   enforceLongjiSameDayRoute(outline, p);
   alignOutlineMoveTimes(outline);

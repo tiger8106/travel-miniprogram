@@ -301,6 +301,16 @@ module.exports = {
   refreshSuggestions,
   getDayTips,
   generateOutline,
+  startOutline: async function (input) {
+    this._outlineResult = await generateOutline(input);
+    return { jobId: 'mock-outline', status: 'running', round: 0 };
+  },
+  outlineStatus: async function () {
+    return { jobId: 'mock-outline', status: 'done', outlineResult: this._outlineResult };
+  },
+  resumeOutline: async function () {
+    return { jobId: 'mock-outline', status: 'done', outlineResult: this._outlineResult };
+  },
   buildPlan,
   // mock 模式没有真实云函数，体检直接返回"全部就绪"，方便本地跑通界面
   generateDiag: async function () {

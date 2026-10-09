@@ -106,6 +106,18 @@ async function generateOutline(input) {
   return callFn('generatePlan', Object.assign({ action: 'outline' }, input));
 }
 
+async function startOutline(input) {
+  return callFn('generatePlan', Object.assign({ action: 'outlineStart' }, input));
+}
+
+async function outlineStatus(jobId) {
+  return callFn('generatePlan', { action: 'outlineStatus', jobId });
+}
+
+async function resumeOutline(jobId, round, runnerId) {
+  return resumeGen(jobId, round, runnerId);
+}
+
 async function buildPlan(input, outlineData) {
   return callFn('generatePlan', Object.assign({ action: 'build' }, input, outlineData));
 }
@@ -239,6 +251,9 @@ module.exports = {
   refreshSuggestions,
   getDayTips,
   generateOutline,
+  startOutline,
+  outlineStatus,
+  resumeOutline,
   buildPlan,
   generateDiag,
   startGen,

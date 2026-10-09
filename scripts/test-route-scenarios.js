@@ -767,7 +767,13 @@ async function runOfflineScenario(scenario) {
       && bookedAlarms.some((alarm) => alarm.type === 'ticket' && /德天/.test(`${alarm.title} ${alarm.bookingInfo}`))) {
     issues.push('已预约德天瀑布门票仍生成提醒');
   }
-  if (!bookedAlarms.some((alarm) => alarm.type === 'hotel')) issues.push('已购票状态误删了酒店尽早预订提醒');
+  // 历史行程已结束时不会再生成“尽早预订”的提醒；旧夹具跨过出行日期后
+  // 仍要求存在酒店提醒，会把正常的过期过滤误报成产品回归。
+  const chinaToday = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
+  const tripStillUpcoming = scenario.input.endDate >= chinaToday;
+  if (tripStillUpcoming && !bookedAlarms.some((alarm) => alarm.type === 'hotel')) {
+    issues.push('已购票状态误删了酒店尽早预订提醒');
+  }
   if (!scenario.name.startsWith('桂林')
       && !bookedAlarms.some((alarm) => alarm.type === 'ticket' && /毕棚沟/.test(`${alarm.title} ${alarm.bookingInfo}`))) {
     issues.push('毕棚沟门票未购却没有保留门票提醒');

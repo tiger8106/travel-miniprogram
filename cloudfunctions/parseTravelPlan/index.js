@@ -657,6 +657,8 @@ async function handleStep(event, ctx) {
         items,
         alarms,
         addrList: [...addrSet],
+        geoNextIndex: 0,
+        coords: {},
         startDate,
         endDate,
       });
@@ -668,25 +670,32 @@ async function handleStep(event, ctx) {
       const task = await loadTask(db, event.taskId, openid);
       const region = String(task.region || '').trim();
       const coords = task.coords || {};
-      const pending = (task.addrList || []).filter((a) => a && !coords[a]);
-      if (!pending.length) return { code: 0, remaining: 0, done: true };
+      const addresses = task.addrList || [];
+      // 游标记录“已尝试”，不是“已命中”。未命中可靠 POI 的地点也必须推进，
+      // 否则每轮都会重试同一批地点，remaining 永远大于 0。
+      let nextIndex = Math.max(0, Math.min(addresses.length, Number(task.geoNextIndex) || 0));
+      if (nextIndex >= addresses.length) return { code: 0, remaining: 0, done: true };
 
       const t0 = Date.now();
       let processed = 0;
-      for (const addr of pending) {
+      for (; nextIndex < addresses.length;) {
         // 逐个地址检查墙钟：单条 geocodeOne 最坏十几秒，超预算就停下、写库、下次接着跑
         if (Date.now() - t0 > GEOCODE_DEADLINE_MS) break;
+        const addr = addresses[nextIndex];
         try {
           // 传整串 region（「广西 桂林 阳朔 南宁 崇左」），geocodeOne 内部拆候选城市逐个试
-          const c = await geocodeOne(addr, region);
-          if (c) coords[addr] = c;
+          if (addr && !coords[addr]) {
+            const c = await geocodeOne(addr, region, t0 + GEOCODE_DEADLINE_MS);
+            if (c) coords[addr] = c;
+          }
         } catch (e) {
           console.error('[step/geocode] %s 失败（跳过）:', addr, e.message);
         }
+        nextIndex++;
         processed++;
       }
-      await saveTask(db, event.taskId, { coords });
-      const remaining = pending.length - processed;
+      await saveTask(db, event.taskId, { coords, geoNextIndex: nextIndex });
+      const remaining = addresses.length - nextIndex;
       console.log('[step/geocode] 本轮 %d 个，累计命中 %d 个，剩余 %d',
         processed, Object.keys(coords).length, remaining);
       return { code: 0, remaining, processed };

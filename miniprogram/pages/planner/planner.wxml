@@ -127,7 +127,7 @@
                 bindtap="onSubmit" disabled="{{generating}}">
           {{generating ? genTip : '✨ 生成我的攻略'}}
         </button>
-        <view class="footer-tip">出路线大纲 {{outlineEta}}，期间请不要离开页面</view>
+        <view class="footer-tip">出路线大纲 {{outlineEta}}；耗时较长时会自动续跑，回来仍可查看和修改</view>
       </view>
     </block>
 

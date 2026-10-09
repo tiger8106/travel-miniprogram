@@ -41,7 +41,7 @@ const COL_SCHED = 'schedule_cache';
 const SCHED_TTL_MS = 36 * 3600 * 1000;
 
 // 生成引擎版本（用于确认线上跑的是哪一版）
-const GEN_VERSION = 'v2.16-validated-progress-finish';
+const GEN_VERSION = 'v2.17-outline-resume';
 const { publicationState, collectGenerationRows } = require('./publication');
 
 async function generateOutlineWithHotelCheck(input, opts) {
@@ -66,6 +66,7 @@ const JOB_LEASE_MS = 70 * 1000;
 const JOB_MAX_ROUNDS = 24;                 // 生成、知识、修订分轮；上限还按天数扩展
 const JOB_MAX_AGE_MS = 25 * 60 * 1000;      // 单个任务最长 25 分钟
 const JOB_STATUS_TTL_MS = 24 * 3600 * 1000; // 只把最近失败任务展示给前端，避免旧任务挡住新任务
+const OUTLINE_MAX_ATTEMPTS = 5;
 const DEFAULT_ALARM_LEAD_MINUTES = 5;
 
 function runnerIdOf(value) {
@@ -518,6 +519,49 @@ async function loadJob(jobId) {
   }
 }
 
+/** 大纲任务只存路线，不创建行程，也不会自动进入细化。 */
+async function runOutlineRound(job) {
+  const db = cloud.database();
+  const attempt = Number(job.outlineAttempts || 0) + 1;
+  if (attempt > OUTLINE_MAX_ATTEMPTS) {
+    const error = '大纲多次生成超时，请缩短行程或调整需求后重试';
+    await db.collection(COL_JOB).doc(job._id).update({ data: {
+      status: 'failed', error, leaseUntil: 0, leaseOwner: '', updatedAt: Date.now(),
+    } });
+    return { jobId: job._id, status: 'failed', error };
+  }
+  // 先落库再调用模型：云函数若被 60 秒硬杀，catch 根本来不及执行。
+  // 下一轮仍能看到这次尝试，并切换为精简输出。
+  await db.collection(COL_JOB).doc(job._id).update({ data: {
+    outlineAttempts: attempt, updatedAt: Date.now(),
+  } });
+  try {
+    const result = await generateOutline(job.input || {}, { compact: attempt > 1 });
+    const outlineResult = {
+      title: result.title, summary: result.summary,
+      startDate: result.startDate, endDate: result.endDate,
+      days: result.days, outline: result.outline, schedule: null, version: GEN_VERSION,
+    };
+    await db.collection(COL_JOB).doc(job._id).update({ data: {
+      status: 'done', outlineResult,
+      round: Number(job.round || 0) + 1, error: '',
+      leaseUntil: 0, leaseOwner: '', updatedAt: Date.now(),
+    } });
+    return { jobId: job._id, status: 'done', outlineResult };
+  } catch (error) {
+    const failed = attempt >= OUTLINE_MAX_ATTEMPTS;
+    const message = String(error && error.message || error).slice(0, 120);
+    const round = Number(job.round || 0) + 1;
+    await db.collection(COL_JOB).doc(job._id).update({ data: {
+      status: failed ? 'failed' : 'running',
+      round, error: failed ? message : '', leaseUntil: 0, leaseOwner: '', updatedAt: Date.now(),
+    } });
+    console.warn('[generatePlan] 大纲任务 %s 第 %d 次未完成: %s', job._id, attempt, message);
+    return { jobId: job._id, status: failed ? 'failed' : 'running', round,
+      error: failed ? message : '', partial: !failed };
+  }
+}
+
 async function generationTrip(db, tripId) {
   try {
     return await db.collection(COL_TRIP).doc(tripId).get();
@@ -670,6 +714,7 @@ async function runJobRound(openid, job) {
           // overnight；这一步会清空旧酒店，因此必须在路线最终稳定后再核验一次。
           await validateOutlineHotels({ outline: input.outline }, input,
             searchHotelPoi, searchHotelsNearby);
+          job.hotelDone = true;
           console.log('[generatePlan] 班次专轮：命中 %d 段 / 换 %d 段，用时 %dms',
             stat ? stat.segments : 0, stat ? stat.replaced : 0, Date.now() - t0);
         }
@@ -682,6 +727,7 @@ async function runJobRound(openid, job) {
           // applyRealSchedules 原地改写了 outline（day.sched / moves 时刻），要写回
           'input.outline': input.outline,
           schedDone: true,
+          hotelDone: !!job.hotelDone,
           round: (job.round || 0) + 1,
           updatedAt: now,
           leaseUntil: now + JOB_LEASE_MS,
@@ -702,6 +748,31 @@ async function runJobRound(openid, job) {
         version: GEN_VERSION,
       };
     }
+  }
+
+  // 前台大纲不做地图请求；用户确认后独立用一轮核验住宿。
+  // 没有班次检索的路线也必须执行这一轮，且不与逐日细化争用 60 秒预算。
+  if (!job.hotelDone) {
+    await validateOutlineHotels({ outline: input.outline }, input,
+      searchHotelPoi, searchHotelsNearby);
+    const now = Date.now();
+    const round = (job.round || 0) + 1;
+    await db.collection(COL_JOB).doc(job._id).update({
+      data: {
+        'input.outline': input.outline,
+        hotelDone: true,
+        round,
+        updatedAt: now,
+        leaseUntil: now + JOB_LEASE_MS,
+        leaseOwner: runnerId,
+      },
+    });
+    return {
+      jobId: job._id, tripId: job.tripId || '', title: job.title || '',
+      status: 'running', partial: true, round,
+      progress: job.progress || { done: 0, total: (input.outline.days || []).length },
+      itemCount: job.itemCount || 0, error: '', version: GEN_VERSION,
+    };
   }
 
   let reviewItems;
@@ -976,6 +1047,38 @@ exports.main = async (event, context) => {
 
   const { action } = event || {};
 
+  if (action === 'outlineStart') {
+    const checked = await quotaCall(openid, { action: 'check', scene: 'plan' });
+    if (checked.code === -2) return { code: -2, msg: checked.msg || '次数用完了，买个套餐继续吧', needPay: true };
+    if (checked.code === -3) return { code: -3, msg: checked.msg || '暂时无法生成' };
+    if (!event.dest && !event.destCity) return { code: -1, msg: '缺少目的地' };
+    const db = cloud.database();
+    await ensureCollection(db, COL_JOB);
+    const active = await db.collection(COL_JOB).where({ _openid: openid, status: 'running' })
+      .orderBy('updatedAt', 'desc').limit(10).get();
+    const existing = (active.data || []).find((job) => job.kind === 'outline');
+    if (existing) return { code: 0, data: { jobId: existing._id, status: 'running', round: existing.round || 0 } };
+    const input = Object.assign({}, event);
+    delete input.action;
+    const now = Date.now();
+    const added = await db.collection(COL_JOB).add({ data: {
+      _openid: openid, kind: 'outline', input, status: 'running',
+      title: '', round: 0, outlineAttempts: 0, error: '',
+      createdAt: now, updatedAt: now, leaseUntil: 0, leaseOwner: '',
+    } });
+    quotaCall(openid, { action: 'hit', scene: 'outline' }).catch(() => {});
+    return { code: 0, data: { jobId: added._id, status: 'running', round: 0 } };
+  }
+
+  if (action === 'outlineStatus') {
+    const job = await loadJob(String(event.jobId || ''));
+    if (!job || job._openid !== openid || job.kind !== 'outline') {
+      return { code: -1, msg: '大纲任务不存在或无权访问' };
+    }
+    return { code: 0, data: Object.assign(jobPublic(job, Date.now()),
+      job.status === 'done' ? { outlineResult: job.outlineResult } : {}) };
+  }
+
   // ②-B 查后台生成进度（用户回到小程序 / 切到「我的行程」时问一次）
   if (action === 'jobStatus') {
     try {
@@ -985,6 +1088,7 @@ exports.main = async (event, context) => {
         .orderBy('updatedAt', 'desc').limit(10).get();
       const now = Date.now();
       const candidates = (res.data || [])
+        .filter((j) => j.kind !== 'outline')
         .filter((j) => j.status === 'running'
           || (j.status === 'failed' && now - Number(j.updatedAt || 0) <= JOB_STATUS_TTL_MS))
         .filter((j) => !j.dismissed);
@@ -1092,7 +1196,8 @@ exports.main = async (event, context) => {
     job.leaseOwner = runnerId;
     job.leaseUntil = now + JOB_LEASE_MS;
     try {
-      const out = await runJobRound(openid, job);
+      const out = job.kind === 'outline'
+        ? await runOutlineRound(job) : await runJobRound(openid, job);
       return { code: 0, data: out };
     } catch (err) {
       console.error('[generatePlan] resume error:', err);
@@ -1102,10 +1207,8 @@ exports.main = async (event, context) => {
           updatedAt: Date.now(), leaseUntil: 0, leaseOwner: '',
         },
       }).catch(() => {});
-      await updateTripGeneration(cloud.database(), job.tripId, {
-        genStatus: 'failed',
-        genError: String(err.message || err).slice(0, 100),
-        jobId: '',
+      if (job.tripId) await updateTripGeneration(cloud.database(), job.tripId, {
+        genStatus: 'failed', genError: String(err.message || err).slice(0, 100), jobId: '',
       });
       return { code: -1, msg: err.message || '续跑失败' };
     }
@@ -1143,7 +1246,9 @@ exports.main = async (event, context) => {
       // 前台大纲**不做联网检索**：大纲 LLM 本身 35-50s，再塞检索必撞 60s 上限
       // → 超时转后台 → 大纲从头重做，一次行程平白多两三分钟。
       // 联网核对班次改由后台任务专轮完成（见 runJobRound），大纲阶段只管快。
-      const res = await generateOutlineWithHotelCheck(event, {});
+      // 大纲页只展示路线；逐晚酒店核验留给用户确认后的生成任务。
+      // 它会并发多次地图请求，叠在大纲 LLM 后面容易撞到 60 秒上限。
+      const res = await generateOutline(event, {});
       return {
         code: 0,
         data: {

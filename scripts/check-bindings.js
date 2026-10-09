@@ -475,7 +475,7 @@ ok('分步模式：geocode 步限墙钟（35s 预算，单次跑不完下次续�
 ok('分步模式：commit 步幂等（防重复入库）',
   /task\.tripId && task\.resultInfo/.test(parseIdxJs));
 ok('分步模式：地理编码传整串 region（geocodeOne 内部拆候选城市）',
-  /geocodeOne\(addr, region\)/.test(parseIdxJs));
+  /geocodeOne\(addr, region,/.test(parseIdxJs));
 ok('分步模式与单次模式共用同一份文档元信息（docmeta）',
   /require\('\.\/docmeta'\)/.test(fs.readFileSync(path.join(ROOT, 'cloudfunctions/parseTravelPlan/llm.js'), 'utf8'))
     && /require\('\.\/docmeta'\)/.test(parseIdxJs));
@@ -678,9 +678,10 @@ ok('12306 查不到时清除模型臆造车次（行程可继续但不冒充已�
   /official-unavailable/.test(planJs) && /班次待确认/.test(planJs) && /matched\.code = ''/.test(planJs)
     && /lookupOfficial/.test(schedJs));
 
-ok('大纲超时不报错：云端后台补大纲（失败留下一轮重试）+ 前端转后台继续',
-  /后台大纲完成/.test(gpIdx) && /attempts\.outline/.test(gpIdx)
-    && /bgGenerateAfterOutlineTimeout/.test(plannerJs2));
+ok('大纲超时自动续跑并回到可编辑大纲，不提前生成详情',
+  /runOutlineRound/.test(gpIdx) && /outlineAttempts/.test(gpIdx)
+    && /outlineStatus/.test(gpIdx) && /waitForOutline/.test(plannerJs2)
+    && /this\.showOutline\(res\)/.test(plannerJs2));
 
 ok('gen_jobs / schedule_cache 集合不存在时自动创建（-502005 兜底）',
   /async function ensureCollection/.test(gpIdx) && /createCollection/.test(gpIdx)
@@ -720,7 +721,7 @@ ok('班次缓存 36 小时过期（日期键换了本来就查不到旧缓存）
   /SCHED_TTL_MS = 36 \* 3600 \* 1000/.test(gpIdx));
 
 ok('前台大纲不联网检索（检索塞在大纲尾巴上必撞 60s → 转后台重做一遍）',
-  /generateOutlineWithHotelCheck\(event, \{\}\)/.test(gpIdx)
+  /generateOutline\(event, \{\}\)/.test(gpIdx)
     && /前台大纲\*\*不做联网检索/.test(gpIdx)
     && !/scheduleLookup: makeScheduleLookup/.test(gpIdx));
 const hotelValidation = fs.readFileSync(path.join(CF, 'generatePlan/hotel-validation.js'), 'utf8');

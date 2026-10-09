@@ -282,11 +282,20 @@ Page({
     if (state.next === 'geocode') {
       let remaining = 1;
       let round = 0;
+      let stalled = 0;
       while (remaining > 0) {
         round++;
         this.setStage(`地图定位中${round > 1 ? `（第 ${round} 轮）` : ''}…`, 86);
         const g = await step({ step: 'geocode', taskId: state.taskId });
-        remaining = g.remaining || 0;
+        if (!g || !Number.isFinite(Number(g.remaining))) {
+          throw new Error('地图定位服务返回异常，请确认 parseTravelPlan 云函数已重新上传部署');
+        }
+        const nextRemaining = Number(g.remaining);
+        stalled = nextRemaining >= remaining && round > 1 ? stalled + 1 : 0;
+        if (stalled >= 3) {
+          throw new Error('地图定位进度连续未推进，请确认 parseTravelPlan 云函数已重新上传部署后重试');
+        }
+        remaining = nextRemaining;
         mark();
       }
       state.next = 'commit';
