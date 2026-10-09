@@ -293,6 +293,7 @@ async function buildPlan() {
 
 module.exports = {
   parseTravelPlan,
+  adminRole: async function () { return { isAdmin: false }; },
   parseTravelPlanStep,
   // mock 模式没有真实地理编码，返回 null 让前端走降级
   geocode: async function (location, city) { await delay(200); return null; },

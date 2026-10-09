@@ -101,6 +101,8 @@ App({
         return;
       }
       this.globalData.openid = auth.getOpenid();
+      // 预热轻量身份提示；“我的”页可直接用按账号缓存同步渲染管理员入口。
+      try { require('./utils/admin-role').refresh(this.globalData.openid).catch(() => {}); } catch (e) {}
 
       // 3. 启动闹钟轮询（前台）
       alarm.startPolling();

@@ -101,11 +101,9 @@ Page({
     const trip = this._trip || this.data.trip;
     if (!trip) return;
     const nowItems = this.buildNowItems(trip);
-    const hotelBookingHint = (trip.items || []).some((it) => it && it.category === 'hotel');
     // 内容没变就别 setData，避免无谓的渲染
-    if (JSON.stringify(nowItems) === JSON.stringify(this.data.nowItems)
-        && hotelBookingHint === this.data.hotelBookingHint) return;
-    this.setData({ nowItems, nowTitle: this.nowTitleOf(nowItems), hotelBookingHint });
+    if (JSON.stringify(nowItems) === JSON.stringify(this.data.nowItems)) return;
+    this.setData({ nowItems, nowTitle: this.nowTitleOf(nowItems) });
   },
 
   nowTitleOf(list) {
@@ -294,7 +292,6 @@ Page({
       todayIdx: this.findTodayIdx(days),
       nowItems,
       nowTitle: this.nowTitleOf(nowItems),
-      hotelBookingHint: (trip.items || []).some((it) => it && it.category === 'hotel'),
       homeTrips: homeList.map((t) => ({
         _id: t._id,
         title: t.title,

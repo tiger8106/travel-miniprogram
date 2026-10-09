@@ -73,6 +73,8 @@ exports.main = async (event, context) => {
         nickname: user.nickname || '旅行者',
         avatarUrl: user.avatarUrl || '',
       },
+      // 前端仅用于同步显示入口；管理操作始终由 admin 云函数重新鉴权。
+      isAdmin: user.role === 'admin' || user.role === 'super',
     },
   };
 };

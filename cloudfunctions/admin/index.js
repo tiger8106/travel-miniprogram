@@ -21,7 +21,7 @@ const http = require('http');
 const { allowed, COL_CONFIG, DOC_ID, resetCache } = require('./cloudCfg');
 const { generationCount } = require('./generation-count');
 
-const ADMIN_VERSION = 'v1.0-admin';
+const ADMIN_VERSION = 'v1.1-fast-role';
 
 const COL_USER = 'users';
 const COL_AUDIT = 'admin_audit';
@@ -614,6 +614,11 @@ exports.main = async (event, context) => {
 
   try {
     switch (action) {
+      // “我的”页只需要入口可见性；不要为此读取全站统计和用户生成历史。
+      case 'role': {
+        const user = await loadUserByOpenid(openid);
+        return { code: 0, data: { isAdmin: isAdminUser(user) } };
+      }
       case 'whoami': return await actionWhoami(openid);
       case 'claim': return await actionClaim(openid, event);
       case 'searchUsers': return await actionSearchUsers(openid, event);

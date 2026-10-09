@@ -5,22 +5,8 @@ const homeCache = require('../../utils/homecache');
 const env = require('../../utils/env');
 const privacy = require('../../utils/privacy');
 const quota = require('../../utils/quota');
-const api = require('../../services/api');
+const adminRole = require('../../utils/admin-role');
 const config = require('../../config');
-
-/**
- * api 层有两种封装，返回形态不一样：
- *   callFn         → 成功时直接给业务体（如 {isAdmin, me, items}）
- *   callFnKeepCode → 给 {code, data, msg}
- * 这里两种都吃掉，统一返回业务体。
- * ⚠️ 踩过的坑：直接写 r.data 时，走 callFn 的接口恒为 undefined，
- *    管理员菜单就永远显示不出来（后台列表/配置也一样全空）。
- */
-function bodyOf(r) {
-  if (!r || typeof r !== "object") return {};
-  if (r.data && typeof r.data === 'object') return r.data;
-  return r;
-}
 
 const app = getApp();
 
@@ -71,28 +57,29 @@ Page({
 
   refresh() {
     const profile = auth.getProfile() || {};
+    const openid = auth.getOpenid();
     // 记住云端已保存的值：昵称 bindinput 实时写入 data 后，
     // blur 时要用「云端值」而不是 data 判断是否有改动，否则永远存不进去
     this._saved = { nickname: profile.nickname || '', avatarUrl: profile.avatarUrl || '' };
     this.setData({
-      loggedIn: !!auth.getOpenid(),
+      loggedIn: !!openid,
       profile,
+      isAdmin: adminRole.cached(openid),
     });
     this.loadQuota();
     this.loadAdminRole();
   },
 
   /**
-   * 查一次身份：管理员才显示「管理后台」菜单。
-   * 失败/没部署都静默 —— 这只是一份额外的入口，不该因为它报什么错吓到用户。
+   * 首帧已经显示按账号缓存的入口；后台只发轻量身份请求更新提示。
+   * 失败时保留上次服务端确认结果，管理操作仍由云端二次鉴权。
    */
   async loadAdminRole() {
-    this.setData({ isAdmin: false });
-    if (!auth.isLoggedIn() || !api.adminWhoami) return;
+    const openid = auth.getOpenid();
+    if (!openid) { this.setData({ isAdmin: false }); return; }
     try {
-      const r = await api.adminWhoami();
-      const d = bodyOf(r);
-      this.setData({ isAdmin: !!d.isAdmin });
+      const isAdmin = await adminRole.refresh(openid);
+      if (auth.getOpenid() === openid && this.data.isAdmin !== isAdmin) this.setData({ isAdmin });
     } catch (e) {
       console.warn('[mine] 管理员身份不可用（不影响使用）:', (e && e.message) || e);
     }

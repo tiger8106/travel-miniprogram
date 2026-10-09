@@ -36,7 +36,10 @@ const jsFiles = [
   'components/map-button/map-button.js',
   'pages/planner/planner.js',
   'pages/mytrips/mytrips.js',
+  'pages/mine/mine.js',
   'utils/genrunner.js',
+  'utils/admin-role.js',
+  'utils/auth.js',
   'utils/eta.js',
   'utils/cloud.js',
   'utils/request.js',
@@ -847,7 +850,7 @@ ok('小程序端不内置任何第三方密钥（KEY 只经云端下发）',
 const adminPageJs = fs.readFileSync(path.join(MP, 'pages/admin/admin.js'), 'utf8');
 const minePageJs = fs.readFileSync(path.join(MP, 'pages/mine/mine.js'), 'utf8');
 ok('管理入口正确解包云函数返回（callFn 直接给业务体，严禁写 (r && r.data)）',
-  /function bodyOf/.test(adminPageJs) && /function bodyOf/.test(minePageJs)
+  /function bodyOf/.test(adminPageJs) && /adminRole\.refresh\(openid\)/.test(minePageJs)
     && !/\(r && r\.data\)/.test(adminPageJs) && !/\(r && r\.data\)/.test(minePageJs));
 
 const adminFnSrc = fs.readFileSync(path.join(CF, 'admin/index.js'), 'utf8');
