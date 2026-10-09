@@ -69,6 +69,9 @@ Page({
     // 用户授权
     keyword: '',
     users: [],
+    userPage: 1,
+    userTotalPages: 1,
+    userTotal: 0,
 
     // 配置（configItems 是唯一数据源，llm/amap/advanced 三份是分组视图）
     configItems: [],
@@ -237,14 +240,18 @@ Page({
   },
 
   async onSearch() {
-    await this.loadUsers();
+    await this.loadUsers(1);
   },
 
-  async loadUsers() {
+  async loadUsers(page) {
     try {
-      const r = await api.adminSearchUsers((this.data.keyword || '').trim());
-      const list = bodyOf(r).list || [];
+      const r = await api.adminSearchUsers((this.data.keyword || '').trim(), page || this.data.userPage);
+      const d = bodyOf(r);
+      const list = d.list || [];
       this.setData({
+        userPage: d.page || 1,
+        userTotalPages: d.totalPages || 1,
+        userTotal: d.total || 0,
         users: list.map((u) => Object.assign({}, u, {
           createdAtText: u.createdAt ? this.timeText(u.createdAt) : '',
         })),
@@ -252,6 +259,14 @@ Page({
     } catch (e) {
       wx.showToast({ title: e.message || '搜索失败', icon: 'none' });
     }
+  },
+
+  onUserPrev() {
+    if (this.data.userPage > 1) this.loadUsers(this.data.userPage - 1);
+  },
+
+  onUserNext() {
+    if (this.data.userPage < this.data.userTotalPages) this.loadUsers(this.data.userPage + 1);
   },
 
   /**

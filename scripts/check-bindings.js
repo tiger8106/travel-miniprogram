@@ -481,9 +481,10 @@ ok('分步模式与单次模式共用同一份文档元信息（docmeta）',
     && /require\('\.\/docmeta'\)/.test(parseIdxJs));
 ok('分步模式：step 成功返回必须包 data（callFn 只 resolve res.result.data，平铺字段会让前端拿到 undefined）',
   /code: 0, data: r \}/.test(parseIdxJs));
-ok('upload 页走分步流水线（init→day→collect→infer→geocode→commit，断点重试）',
-  /runParsePipeline/.test(uploadJs) && /parseTravelPlanStep/.test(uploadJs)
-    && /this\._taskState/.test(uploadJs));
+ok('upload 页使用云端可续跑任务，离开页面后由 parseWorker 接力',
+  /driveParse/.test(uploadJs) && /action: 'resume'/.test(uploadJs)
+    && /action: 'status'/.test(uploadJs)
+    && /parsePollEveryMinute/.test(fs.readFileSync(path.join(ROOT, 'cloudfunctions/parseWorker/config.json'), 'utf8')));
 ok('upload 页有分步进度文案（stageText）',
   /stageText/.test(uploadJs) && /stageText/.test(fs.readFileSync(path.join(MP, 'pages/upload/upload.wxml'), 'utf8')));
 ok('无起终点条目有终点回填（inferDestination 挂在 Pass 2 之前）',

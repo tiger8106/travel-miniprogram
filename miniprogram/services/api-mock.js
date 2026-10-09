@@ -24,11 +24,23 @@ async function parseTravelPlan(/* fileID */) {
 }
 
 // 分步解析（mock）：假装跑完了整个流水线，commit 时一次性给结果
+const mockParseTasks = {};
 async function parseTravelPlanStep(payload) {
   const step = (payload && payload.step) || '';
+  if (payload && (payload.action === 'status' || payload.action === 'resume')) {
+    const task = mockParseTasks[payload.taskId];
+    if (!task) throw new Error('解析任务不存在');
+    if (payload.action === 'resume' && task.status === 'running') {
+      await delay(500);
+      task.progress = Math.min(100, task.progress + 20);
+      task.doneDays = Math.min(task.dayCount, task.doneDays + 1);
+      if (task.progress === 100) { task.status = 'done'; task.result = await parseTravelPlan(); }
+    }
+    return Object.assign({}, task);
+  }
   if (step === 'init') {
     await delay(800);
-    return {
+    const result = {
       code: 0,
       taskId: 'mock_task_' + Date.now(),
       dayCount: 3,
@@ -36,6 +48,9 @@ async function parseTravelPlanStep(payload) {
       startDate: STORE.itinerary.startDate,
       endDate: STORE.itinerary.endDate,
     };
+    mockParseTasks[result.taskId] = { taskId: result.taskId, status: 'running', phase: 'day',
+      dayCount: 3, doneDays: 0, progress: 15, result: null, leaseUntil: 0 };
+    return result;
   }
   if (step === 'day') { await delay(600); return { code: 0, index: payload.index, itemCount: 5 }; }
   if (step === 'collect') { await delay(500); return { code: 0, alarmCount: STORE.alarms.length }; }

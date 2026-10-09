@@ -5,6 +5,19 @@
 
 const SNAP_KEY = 'home_snapshot_v1';
 const ALARM_KEY = 'alarm_synced_at_v1';
+const SELECT_PREFIX = 'home_selected_trip_v1_';
+
+function selectedTripId(openid) {
+  try { return openid ? String(wx.getStorageSync(SELECT_PREFIX + openid) || '') : ''; } catch (e) { return ''; }
+}
+
+function setSelectedTripId(openid, tripId) {
+  if (!openid) return;
+  try {
+    if (tripId) wx.setStorageSync(SELECT_PREFIX + openid, String(tripId));
+    else wx.removeStorageSync(SELECT_PREFIX + openid);
+  } catch (e) {}
+}
 
 function read() {
   try {
@@ -112,7 +125,7 @@ function clearAll() {
     const info = wx.getStorageInfoSync();
     const kill = (k) => { try { wx.removeStorageSync(k); } catch (e) {} };
     (info.keys || []).forEach((k) => {
-      if (k === SNAP_KEY || k === ALARM_KEY || k === AUTO_TRY_KEY || k.indexOf(PAGE_PREFIX) === 0) kill(k);
+      if (k === SNAP_KEY || k === ALARM_KEY || k === AUTO_TRY_KEY || k.indexOf(PAGE_PREFIX) === 0 || k.indexOf(SELECT_PREFIX) === 0) kill(k);
     });
   } catch (e) {}
 }
@@ -120,5 +133,6 @@ function clearAll() {
 module.exports = {
   read, write, clear, alarmSyncedAt, markAlarmSynced,
   readPage, writePage, clearPage, clearAll,
+  selectedTripId, setSelectedTripId,
   autoTriedAt, markAutoTried, clearAutoTried, shouldAutoTry,
 };

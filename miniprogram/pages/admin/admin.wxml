@@ -68,6 +68,11 @@
                 data-index="{{index}}" bindtap="onMakeAdmin">设为管理员</view>
         </view>
       </view>
+      <view class="user-pagination" wx:if="{{userTotalPages > 1}}">
+        <view class="page-btn {{userPage <= 1 ? 'page-disabled' : ''}}" bindtap="onUserPrev">上一页</view>
+        <text>第 {{userPage}} / {{userTotalPages}} 页 · 共 {{userTotal}} 人</text>
+        <view class="page-btn {{userPage >= userTotalPages ? 'page-disabled' : ''}}" bindtap="onUserNext">下一页</view>
+      </view>
     </view>
 
     <!-- ② 支付对账 -->

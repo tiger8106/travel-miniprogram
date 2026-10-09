@@ -58,31 +58,6 @@ function ruleAlarm(title, dateStr, timeStr, type, note) {
   };
 }
 
-function hotelStayAlarm(item, date) {
-  const location = /酒店|民宿|客栈|宾馆/.test(String(item.endLocation || ''))
-    ? item.endLocation : (item.activity || item.endLocation || item.startLocation || '住宿');
-  const name = String(location).trim()
-    .replace(/^(?:办理入住|入住|返回|回到|回|前往|抵达|到达|住在)\s*/, '')
-    .replace(/(?:办理入住|入住|休息|睡觉|放行李).*$/, '').slice(0, 48) || '住宿';
-  const clock = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(item.startTime || '')) ? item.startTime : '14:00';
-  const fireAt = parseCnTime(`${date}T${clock}:00`);
-  if (!fireAt) return null;
-  const detail = [item.activity, item.startLocation, item.endLocation, item.note]
-    .filter(Boolean).join('；').slice(0, 240);
-  return {
-    title: `入住${date} ${name}`.slice(0, 100),
-    note: detail || '查看当天住宿信息，入住前核对酒店地址与订单。',
-    fireAt,
-    fireAtStr: tsToCnDateTimeStr(fireAt),
-    leadMinutes: 5,
-    remindAt: fireAt - 5 * 60 * 1000,
-    completed: fireAt < Date.now(),
-    type: 'hotel',
-    source: 'rule',
-    dayIndex: Number(item.dayIndex) || 0,
-  };
-}
-
 /**
  * 从已经解析出的详细行程做一次确定性查漏。
  * LLM 提名可能只返回部分事项，不能因为数量已经达到阈值就跳过车票/酒店/门票。
@@ -115,16 +90,7 @@ function backfillRuleAlarms(ctx, existing) {
     const isHotel = it.category === 'hotel'
       || /入住|住宿|住在|住进|(?:酒店|民宿|客栈|宾馆).*?(?:睡觉|休息|过夜)/.test(String(it.activity || ''));
     if (isHotel) {
-      // 住宿即使已订也要在入住日留下可查看的酒店卡片，且每晚单独一条。
-      const stay = hotelStayAlarm(it, date);
-      if (stay && !base.concat(out).some((a) => a.type === 'hotel' && a.title === stay.title && dateOf(a.fireAt) === date)) {
-        out.push(stay);
-      }
-      if (/已(经)?(购买|预订|预定|预约|订好|确认)|已订|订妥|订单号|无需(购买|预约|预订)|不需要(购买|预约|预订)/.test(text)) return;
-      const booking = ruleAlarm(`预订${date} ${String(it.activity || it.endLocation || '住宿').slice(0, 28)}住宿`,
-        shiftDate(date, -7), '20:00', 'hotel',
-        '根据详细行程自动补齐，优先锁定可免费取消房型。具体房态和价格以下单平台为准。');
-      add(booking, String(it.activity || it.endLocation || '住宿'));
+      // 酒店提醒统一在入库前按具名酒店归并，避免每日入住与预订事项重复。
       return;
     }
     if (/已(经)?(购买|预订|预约|订好)|已订|订妥|无需(购买|预约|预订)|不需要(购买|预约|预订)/.test(text)) return;

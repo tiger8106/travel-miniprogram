@@ -44,6 +44,7 @@ travel-miniprogram/
     ├── parseTravelPlan/          # 解析 docx + LLM 生成结构化行程
     ├── generatePlan/             # 制定新攻略、后台续跑、12306 班次核对
     ├── genWorker/                # 定时接力后台生成任务
+    ├── parseWorker/              # 定时接力后台上传解析任务
     ├── itinerary/                # 行程 CRUD
     ├── ticketAlarm/              # 闹钟 CRUD
     ├── suggestions/              # 旅行建议 get / refresh
@@ -53,7 +54,7 @@ travel-miniprogram/
 
 ### 数据流
 
-1. **上传流程**：用户选择 .docx → `uploadDoc` 上传到云存储 → `parseTravelPlan` 云函数下载 → mammoth 解析 → LLM 生成 JSON → 入库
+1. **上传流程**：用户选择 .docx → `uploadDoc` 上传到云存储 → `parseTravelPlan` 建立可续跑任务 → 页面可见时加速解析，离开或退出后 `parseWorker` 定时接力 → mammoth/LLM 解析并入库
 2. **制定攻略**：前端创建可续跑大纲任务，超时由前端或 `genWorker` 接力，完成后展示可编辑大纲；用户确认后才创建生成中行程并逐轮细化，最后补齐提醒与建议；12306 官方候选用于校准车次和时间
 3. **行程展示**：前端先拉摘要列表，只拉当前攻略的完整条目 → 渲染每日行程卡片 → 可编辑/导航/删除；生成中的条目只读
 4. **提醒触发**：
@@ -65,6 +66,8 @@ travel-miniprogram/
 提醒记录中的 `fireAt` 表示目标办理时刻，例如 12306 起售时刻、门票放票时刻或酒店预订时刻；`leadMinutes` 是用户设置的提前分钟数；`remindAt` 始终由 `fireAt - leadMinutes` 计算。前端和后台都按这套含义处理，避免把“提前提醒时间”误当成“实际办理时间”。如果来源没有给出明确放票时刻，规则会先用当地常见时刻建立待办，并在备注中要求用户以官方公告核对；用户可以直接编辑办理/放票时间。
 
 每条提醒都有 `type` 分类（`train`、`plane`、`bus`、`ticket`、`hotel`、`other`）和 `completed` 完成状态。完成后从首页“正在进行 / 即将进行”移出，但分类清单仍保留，可以查看或恢复待办。重新生成攻略时会按事项 key 复用原记录，保留 `_id`、完成状态和提前量；被新攻略删掉的已完成事项也作为历史记录保留。
+
+酒店提醒统一按酒店名称归并：同一家酒店即使分开住多晚，也只显示一条酒店名称标题；备注列出每段入住/退房日期及原文注意事项，不重复写酒店名。已预订酒店仍留在分类清单供查看，未确定酒店名称时显示“住宿待确认”并在备注标注住宿区域。
 
 生成时会从 AI 提名、行程大纲和最终详细行程三层补齐车票、住宿、门票预约和证件/装备等事项。火车票开票日按乘车日减 14 天计算，具体起售时刻仍以 12306 当日公告为准；生成的车次和乘车时刻只有在 12306 官方查询命中时才写入，查不到就标记待核实并清除模型臆造值。
 
@@ -155,6 +158,7 @@ LLM_BASE_URL=https://api.minimaxi.com/v1   ← 默认值，若不通改这里
 右键 `cloudfunctions/parseTravelPlan` → 上传并部署：云端安装依赖（mammoth）  
 右键 `cloudfunctions/generatePlan` → 上传并部署：云端安装依赖
 右键 `cloudfunctions/genWorker` → 上传并部署：云端安装依赖
+右键云函数目录 `cloudfunctions/parseWorker` →「上传并部署：云端安装依赖」；**再右键同一个 `parseWorker` 目录 →「上传触发器」**，到云开发控制台确认 `parsePollEveryMinute` 已启用。`config.json` 是触发器配置文件，不必右键它。只部署函数不会自动上传触发器；没有触发器，退出小程序后解析不会继续。
 右键 `cloudfunctions/itinerary` → 上传并部署  
 右键 `cloudfunctions/ticketAlarm` → 上传并部署  
 右键 `cloudfunctions/suggestions` → 上传并部署  

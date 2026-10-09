@@ -278,18 +278,19 @@ async function actionSearchUsers(actorOpenid, event) {
   const auth = await requireAdmin(actorOpenid);
   if (!auth.ok) return { code: -1, msg: auth.msg };
   const kw = String((event && event.keyword) || '').trim();
-  if (!kw) {
-    // 不给关键词时返回最近注册的一批，方便直接操作
-    const res = await db.collection(COL_USER)
-      .orderBy('createdAt', 'desc').limit(20).get().catch(() => ({ data: [] }));
-    return { code: 0, data: { list: await Promise.all((res.data || []).map(publicUserWithHistory)) } };
-  }
-  const res = await db.collection(COL_USER)
-    .where({ nickname: db.RegExp({ regexp: kw, options: 'i' }) })
-    .limit(20)
-    .get()
-    .catch(() => ({ data: [] }));
-  return { code: 0, data: { list: await Promise.all((res.data || []).map(publicUserWithHistory)) } };
+  const page = Math.max(1, Math.min(100000, Math.floor(Number(event && event.page) || 1)));
+  const pageSize = 20;
+  const query = kw
+    ? db.collection(COL_USER).where({ nickname: db.RegExp({ regexp: kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), options: 'i' }) })
+    : db.collection(COL_USER);
+  const counted = await query.count().catch(() => ({ total: 0 }));
+  const total = Number(counted.total) || 0;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const offset = (currentPage - 1) * pageSize;
+  const ordered = kw ? query : query.orderBy('createdAt', 'desc');
+  const res = await ordered.skip(offset).limit(pageSize).get().catch(() => ({ data: [] }));
+  return { code: 0, data: { list: await Promise.all((res.data || []).map(publicUserWithHistory)), page: currentPage, pageSize, total, totalPages } };
 }
 
 /** 授权 / 取消授权「不限量使用」 */

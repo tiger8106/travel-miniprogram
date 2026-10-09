@@ -9029,6 +9029,41 @@ function hotelTaskNote(task) {
   return [base, task && task.hotelRecommendationReason].filter(Boolean).join('');
 }
 
+// 酒店提醒按完整名称归并：同一酒店即使非连续入住，也只有一个可查看的标题。
+function canonicalHotelReminders(alarms, outline) {
+  const groups = new Map();
+  hotelBookingTasks(outline).forEach((task) => {
+    const name = String(task.hotel || '').trim() || '住宿待确认';
+    const key = task.hotel ? name : `待确认|${task.place || task.dayIndex}`;
+    if (!groups.has(key)) groups.set(key, { name, stays: [], task });
+    const group = groups.get(key);
+    const checkout = task.checkIn ? shiftDate(task.checkIn, task.nights) : '';
+    group.stays.push(`${task.checkIn || '日期待确认'}入住、${checkout || '日期待确认'}退房`);
+  });
+  const oldHotels = asArray(alarms).filter((alarm) => alarm.type === 'hotel');
+  const now = Date.now();
+  const canonical = [...groups.values()].map((group) => {
+    const match = oldHotels.find((alarm) => group.task.hotel
+      ? String(alarm.bookingInfo || alarm.title || '').includes(group.name)
+      : Number(alarm.dayIndex) === Number(group.task.dayIndex));
+    const checkIn = parseCnTime(`${group.task.checkIn}T14:00:00`);
+    const fireAt = match && Number(match.fireAt) > now ? Number(match.fireAt)
+      : checkIn > now ? now + 5 * 60000 : checkIn;
+    const extra = [!group.task.hotel && group.task.place && `住宿区域：${group.task.place}`,
+      group.task.hotelPoiAddress && `地址：${group.task.hotelPoiAddress}`,
+      group.task.hotelRecommendationReason].filter(Boolean)
+      .map((part) => String(part).split(group.name).join('')).join('；');
+    return Object.assign({}, match || {}, {
+      title: group.name,
+      note: `住宿时间：${group.stays.join('；')}；请核对订单、位置、房型与退改规则。${extra ? `其他注意事项：${extra}` : ''}`.slice(0, 500),
+      usageInfo: `住宿时间：${group.stays.join('；')}`.slice(0, 180),
+      fireAt, fireAtStr: tsToCnDateTimeStr(fireAt), type: 'hotel',
+      dayIndex: group.task.dayIndex, bookingInfo: group.name, source: 'ai',
+    });
+  });
+  return asArray(alarms).filter((alarm) => alarm.type !== 'hotel').concat(canonical);
+}
+
 function hotelRecommendationNote(day) {
   const d = day || {};
   const hotel = String(d.hotel || '').trim();
@@ -11225,7 +11260,7 @@ module.exports = {
   fixDayTimeOverlaps, enforceFinalTimelineIntegrity, samePlace, toMin, fmtMin, solarEventMinute, longjiSolarMinute,
   enforceTripEdgeOrder, enforceTransportPreference, drivingAllowed, taxiAllowed, taxiPreferred,
   explicitSelfDriveSegment, defaultTransferMode, ensureSelfDriveParking, enforceOutlineTransportPreference,
-  hotelBookingTasks, hotelTaskNote, syncHotelReferences, annotateHotelItems, linkBookingAlarms, normalizeBookingAlarmKinds, dedupeBookingAlarmRecords, alarmUsageInfo, annotateAlarmUsage, bookingStatusMatches, ensureStableItemIds,
+  hotelBookingTasks, hotelTaskNote, canonicalHotelReminders, syncHotelReferences, annotateHotelItems, linkBookingAlarms, normalizeBookingAlarmKinds, dedupeBookingAlarmRecords, alarmUsageInfo, annotateAlarmUsage, bookingStatusMatches, ensureStableItemIds,
   collectSegments, applyRealSchedules, resolveOfficialRailTimeline,
   enforceRealSchedule, stripUnverifiedSchedules, enforceOfficialRailItems, dedupeOfficialRailItems,
   pickSchedule, shareStem,

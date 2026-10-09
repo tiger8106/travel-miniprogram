@@ -22,7 +22,7 @@ const {
   generateOutline, buildPlan, dayDiff, collectSegments, applyRealSchedules,
   auditMergedDetailItems,
   backfillDetailAlarms, linkBookingAlarms, normalizeBookingAlarmKinds,
-  dedupeBookingAlarmRecords, annotateAlarmUsage, normalizeInput,
+  dedupeBookingAlarmRecords, annotateAlarmUsage, canonicalHotelReminders, normalizeInput,
 } = require('./plan');
 const { geocodeBatch, cityTokens, searchHotelPoi, searchHotelsNearby } = require('./geocode');
 const { validateOutlineHotels } = require('./hotel-validation');
@@ -41,7 +41,7 @@ const COL_SCHED = 'schedule_cache';
 const SCHED_TTL_MS = 36 * 3600 * 1000;
 
 // 生成引擎版本（用于确认线上跑的是哪一版）
-const GEN_VERSION = 'v2.17-outline-resume';
+const GEN_VERSION = 'v2.18-grouped-hotel-reminders';
 const { publicationState, collectGenerationRows } = require('./publication');
 
 async function generateOutlineWithHotelCheck(input, opts) {
@@ -347,7 +347,7 @@ async function savePlan(openid, plan, tripId, jobId, outline, input) {
       reminders = linkBookingAlarms(reminders, storedItems);
       reminders = normalizeBookingAlarmKinds(reminders, storedItems, profile);
       reminders = dedupeBookingAlarmRecords(reminders);
-      plan.alarms = annotateAlarmUsage(reminders, storedItems, outline);
+      plan.alarms = canonicalHotelReminders(annotateAlarmUsage(reminders, storedItems, outline), outline);
     }
   }
   plan.items = storedItems;

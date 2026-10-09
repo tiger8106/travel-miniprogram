@@ -10,10 +10,10 @@ async function parseTravelPlan(fileID) {
   return callFn('parseTravelPlan', { fileID, leadMinutes: alarm.getAdvanceMin() });
 }
 
-// 攻略分步解析：云函数 60s 上限调不高，把解析拆成六步由前端编排——
+// 攻略分步解析：云函数 60s 上限调不高，把解析拆成六步由云端任务编排——
 // init（读文档切分）→ day（逐天 AI 解析，循环 N 次）→ collect（闹钟+建议）
 // → infer（清洗+反推待办）→ geocode（地图定位，循环到完）→ commit（入库）。
-// 每步都远小于 60s，失败可从断点重试。
+// 页面可在可见时加速续跑，退出后由 parseWorker 接力；失败可从断点重试。
 async function parseTravelPlanStep(payload) {
   return callFn('parseTravelPlan', Object.assign({ leadMinutes: alarm.getAdvanceMin() }, payload));
 }
@@ -183,8 +183,8 @@ function adminClaim(code) {
 }
 
 /** 按微信号 / 昵称找用户（管理员） */
-function adminSearchUsers(keyword) {
-  return callFn('admin', { action: 'searchUsers', keyword });
+function adminSearchUsers(keyword, page) {
+  return callFn('admin', { action: 'searchUsers', keyword, page: page || 1 });
 }
 
 /** 授权 / 取消授权「不限量使用」 */
