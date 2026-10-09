@@ -29,6 +29,7 @@
 - 行程地理编码要逐批推进并存游标，不能在超时后反复从头校验。地图搜索要核对城市和地点证据；不确定坐标宁可为空，不要给错地；前后端导航要共用同一组位置和缺省降级。
 - 大纲、详细行程、执行复核、发布条目需要同一日期口径。未复核候选不可提前发布到首页；跨城交通、实际到站接驳、行李随人走、入住与退房先后顺序都要验证，不能靠复制上一晚住宿补今天。
 - 首页选中行程按账号持久化，切换账号/退出时清理快照，防止用户数据串号；云端仍须做归属校验。**后台任务的创建、轮询、完成及重启续跑只更新任务状态，不自动改首页选中行程**；仅用户明确切换或仍在发起页主动打开新行程时改变选择。详情页编辑/删除需要云端 `_id`，不可以仅靠数组索引或客户端临时 ID。
+- 冷启动时在应用入口同步恢复按账号保存的选中行程；有本地快照的页面要在首帧一次性恢复**完整视图**（原始列表、派生分类/提示/计数），再后台静默校准。不能只缓存列表而让附属卡片等云端回包后才跳出来；加载/编辑、退出/换账号及并发旧请求都要处理快照失效和归属。
 
 ### 后台、权限、配置、部署
 
@@ -60,7 +61,7 @@
 | 云函数、触发器、环境 | [上线部署清单](上线部署清单.md)、[外部资源与配置总览](外部资源与配置总览.md) | 控制台版本和触发器状态 |
 | 上传解析、酒店、定位 | [开发与回归注意事项](开发与回归注意事项.md)、`cloudfunctions/parseTravelPlan/` | `test-parse-background.js`、`test-hotel-stays.js`、`test-upload-geocode.js` |
 | 新攻略大纲/详细生成 | `cloudfunctions/generatePlan/`、[开发与回归注意事项](开发与回归注意事项.md) | `test-generation-completion.js`、`test-generate.js --unit` |
-| 首页选择与账号隔离 | `miniprogram/pages/index/`、`utils/homecache.js` | `test-home-selection.js` |
+| 首页选择、冷启动首帧与账号隔离 | `miniprogram/app.js`、`miniprogram/pages/index/`、`utils/homecache.js` | `test-home-selection.js`、`test-first-frame-cache.js` |
 | 管理、额度和提醒 | [管理后台使用说明](管理后台使用说明.md) | `test-admin-role-fast.js`、`test-admin-pagination.js`、`test-hotel-reminder-placement.js`、`test-quota.js`、`test-alarm-state.js`、`test-booking-sync.js` |
 
 `截图/国庆七天广西旅游攻略.docx` 是上传解析的真实回归样本。`scripts/test-parse-word-live.js` 会调用项目配置的大模型；运行前确认密钥与费用，验收时逐日核对酒店、非连续入住归并和返程日无酒店。`node scripts/check-bindings.js` 是通用基线；若受环境限制出现子进程 `EBUSY`，单独用 `node --check` 验证相关文件，不能把环境错误写成代码通过或失败。
