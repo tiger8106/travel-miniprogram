@@ -197,15 +197,24 @@ Module._load = originalLoad;
 
   let serverJob = { jobId: 'stale', tripId: 'deleted', status: 'failed', error: '旧失败' }, statusError = false;
   const storage = new Map();
+  const homeApp = { globalData: { currentTripId: 'chosen-other', currentTrip: { _id: 'chosen-other' } } };
   const context = { module: { exports: {} }, exports: {}, setTimeout, clearTimeout, Date, Math,
+    getApp: () => homeApp,
     wx: { getStorageSync: (key) => storage.get(key), setStorageSync: (key, value) => storage.set(key, value), removeStorageSync: (key) => storage.delete(key) },
     require: (name) => name.includes('services/api') ? {
       genJobStatus: async () => { if (statusError) throw new Error('网络暂时不可用'); return { job: serverJob }; },
       dismissGen: async () => { serverJob = null; },
+      startGen: async () => ({ jobId: 'new-job', tripId: 'new-trip', round: 1, partial: true, status: 'running' }),
+      resumeGen: async () => {
+        // 用户在生成过程中切到另一份行程；本轮结束不能强行切回新生成的行程。
+        homeApp.globalData.currentTripId = 'chosen-other';
+        return { jobId: 'new-job', tripId: 'new-trip', round: 2, partial: false, status: 'done', itemCount: 42 };
+      },
     } : { clear() {} } };
   vm.runInNewContext(fs.readFileSync('miniprogram/utils/genrunner.js', 'utf8'), context);
   const runner = context.module.exports;
   await runner.sync(); assert.equal(runner.get().status, 'failed');
+  assert.equal(homeApp.globalData.currentTripId, 'chosen-other', '启动时恢复旧任务不能覆盖首页选中行程');
   statusError = true; await runner.sync(); assert.equal(runner.get().jobId, 'stale'); statusError = false;
   serverJob = null; await runner.sync(); assert.equal(runner.get().status, 'idle');
   serverJob = { jobId: 'stale', tripId: 'deleted', status: 'failed' };
@@ -213,6 +222,9 @@ Module._load = originalLoad;
   serverJob = { jobId: 'stale', tripId: 'deleted', status: 'failed' };
   await runner.sync(); runner.forgetTrip('deleted'); assert.equal(runner.get().status, 'idle');
   assert(!storage.has('gen_running_job'));
+  await runner.start({ outline: { days: [{ date: '2026-12-20' }] } });
+  assert.equal(homeApp.globalData.currentTripId, 'chosen-other', '新行程每轮生成与完成均不能覆盖用户手动切换的行程');
+  assert.equal(homeApp.globalData.currentTrip._id, 'chosen-other');
   console.log('✓ 本地失败态/缓存清除，不因账号或已删除行程恢复旧横幅');
 
   const planner = fs.readFileSync('miniprogram/pages/planner/planner.wxml', 'utf8');
@@ -222,15 +234,16 @@ Module._load = originalLoad;
   assert.equal(Pub.publicationState({ items: [row(0, true)] }, { items: [row(0)] }, outline).progress.done, 1);
   const legacy = Pub.publicationState({ items: [row(0, true), row(1)] }, { items: [], partial: true }, outline);
   assert.equal(legacy.progress.done, 1); assert.equal(legacy.pending.length, 1, '旧未复核内容迁移为候选而非丢弃重做');
-  let page, submitted, outlineShouldTimeout = false, timedOut = false;
+  let page, submitted, outlineShouldTimeout = false, timedOut = false, finishInBackground = false;
   const localStorage = new Map();
+  const plannerApp = { globalData: { currentTripId: 'chosen-other' } };
   const outlineResponse = { title: '原路线标题', summary: '原摘要', outline: { days: [
     { d: '2026-12-20', t: '抵达', city: '甲城', ov: '甲城', hl: ['甲景点'], mv: [{ f: '起点站', to: '终点站', s: '13:00', e: '16:00' }], hotel: '原酒店' },
     { date: '2026-12-21', theme: '返程', city: '乙城', overnight: '返程', highlights: ['乙景点'], moves: [], sched: [{ code: '官方班次' }] },
   ] } };
   vm.runInNewContext(fs.readFileSync('miniprogram/pages/planner/planner.js', 'utf8'), {
     Date, Math, setInterval: () => 1, clearInterval() {}, setTimeout(callback) { callback(); }, Page(value) { page = value; },
-    getApp: () => ({ globalData: {} }), wx: {
+    getApp: () => plannerApp, wx: {
       showToast() {}, getStorageSync(key) { return localStorage.get(key); },
       setStorageSync(key, value) { localStorage.set(key, value); }, removeStorageSync(key) { localStorage.delete(key); },
     },
@@ -248,9 +261,13 @@ Module._load = originalLoad;
       };
       if (name.includes('/eta')) return { estimate: () => 1000, footerText: () => '', record() {} };
       if (name.includes('/genrunner')) return { subscribe: () => () => {}, start: async (payload) => {
-        submitted = payload; return { partial: true, tripId: 'new-trip' };
+        submitted = payload;
+        if (finishInBackground) { page.onHide(); return { partial: false, tripId: 'new-trip', itemCount: 42 }; }
+        return { partial: true, tripId: 'new-trip' };
       } };
       if (name.includes('/alarm')) return { getAdvanceMin: () => 12 };
+      if (name.includes('/homecache')) return { clear() {}, setSelectedTripId() { throw new Error('离开页面后不应改首页选择'); } };
+      if (name.includes('/quota')) return { clear() {} };
       return {};
     },
   });
@@ -293,5 +310,8 @@ Module._load = originalLoad;
   assert.deepStrictEqual(copy(submitted.outline.days[1].sched), outlineResponse.outline.days[1].sched);
   assert.equal(submitted.extra, page._input.extra); assert.equal(submitted.leadMinutes, 12);
   assert.equal(submitted.startTime, '12:00'); assert.equal(submitted.endTime, '17:00');
+  finishInBackground = true;
+  await page.onConfirmOutline();
+  assert.equal(plannerApp.globalData.currentTripId, 'chosen-other', '规划页离开后完成生成不覆盖首页选择');
   console.log('✓ 大纲无拖动，原日期/交通/酒店保留；编辑后按原顺序和完整需求提交');
 })().catch((error) => { console.error(error); process.exitCode = 1; });

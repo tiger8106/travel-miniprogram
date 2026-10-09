@@ -4,7 +4,7 @@ const Module = require('module');
 
 const collections = {
   trips: [{
-    _id: 'trip-1', _openid: 'user-1', sourceType: 'manual',
+    _id: 'trip-1', _openid: 'user-1', sourceType: 'manual', startDate: '2026-09-30',
     items: [
       { itemId: 'train-1', dayIndex: 0, category: 'transport', transportType: 'train', activity: '乘 G101 次列车', startLocation: '成都东站', endLocation: '重庆北站', startTime: '08:00', endTime: '10:00' },
       { itemId: 'hotel-1', dayIndex: 0, category: 'hotel', activity: '入住成都原点酒店', endLocation: '成都原点酒店' },
@@ -14,7 +14,7 @@ const collections = {
   }],
   ticket_alarms: [
     { _id: 'alarm-train', _openid: 'user-1', tripId: 'trip-1', type: 'train', dayIndex: 0, linkedItemId: 'train-1', title: '车票：G101', bookingInfo: '成都东站→重庆北站 G101 08:00-10:00', fireAt: Date.now() + 3600000 },
-    { _id: 'alarm-hotel', _openid: 'user-1', tripId: 'trip-1', type: 'hotel', dayIndex: 0, linkedItemId: 'hotel-1', title: '尽早确认酒店预订：成都原点酒店', bookingInfo: '成都原点酒店', fireAt: Date.now() + 3600000 },
+    { _id: 'alarm-hotel', _openid: 'user-1', tripId: 'trip-1', type: 'hotel', dayIndex: 0, linkedItemId: 'hotel-1', title: '尽早确认酒店预订：成都原点酒店', bookingInfo: '成都原点酒店', usageInfo: '住宿：2026-09-29 至 2026-09-30；成都原点酒店', fireAt: Date.now() + 3600000 },
     { _id: 'alarm-ticket', _openid: 'user-1', tripId: 'trip-1', type: 'ticket', dayIndex: 0, linkedItemId: 'ticket-1', title: '门票/预约：德天瀑布', bookingInfo: '德天瀑布门票', fireAt: Date.now() + 3600000 },
   ],
 };
@@ -45,6 +45,7 @@ const db = {
         const matches = () => rows.filter((row) => Object.keys(query || {}).every((key) => row[key] === query[key]));
         return {
           limit() { return this; },
+          orderBy() { return this; },
           async get() { return { data: copy(matches()) }; },
           async remove() {
             const selected = new Set(matches());
@@ -69,7 +70,21 @@ const originalLoad = Module._load;
 assert.strictEqual(require('fs').readFileSync(require.resolve('../cloudfunctions/itinerary/booking-sync'), 'utf8'),
   require('fs').readFileSync(require.resolve('../cloudfunctions/ticketAlarm/booking-sync'), 'utf8'));
 for (const modulePath of ['../cloudfunctions/itinerary/booking-sync', '../cloudfunctions/ticketAlarm/booking-sync']) {
-  const { synchronizeTrip } = require(modulePath);
+  const { synchronizeTrip, usageInfoForItem } = require(modulePath);
+  const oneNight = { startDate: '2026-09-30', items: [
+    { dayIndex: 0, category: 'hotel', endLocation: '甲城栖云酒店' },
+  ] };
+  assert.match(usageInfoForItem(oneNight.items[0], oneNight),
+    /2026-09-30 至 2026-10-01/, '9 月 30 日晚入住，应在 10 月 1 日白天退房');
+  assert.match(usageInfoForItem(oneNight.items[0], Object.assign({}, oneNight,
+    { outline: { days: [{ date: '2026-09-30' }] } })),
+  /2026-09-30 至 2026-10-01/, '大纲提供正确入住日时，缺少次日条目也不能退房同日');
+  const yearEnd = { startDate: '2026-12-31', items: [
+    { dayIndex: 0, category: 'hotel', endLocation: '甲城栖云酒店' },
+    { dayIndex: 1, category: 'hotel', endLocation: '甲城栖云酒店' },
+  ] };
+  assert.match(usageInfoForItem(yearEnd.items[0], yearEnd),
+    /2026-12-31 至 2027-01-02/, '跨年连住两晚，退房日期必须前进两天');
   const original = { outline: { days: [{ hotel: '甲城旧酒店', moves: [
     { from: '甲站', to: '乙站', code: 'G100', startTime: '09:00', endTime: '11:00', schedSource: '12306' },
   ] }] }, items: [
@@ -108,6 +123,10 @@ const ticketAlarm = require('../cloudfunctions/ticketAlarm/index');
 Module._load = originalLoad;
 
 (async () => {
+  const listed = await ticketAlarm.main({ action: 'list', tripId: 'trip-1' });
+  assert.strictEqual(listed.code, 0);
+  assert.match(listed.data.find((a) => a._id === 'alarm-hotel').usageInfo,
+    /2026-09-30 至 2026-10-01/, '旧酒店提醒读取时也应修正整体提前一天的住宿日期');
   const trip = collections.trips[0];
   const edited = copy(trip.items);
   edited[0] = Object.assign({}, edited[0], { activity: '乘 G103 次列车', startTime: '08:30', endTime: '10:25', dayIndex: 1 });

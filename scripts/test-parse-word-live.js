@@ -42,9 +42,11 @@ const meta = buildDocMeta(raw);
   assert.equal(reminders.length, 5, '七晚住宿应归并成五个酒店提醒');
   assert(reminders.every((item) => item.title && !item.note.includes(item.title)), '标题只有酒店名，备注不重复名称');
   const first = reminders.find((item) => item.title === expected[0]);
-  assert(first && /2026-09-30入住、2026-10-01退房/.test(first.note)
-    && /2026-10-02入住、2026-10-03退房/.test(first.note)
+  assert(first && /2026-09-30至2026-10-01/.test(first.note)
+    && /2026-10-02至2026-10-03/.test(first.note)
     && /寄存/.test(first.note), '非连续入住归并，并保留 Word 中的预订注意事项');
+  assert(reminders.some((item) => item.title === expected[3]
+    && /2026-10-03至2026-10-05/.test(item.note)), '连续两晚住宿截止到第三天白天退房');
   console.log('酒店提醒：' + reminders.map((item) => `${item.title}〔${item.note}〕`).join('；'));
   console.log('每日酒店：' + hotels.map((item) => `${item.dayIndex + 1}日 ${item.endLocation}`).join('；'));
   console.log(`Word「${meta.title}」解析完成：${meta.days.length} 天，${clean.length} 条详细安排`);

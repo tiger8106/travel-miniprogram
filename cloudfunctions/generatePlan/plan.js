@@ -9038,7 +9038,7 @@ function canonicalHotelReminders(alarms, outline) {
     if (!groups.has(key)) groups.set(key, { name, stays: [], task });
     const group = groups.get(key);
     const checkout = task.checkIn ? shiftDate(task.checkIn, task.nights) : '';
-    group.stays.push(`${task.checkIn || '日期待确认'}入住、${checkout || '日期待确认'}退房`);
+    group.stays.push(`${task.checkIn || '日期待确认'}至${checkout || '日期待确认'}`);
   });
   const oldHotels = asArray(alarms).filter((alarm) => alarm.type === 'hotel');
   const now = Date.now();

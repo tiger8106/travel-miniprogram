@@ -24,7 +24,7 @@ const COL_TASK = 'parse_tasks';
 const GEOCODE_DEADLINE_MS = 35 * 1000;
 
 // 解析引擎版本：返回给前端展示，用于确认线上跑的是不是最新代码
-const PARSE_VERSION = 'v4.7-source-hotels-grouped-reminders';
+const PARSE_VERSION = 'v4.8-hotel-stay-ranges';
 const DEFAULT_ALARM_LEAD_MINUTES = 5;
 
 function alarmType(type) {

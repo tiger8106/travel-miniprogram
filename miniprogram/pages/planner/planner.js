@@ -733,7 +733,6 @@ Page({
       eta.record('detail', totalDays, Date.now() - t0);
       this.updateEtaTexts(totalDays);
 
-      app.globalData.currentTripId = result.tripId;
       homeCache.clear();
       quota.clear();          // 云端已扣 1 次，本地缓存作废，下次进来看到的是最新余额
       this.setData({ generating: false, genTip: '' });
@@ -742,6 +741,11 @@ Page({
         wx.showToast({ title: '攻略已生成', icon: 'success' });
         return;
       }
+      // 只有用户仍停留在本页并准备打开新攻略时，才把它设为首页当前行程。
+      // 离开页面后，即使后台任务完成，也必须保留用户在首页主动切换的行程。
+      app.globalData.currentTripId = result.tripId;
+      app.globalData.currentTrip = null;
+      homeCache.setSelectedTripId(auth.getOpenid(), result.tripId);
       this.gotoTrip(result);
     } catch (err) {
       if (this._offGen) { this._offGen(); this._offGen = null; }

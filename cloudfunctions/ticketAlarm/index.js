@@ -6,7 +6,7 @@ cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
 const COL = 'ticket_alarms';
 const COL_TRIP = 'trips';
-const ALARM_VERSION = 'v1.5-single-reminder-usage';
+const ALARM_VERSION = 'v1.6-hotel-checkout-date';
 const { synchronizeTrip, usageInfoForItem } = require('./booking-sync');
 const {
   DEFAULT_LEAD_MINUTES,
@@ -242,8 +242,13 @@ async function list(db, openid, tripId) {
           : [];
         linked = textMatches.length === 1 ? textMatches[0] : (sameDay.length === 1 ? sameDay[0] : null);
       }
-      const usageInfo = String(a.usageInfo || '').trim()
-        || (linked ? usageInfoForItem(linked, trip) : '');
+      const storedUsage = String(a.usageInfo || '').trim();
+      // 旧版“住宿：起止日期”曾把北京时间午夜按 UTC 取日，整段偏前一天。
+      // 仅重算可关联行程条目的旧格式；新版“住宿时间：多段区间”保留原摘要。
+      const legacyStay = a.type === 'hotel'
+        && /^住宿：\d{4}-\d{2}-\d{2}\s*至\s*\d{4}-\d{2}-\d{2}/.test(storedUsage);
+      const usageInfo = legacyStay && linked ? usageInfoForItem(linked, trip)
+        : storedUsage || (linked ? usageInfoForItem(linked, trip) : '');
       return normalizeAlarm(Object.assign({}, a, usageInfo ? { usageInfo } : {}), DEFAULT_LEAD_MINUTES);
     }),
   };

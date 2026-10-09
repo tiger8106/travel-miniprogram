@@ -14,7 +14,6 @@
 //   gen.sync();                                    // 回到小程序时接上没跑完的任务
 
 const api = require('../services/api');
-const homeCache = require('./homecache');
 
 const STORE_KEY = 'gen_running_job';
 const MAX_RUN_MS = 12 * 60 * 1000;   // 本客户端最多驱动 12 分钟（防死循环）
@@ -72,20 +71,6 @@ function readJobId() {
   try { return wx.getStorageSync(STORE_KEY) || ''; } catch (e) { return ''; }
 }
 
-// 首轮云端返回 tripId 后立刻切换当前行程，首页可以显示已生成的部分；
-// 不等到全部细化结束，也不继续沿用旧首页快照。
-function selectGeneratedTrip(tripId) {
-  if (!tripId) return;
-  try {
-    const app = getApp();
-    if (app && app.globalData && app.globalData.currentTripId !== tripId) {
-      app.globalData.currentTripId = tripId;
-      app.globalData.currentTrip = null;
-      homeCache.clear();
-    }
-  } catch (e) { /* 测试环境没有 getApp，不影响任务驱动 */ }
-}
-
 /** 一轮一轮往下跑，直到跑完 / 失败 / 超时。jobId 与 round 由调用方给。 */
 async function pump(jobId, round, token) {
   let r = { jobId, round, partial: true, status: 'running' };
@@ -115,7 +100,6 @@ async function pump(jobId, round, token) {
     r = Object.assign({}, r, next);
     if (r.status === 'cancelled') { reset(); return r; }
     if (r.status === 'done') r.partial = false;
-    selectGeneratedTrip(r.tripId || state.tripId);
     set({
       jobId,
       tripId: r.tripId || state.tripId,
@@ -159,7 +143,6 @@ async function start(payload) {
       itemCount: res.itemCount || 0,
       status: res.partial ? 'running' : 'done',
     });
-    selectGeneratedTrip(res.tripId || '');
     saveJobId(res.jobId || '');
     let r = res;
     if (res.partial) r = await pump(res.jobId, res.round, token);
@@ -213,7 +196,6 @@ async function sync(options) {
     error: job.error || '',
   });
   if (token !== runToken) return state;
-  selectGeneratedTrip(job.tripId || '');
   if (job.status !== 'running' && !willRevive) {
     saveJobId('');
     return state;

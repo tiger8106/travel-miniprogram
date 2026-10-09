@@ -1,6 +1,6 @@
 const assert = require('assert');
 const { cleanHotelStays } = require('../cloudfunctions/parseTravelPlan/hotel-stays');
-const { groupHotelReminders } = require('../cloudfunctions/parseTravelPlan/hotel-reminders');
+const { groupHotelReminders, stayRanges } = require('../cloudfunctions/parseTravelPlan/hotel-reminders');
 const { canonicalHotelReminders } = require('../cloudfunctions/generatePlan/plan');
 
 const rows = [
@@ -40,8 +40,11 @@ assert.deepStrictEqual(sourced.map((item) => item.endLocation), ['甲城栖云�
 const reminders = groupHotelReminders([], sourced, dates[0], Date.parse('2026-09-01T00:00:00Z'));
 assert.strictEqual(reminders.length, 2, '非连续入住同一酒店只建一条提醒');
 assert.strictEqual(reminders[0].title, '甲城栖云酒店');
-assert(/2026-09-30入住、2026-10-01退房/.test(reminders[0].note));
-assert(/2026-10-02入住、2026-10-03退房/.test(reminders[0].note));
+assert(/2026-09-30至2026-10-01/.test(reminders[0].note));
+assert(/2026-10-02至2026-10-03/.test(reminders[0].note));
+assert(/2026-09-30至2026-10-01/.test(reminders[0].usageInfo), '酒店卡片摘要也应展示正确住宿区间');
+assert.strictEqual(stayRanges(['2026-10-03', '2026-10-04']), '2026-10-03至2026-10-05',
+  '连续两晚住宿应展示入住日到最后一晚次日退房');
 assert(!reminders[0].note.includes('甲城栖云酒店'), '备注不重复酒店名称');
 const generated = canonicalHotelReminders([], { days: [
   { date: dates[0], hotel: '甲城栖云酒店' }, { date: dates[1], hotel: '乙城青山别院' },
@@ -50,4 +53,6 @@ const generated = canonicalHotelReminders([], { days: [
 assert.strictEqual(generated.filter((a) => a.type === 'hotel').length, 2);
 assert.strictEqual(generated[0].title, '甲城栖云酒店');
 assert(!generated[0].note.includes('甲城栖云酒店'));
+assert(/2026-09-30至2026-10-01/.test(generated[0].note));
+assert(/2026-10-02至2026-10-03/.test(generated[0].usageInfo));
 console.log('✅ 上传/新建酒店提醒统一：仅酒店名作标题，多晚归并，备注列完整入住退房日期');
