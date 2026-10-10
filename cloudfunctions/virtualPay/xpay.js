@@ -94,8 +94,10 @@ function readQueryResponse(response, local) {
       .replace(/\s+/g, ' ').slice(0, 120);
     const code = r.errcode === undefined ? 'invalid' : r.errcode;
     // 参数错误可能具体指“订单不存在”，只有微信明确这样说时才当作无远端订单。
-    const notFound = Number(code) === 268490002
-      && /订单不存在|不存在的订单|查无此订单|order[_\s-]*(?:id[_\s-]*)?(?:(?:is|does)[_\s-]*)?not[_\s-]*exist/i.test(detail);
+    const notFound = Number(code) === 268490002 && (
+      /订单不存在|不存在的订单|查无此订单|未找到(?:该)?订单|找不到(?:该)?订单|order[_\s-]*(?:id[_\s-]*)?(?:(?:is|does)[_\s-]*)?not[_\s-]*(?:exist|found)|order[_\s-]*(?:id[_\s-]*)?(?:doesn't|does not)[_\s-]*exist/i.test(detail)
+      // query_order 线上真实返回：errmsg="数据不存在 rid: ..."。仅接受完整说明，不泛化参数错误。
+      || /^(?:数据不存在|data\s+(?:not\s+exist|does\s+not\s+exist))(?:\s+rid\s*[:：]|$)/i.test(detail));
     return { ok: false, notFound, canCancel: notFound, canRepay: notFound,
       reason: `query_error:${code}`, detail };
   }
@@ -107,11 +109,12 @@ function readQueryResponse(response, local) {
     return { ok: false, reason: 'order_invalid' };
   }
   const p = r.order;
-  const status = Number(p.status);
+  const status = p.status === null || p.status === '' ? NaN : Number(p.status);
   if (!Number.isInteger(status)) return { ok: false, reason: 'status_invalid' };
   if (String(p.order_id || '') !== String(local.outTradeNo || '')) return { ok: false, reason: 'order_id_mismatch' };
   if (!Number.isInteger(Number(p.order_fee)) || Number(p.order_fee) !== Number(local.price)) {
-    return { ok: false, reason: 'order_fee_mismatch' };
+    return { ok: false, reason: 'order_fee_mismatch',
+      detail: `status=${status};order_fee=${String(p.order_fee).slice(0, 24)};expected=${local.price}` };
   }
   // 尚未支付的订单可能没有 paid_fee；只对该状态按 0 处理。
   // 已支付订单仍必须带明确的实付金额，不能因字段缺失误发权益。

@@ -615,15 +615,17 @@ ok('订单中心：订单页已创建并在 app.json 注册，付费页有入口
     && /pages\/orders\/orders/.test(appJson2)
     && /onTapOrders/.test(payPageJs) && /onTapOrders/.test(payPageWxml));
 
-// 继续支付必须复用**原订单号**重新签名（新开单号会留两条单、对不上账）；
-// 取消订单 = 软取消（置 cancelled 保留记录），只允许本人待支付订单
-ok('订单中心：待支付订单可继续支付（复用原单号 repay）',
-  /action === 'repay'/.test(payIdx) && /buildPayParams\(g, outTradeNo/.test(payIdx)
+// 可用原单复用；微信初始化失败/关闭的原单只允许关联替代单，保留对账链。
+// 取消前明确查证未支付，旧核实中订单也需要恢复；采用有条件更新保护支付回调。
+ok('订单中心：可用原单续付，失效原单关联替代订单',
+  /action === 'repay'/.test(payIdx) && /let payOrderNo = outTradeNo/.test(payIdx)
+    && /buildPayParams\(g, payOrderNo/.test(payIdx) && /replacementOrderNo: payOrderNo/.test(payIdx)
     && /quota\.payAgain\(/.test(ordersPageJs) && /onPayAgain/.test(ordersPageJs));
 ok('订单中心：取消订单仅允许本人待支付，且软取消保留记录（不物理删除）',
   /action === 'cancelOrder'/.test(payIdx)
     && /order\._openid !== openid/.test(payIdx)
-    && /order\.status !== 'created'/.test(payIdx)
+    && /actionableUnpaid\(order, checked\)/.test(payIdx)
+    && /changeUnpaidOrder\(order, \{ status: 'cancelled'/.test(payIdx)
     && /status: 'cancelled'/.test(payIdx)
     && /quota\.cancelOrder\(/.test(ordersPageJs) && /onCancel/.test(ordersPageJs)
     && !/\.remove\(\)/.test(payIdx.slice(payIdx.indexOf('actionCancelOrder'), payIdx.indexOf('actionConfirm'))));
@@ -636,8 +638,8 @@ ok('付费页已注册且展示计费说明（避免"为什么又扣钱"的投�
     && /一次完整攻略 = 1 次额度/.test(payPageWxml));
 
 ok('订单自动核对补发，用户界面不出现手动同步订单入口',
-  /syncInBackground\(openid\)/.test(ordersPageJs)
-    && /quota\.syncOrders\(\)/.test(ordersPageJs)
+  /syncInBackground\(openid,/.test(ordersPageJs)
+    && /quota\.syncOrders\(nos\)/.test(ordersPageJs)
     && /action: 'sync'/.test(quotaUtil)
     && !/onSync\(\)/.test(payPageJs)
     && !/onSync\(\)/.test(ordersPageJs)

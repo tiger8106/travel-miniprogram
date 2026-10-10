@@ -83,6 +83,7 @@ Page({
       this._epoch = (this._epoch || 0) + 1;
       this._refreshing = false;
       this._recentCancelled = {};
+      this._syncAtByNo = {};
       this.setData({ list: [], pendingCount: 0, page: 0, hasMore: false, loading: true });
     }
     if (!this.data.page) this.showCached();
@@ -158,7 +159,7 @@ Page({
         pendingCount: first.filter((o) => o.status === 'paid' || o.status === 'verifying').length,
         page: 1, hasMore });
       this._refreshing = false;
-      this.syncInBackground(openid);
+      this.syncInBackground(openid, first.map((item) => item.outTradeNo));
     } catch (e) {
       if (auth.getOpenid() !== openid || (this._epoch || 0) !== epoch) return;
       this.setData({ loadError: e.message || '订单读取失败', loading: false });
@@ -167,15 +168,33 @@ Page({
     }
   },
 
-  async syncInBackground(openid) {
-    if (this._lastSyncAt && Date.now() - this._lastSyncAt < 60000) return;
-    this._lastSyncAt = Date.now();
+  async syncInBackground(openid, outTradeNos) {
+    if (!this._syncAtByNo) this._syncAtByNo = {};
+    const nos = (outTradeNos || this.data.list.map((o) => o.outTradeNo))
+      .filter((no) => !this._syncAtByNo[no] || Date.now() - this._syncAtByNo[no] >= 60000);
+    if (!nos.length) return;
+    nos.forEach((no) => { this._syncAtByNo[no] = Date.now(); });
+    const epoch = this._epoch || 0;
     try {
-      const r = await quota.syncOrders();
-      if (auth.getOpenid() === openid && r.delivered) this.refresh();
+      const r = await quota.syncOrders(nos);
+      if (auth.getOpenid() !== openid || (this._epoch || 0) !== epoch) return;
+      if (Array.isArray(r.orders)) {
+        const updates = new Map(r.orders.map((o) => [o.outTradeNo, o]));
+        const list = this.data.list.map((item) => {
+          const patch = updates.get(item.outTradeNo);
+          if (!patch) return item;
+          if (patch.status === 'created' && this._recentCancelled && this._recentCancelled[item.outTradeNo]) return item;
+          return Object.assign(decorate(Object.assign({}, item, patch)), { detailsOpen: item.detailsOpen });
+        });
+        const pendingCount = list.filter((o) => o.status === 'paid' || o.status === 'verifying').length;
+        this.setData({ list, pendingCount });
+        homeCache.writePage(CACHE_KEY, { openid, list: list.slice(0, 10),
+          pendingCount: list.slice(0, 10).filter((o) => o.status === 'paid' || o.status === 'verifying').length,
+          page: 1, hasMore: this.data.hasMore || this.data.page > 1 });
+      } else if (r.delivered || r.changed) this.refresh();
     } catch (e) {
       // 自动补偿失败不覆盖已加载的订单列表；下次进页继续重试。
-      this._lastSyncAt = 0;
+      if (auth.getOpenid() === openid) nos.forEach((no) => { delete this._syncAtByNo[no]; });
       console.warn('[orders] 后台订单核对失败', e);
     }
   },
@@ -186,15 +205,17 @@ Page({
     if (!this.data.hasMore || this.data.loadingMore || this._refreshing) return;
     const openid = auth.getOpenid();
     const page = this.data.page + 1;
+    const epoch = this._epoch || 0;
     this.setData({ loadingMore: true });
     try {
       const result = await quota.orderList(page);
-      if (auth.getOpenid() !== openid || page !== this.data.page + 1) return;
+      if (auth.getOpenid() !== openid || (this._epoch || 0) !== epoch || page !== this.data.page + 1) return;
       const seen = new Set(this.data.list.map((o) => o.outTradeNo));
       const extra = (result.list || []).map(decorate).filter((o) => !seen.has(o.outTradeNo));
       const list = this.data.list.concat(extra);
       this.setData({ list, page, hasMore: !!result.hasMore,
         pendingCount: list.filter((o) => o.status === 'paid' || o.status === 'verifying').length });
+      this.syncInBackground(openid, extra.map((item) => item.outTradeNo));
     } catch (e) {
       wx.showToast({ title: e.message || '加载更多订单失败', icon: 'none' });
     } finally { this.setData({ loadingMore: false }); }
@@ -234,14 +255,16 @@ Page({
   },
 
   /**
-   * 继续支付：复用原订单号重新签名拉起支付（不新建订单，避免同一笔购买留两条单）
+   * 继续支付：云端核对后复用可用原单，或关联替代订单。
    */
   async onPayAgain(e) {
     const no = e.currentTarget.dataset.no;
-    if (!no || this.data.paying) return;
+    if (!no || this.data.paying || this.data.cancellingNo) return;
     this.setData({ paying: true });
+    let replacedNo = '';
     try {
       const r = await quota.payAgain(no);
+      replacedNo = r.replacedOrderNo || '';
       if (r.ok) {
         wx.showToast({ title: '支付成功', icon: 'success' });
       } else {
@@ -252,20 +275,22 @@ Page({
         });
       }
     } catch (err) {
+      replacedNo = err.replacedOrderNo || '';
       const msg = (err && err.message) || '支付失败';
       // 「已取消」不用弹窗，toast 一下就行；长报错用弹窗（toast 截 30 字看不出原因）
-      if (/取消/.test(msg)) wx.showToast({ title: '已取消支付', icon: 'none' });
+      if (err.paymentCancelled) wx.showToast({ title: '已取消支付', icon: 'none' });
       else wx.showModal({ title: '支付没走成', content: msg.slice(0, 200), showCancel: false });
     } finally {
       this.setData({ paying: false });
-      this.refreshAfterOrderAction();
+      this.refreshAfterOrderAction(replacedNo);
     }
   },
 
   /** 取消订单（云端只允许取消「待支付」的，已支付/已到账的会拒绝并给出原因） */
   async onCancel(e) {
     const no = e.currentTarget.dataset.no;
-    if (!no || this.data.cancellingNo) return;
+    if (!no || this.data.cancellingNo || this.data.paying) return;
+    this.setData({ cancellingNo: no });
     const r = await new Promise((resolve) => {
       wx.showModal({
         title: '取消订单',
@@ -277,7 +302,7 @@ Page({
         fail: () => resolve({}),
       });
     });
-    if (!r.confirm) return;
+    if (!r.confirm) { this.setData({ cancellingNo: '' }); return; }
 
     this.setData({ cancellingNo: no });
     wx.showLoading({ title: '取消中…', mask: true });

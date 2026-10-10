@@ -48,6 +48,12 @@ const explicitMissing = X.readQueryResponse({ errcode: 268490002,
   errmsg: 'order_id not exist' }, local);
 assert.strictEqual(explicitMissing.notFound, true);
 assert.strictEqual(explicitMissing.canCancel, true);
+const actualMissing = X.readQueryResponse({ errcode: 268490002,
+  errmsg: '数据不存在 rid: test-request-id' }, local);
+assert.strictEqual(actualMissing.notFound, true, '真实查单无单说明必须识别');
+assert.strictEqual(actualMissing.canRepay, true);
+assert.strictEqual(X.readQueryResponse({ errcode: 268490002,
+  errmsg: '配置数据不存在，请检查 env' }, local).canCancel, false, '不能把其他数据缺失误判为订单不存在');
 const badParams = X.readQueryResponse({ errcode: 268490002,
   errmsg: 'missing env field' }, local);
 assert.strictEqual(badParams.canCancel, false);

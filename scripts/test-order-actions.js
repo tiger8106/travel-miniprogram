@@ -52,6 +52,32 @@ async function run() {
   await new Promise((resolve) => setImmediate(resolve));
   assert.strictEqual(page.data.list[0].status, 'cancelled', '短暂读到旧副本也不能让取消按钮闪回');
   assert.strictEqual(cached.list[0].status, 'cancelled');
+  page._syncAtByNo = {};
+  page.data.list.push({ outTradeNo: 'old-page-order', status: 'verifying', detailsOpen: true });
+  page.data.page = 2;
+  let queried = [];
+  quota.syncOrders = async (nos) => { queried = nos; return { delivered: 0,
+    orders: [{ outTradeNo: 'old-page-order', status: 'created' }] }; };
+  await page.syncInBackground('owner', ['old-page-order']);
+  assert.deepStrictEqual(queried, ['old-page-order'], '后续页面必须核对自己的旧订单');
+  assert.strictEqual(page.data.list[1].status, 'created', '未发货也要刷新恢复的待支付状态');
+  assert.strictEqual(page.data.list[1].detailsOpen, true, '后台校准不收起展开的详情');
+
+  const lateSync = deferred();
+  quota.syncOrders = () => lateSync.promise;
+  page._syncAtByNo = {};
+  const staleSync = page.syncInBackground('owner', [orderNo]);
+  page._epoch++;
+  lateSync.resolve({ orders: [{ outTradeNo: orderNo, status: 'created' }] });
+  await staleSync;
+  assert.strictEqual(page.data.list[0].status, 'cancelled', '在途旧同步结果不得覆盖写操作');
+
+  let paymentCalls = 0;
+  quota.payAgain = async () => { paymentCalls++; };
+  page.data.cancellingNo = orderNo;
+  await page.onPayAgain({ currentTarget: { dataset: { no: orderNo } } });
+  assert.strictEqual(paymentCalls, 0, '取消确认/请求进行中不能并发拉起付款');
+  page.data.cancellingNo = '';
   console.log('订单取消确认与并发列表刷新回归通过');
 }
 
