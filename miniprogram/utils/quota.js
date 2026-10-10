@@ -133,6 +133,10 @@ function raiseVirtualPay(order) {
         const raw = (err && err.errMsg) || '';
         if (code === -2) reject(Object.assign(new Error('已取消支付'), { paymentCancelled: true }));
         else if (code === -15007) reject(Object.assign(new Error('登录态过期，请稍后重试'), { sessionExpired: true }));
+        else if (code === -15002 || code === -15012
+          || /ios支付时订单号重复|outTradeNo重复使用|订单号重复/i.test(raw)) {
+          reject(Object.assign(new Error('订单未能发起，请稍后重试'), { orderNumberRejected: true }));
+        }
         else if (code === -15010 || code === -15014) reject(new Error('商品还没发布生效，请稍等 10 分钟再试'));
         else if (/no permission/i.test(raw)) {
           reject(new Error('虚拟支付在当前环境不可用：模拟器不支持支付，请用真机重试；真机仍报错请到小程序后台确认「虚拟支付」权限已开通'));
@@ -159,20 +163,33 @@ async function confirmOrder(outTradeNo) {
 
 async function payPreparedOrder(order) {
   let current = order;
+  const replaced = new Set(order.replacedOrderNo ? [order.replacedOrderNo] : []);
+  let sessionRetried = false;
+  let numberRetried = false;
   try {
-    try { await raiseVirtualPay(current); }
-    catch (error) {
-      if (!error.sessionExpired) throw error;
-      const code = await loginCode();
-      current = await callFn('virtualPay', { action: 'repay', outTradeNo: current.outTradeNo,
-        code, platform: devicePlatform() });
-      await raiseVirtualPay(current);
+    for (;;) {
+      try { await raiseVirtualPay(current); break; }
+      catch (error) {
+        if (error.sessionExpired && !sessionRetried) sessionRetried = true;
+        else if (error.orderNumberRejected && !numberRetried) numberRetried = true;
+        else throw error;
+        const code = await loginCode();
+        const prepared = await callFn('virtualPay', { action: 'repay', outTradeNo: current.outTradeNo,
+          code, platform: devicePlatform() });
+        // 防止客户端新代码调用旧云函数，又把已用号码送回 SDK。
+        if (prepared.outTradeNo === current.outTradeNo || !prepared.signData) {
+          throw new Error('订单未能更新，请稍后重试');
+        }
+        if (prepared.replacedOrderNo) replaced.add(prepared.replacedOrderNo);
+        current = prepared;
+      }
     }
     return Object.assign(await confirmOrder(current.outTradeNo), {
-      outTradeNo: current.outTradeNo, replacedOrderNo: current.replacedOrderNo || order.replacedOrderNo || '',
+      outTradeNo: current.outTradeNo, replacedOrderNo: [...replaced][0] || '', replacedOrderNos: [...replaced],
     });
   } catch (error) {
-    error.replacedOrderNo = current.replacedOrderNo || order.replacedOrderNo || '';
+    error.replacedOrderNo = [...replaced][0] || '';
+    error.replacedOrderNos = [...replaced];
     throw error;
   }
 }
@@ -204,7 +221,7 @@ async function pay(goodsId) {
 }
 
 /**
- * 继续支付：云端核对后复用可用原单，失效原单关联替代单再拉起支付
+ * 继续支付：云端查证未支付后关联新单号，不能重复使用已经拉起过支付的号码
  * @param {string} outTradeNo
  */
 async function payAgain(outTradeNo) {

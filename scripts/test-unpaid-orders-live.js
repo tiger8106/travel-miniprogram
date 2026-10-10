@@ -8,7 +8,8 @@ const appid = require(path.resolve(__dirname, '../project.config.json')).appid;
 const wsEndpoint = option('--ws', 'ws://127.0.0.1:9420');
 const exercise = args.includes('--exercise');
 const uiCancel = args.includes('--ui-cancel');
-const audit = exercise || uiCancel || args.includes('--audit');
+const iosRenew = args.includes('--ios-renew');
+const audit = exercise || uiCancel || iosRenew || args.includes('--audit');
 
 async function main() {
   const mini = await automator.connect({ wsEndpoint });
@@ -54,9 +55,9 @@ async function main() {
       const q = r.result.data;
       return { quota: q.quota, gift: q.gift, giftExpireAt: q.giftExpireAt, vipUntil: q.vipUntil };
     });
-    const creditsBefore = exercise || uiCancel ? await creditState() : null;
+    const creditsBefore = exercise || uiCancel || iosRenew ? await creditState() : null;
     const pending = all.filter((o) => ['created', 'verifying', 'paid'].includes(o.status));
-    const report = { mode: exercise ? 'exercise' : uiCancel ? 'ui-cancel' : audit ? 'audit' : 'read',
+    const report = { mode: exercise ? 'exercise' : uiCancel ? 'ui-cancel' : iosRenew ? 'ios-renew' : audit ? 'audit' : 'read',
       version: diag.data.version, total: all.length, candidates: pending.length, orders: [] };
     if (!audit) {
       const ledger = await call({ action: 'adminLedger' });
@@ -68,7 +69,7 @@ async function main() {
           reason: detail.lastQueryReason, detail: detail.lastQueryDetail };
       });
     } else {
-      assert.strictEqual(report.version, 'v1.6-unpaid-recovery', '必须先部署本次 virtualPay，再执行完整核查');
+      assert.strictEqual(report.version, 'v1.7-single-use-orders', '必须先部署本次 virtualPay，再执行完整核查');
       for (const o of pending) {
         const r = await call({ action: 'adminInspectOrder', outTradeNo: o.outTradeNo });
         assert.strictEqual(r.code, 0, r.msg);
@@ -92,6 +93,49 @@ async function main() {
         item.cancelCode = cancelled.code;
         if (cancelled.code !== 0) item.cancelMessage = cancelled.msg;
         else item.repeatCancelCode = (await call({ action: 'cancelOrder', outTradeNo: prepared.outTradeNo })).code;
+      }
+      if (iosRenew) {
+        const testNos = [];
+        try {
+          const code = await mini.evaluate(async () => (await wx.login()).code);
+          const created = await call({ action: 'createOrder', goodsId: 'plan_1', code, platform: 'ios' });
+          assert.strictEqual(created.code, 0, created.msg);
+          let current = created.data;
+          testNos.push(current.outTradeNo);
+          for (let step = 0; step < 2; step++) {
+            const code = await mini.evaluate(async () => (await wx.login()).code);
+            const renewed = await call({ action: 'repay', outTradeNo: current.outTradeNo, code, platform: 'ios' });
+            assert.strictEqual(renewed.code, 0, renewed.msg);
+            const next = renewed.data;
+            testNos.push(next.outTradeNo);
+            assert.notStrictEqual(next.outTradeNo, current.outTradeNo, 'iOS 续付不得复用原号码');
+            assert.strictEqual(next.replacedOrderNo, current.outTradeNo);
+            const sign = JSON.parse(next.signData);
+            assert.strictEqual(sign.outTradeNo, next.outTradeNo);
+            assert.strictEqual(sign.goodsPrice, JSON.parse(created.data.signData).goodsPrice);
+            assert.strictEqual(sign.env, 0);
+            assert(next.paySig && next.signature, '新号码须由云端重新计算两道签名');
+            current = next;
+          }
+          const states = new Map((await listAll()).map((o) => [o.outTradeNo, o.status]));
+          assert.strictEqual(states.get(testNos[0]), 'cancelled');
+          assert.strictEqual(states.get(testNos[1]), 'cancelled');
+          assert.strictEqual(states.get(testNos[2]), 'created');
+          report.ios = { outTradeNos: testNos, newNumberEachTime: true, productionEnv: true,
+            pricePreserved: true, sdkInvoked: false };
+        } finally {
+          for (const no of [...new Set(testNos)].reverse()) {
+            const cleanup = await call({ action: 'cancelOrder', outTradeNo: no });
+            assert.strictEqual(cleanup.code, 0, cleanup.msg);
+          }
+        }
+        const after = await listAll();
+        const states = new Map(after.map((o) => [o.outTradeNo, o.status]));
+        assert(testNos.every((no) => states.get(no) === 'cancelled'));
+        report.ios.cleanedUp = true;
+        report.protectedOrdersUnchanged = all.every((o) => states.get(o.outTradeNo) === o.status);
+        report.creditsUnchanged = JSON.stringify(await creditState()) === JSON.stringify(creditsBefore);
+        assert(report.protectedOrdersUnchanged && report.creditsUnchanged, '测试不能改变其他订单或额度');
       }
       if (uiCancel) {
         const code = await mini.evaluate(async () => (await wx.login()).code);

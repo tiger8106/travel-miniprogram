@@ -78,6 +78,10 @@ async function run() {
   await page.onPayAgain({ currentTarget: { dataset: { no: orderNo } } });
   assert.strictEqual(paymentCalls, 0, '取消确认/请求进行中不能并发拉起付款');
   page.data.cancellingNo = '';
+  page.data.list.push({ outTradeNo: 'replacement-1', status: 'created' });
+  page.refreshAfterOrderAction(['old-page-order', 'replacement-1']);
+  assert.strictEqual(page.data.list[1].status, 'cancelled', 'SDK换号重试后旧购买单立即更新');
+  assert.strictEqual(page.data.list[2].status, 'cancelled', '中间替代单也必须立即更新');
   console.log('订单取消确认与并发列表刷新回归通过');
 }
 

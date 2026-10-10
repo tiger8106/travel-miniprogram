@@ -615,12 +615,16 @@ ok('订单中心：订单页已创建并在 app.json 注册，付费页有入口
     && /pages\/orders\/orders/.test(appJson2)
     && /onTapOrders/.test(payPageJs) && /onTapOrders/.test(payPageWxml));
 
-// 可用原单复用；微信初始化失败/关闭的原单只允许关联替代单，保留对账链。
+// 虚拟支付号码只能使用一次，续付查证未支付后关联新单，保留对账链。
 // 取消前明确查证未支付，旧核实中订单也需要恢复；采用有条件更新保护支付回调。
-ok('订单中心：可用原单续付，失效原单关联替代订单',
-  /action === 'repay'/.test(payIdx) && /let payOrderNo = outTradeNo/.test(payIdx)
+ok('订单中心：续付查证未支付后关联新单号，不复用 SDK 已用号码',
+  /action === 'repay'/.test(payIdx) && /const payOrderNo = genOutTradeNo\(\)/.test(payIdx)
     && /buildPayParams\(g, payOrderNo/.test(payIdx) && /replacementOrderNo: payOrderNo/.test(payIdx)
     && /quota\.payAgain\(/.test(ordersPageJs) && /onPayAgain/.test(ordersPageJs));
+ok('支付恢复：重复/关闭号码与过期登录态分别只重试一次，旧签名不复用',
+  /code === -15002/.test(quotaUtil) && /code === -15012/.test(quotaUtil)
+    && /!numberRetried/.test(quotaUtil) && /!sessionRetried/.test(quotaUtil)
+    && /prepared\.outTradeNo === current\.outTradeNo/.test(quotaUtil));
 ok('订单中心：取消订单仅允许本人待支付，且软取消保留记录（不物理删除）',
   /action === 'cancelOrder'/.test(payIdx)
     && /order\._openid !== openid/.test(payIdx)

@@ -39,7 +39,7 @@ const R = require('./quota-rules');
 const db = cloud.database();
 const COL_ORDER = 'orders';
 const MAX_PENDING_ORDERS = 10;
-const VERSION = 'v1.6-unpaid-recovery';
+const VERSION = 'v1.7-single-use-orders';
 
 const OFFER_ID = String(process.env.XPAY_OFFER_ID || '');
 const ENV = Number(process.env.XPAY_ENV || 0);          // 0 现网 / 1 沙箱
@@ -504,7 +504,7 @@ async function actionCreateOrder(openid, event) {
   };
 }
 
-/** 继续支付：可用原单重新签名；已初始化失败/关闭的原单关联一笔替代订单。 */
+/** 虚拟支付单号只能使用一次：续付先查证未支付，再关联新单号。 */
 async function actionRepay(openid, event) {
   const outTradeNo = String(event.outTradeNo || '');
   if (!outTradeNo) return { code: -1, msg: '缺少订单号' };
@@ -540,9 +540,11 @@ async function actionRepay(openid, event) {
   if (!g) return { code: -3, msg: '商品已下架，请回到付费页重新购买' };
 
   const platform = String(event.platform || order.platform || '').toLowerCase();
-  const replace = [0, 6].includes(checked.status) || (platform === 'ios' && Number(order.env) === 1);
-  const picked = replace ? pickPayEnv(platform) : { env: Number(order.env || 0), platform,
-    appKey: X.appKeyForEnv(order.env, { production: process.env.XPAY_APP_KEY,
+  // status=1/无远端订单也不代表 SDK 没消费过单号；不能据此重复拉起同一单号。
+  // 保留原支付环境；iOS 不支持沙箱，只有这个明确的例外切到现网。
+  const env = platform === 'ios' ? 0 : Number(order.env || 0);
+  const picked = { env, platform,
+    appKey: X.appKeyForEnv(env, { production: process.env.XPAY_APP_KEY,
       sandbox: process.env.XPAY_APP_KEY_SANDBOX }) };
   if (picked.err || !picked.appKey) return { code: -2, msg: '当前支付配置暂不可用，请稍后重试' };
 
@@ -553,29 +555,24 @@ async function actionRepay(openid, event) {
 
   // 价格以**下单时记录的为准**，防止期间调价导致与米大师下单金额不符
   const price = Number(order.price || g.price || 0);
-  let payOrderNo = outTradeNo;
+  const payOrderNo = genOutTradeNo();
   const lastPayAt = Date.now();
-  if (replace) {
-    payOrderNo = genOutTradeNo();
-    const replacement = await db.collection(COL_ORDER).add({ data: {
-      _openid: openid, outTradeNo: payOrderNo, goodsId: g.id, price, env: picked.env,
-      platform: picked.platform, status: 'created', createdAt: lastPayAt, lastPayAt,
-      replacesOrderNo: outTradeNo,
-    } });
-    const changed = await changeUnpaidOrder(order, { status: 'cancelled', cancelledAt: lastPayAt,
-      replacementOrderNo: payOrderNo });
-    if (!changed) {
-      await updateOrder(replacement._id, { status: 'cancelled', cancelledAt: Date.now() });
-      return { code: -2, msg: '订单状态已更新，请重试' };
-    }
-  } else if (!(await changeUnpaidOrder(order, { status: 'created', platform: picked.platform, lastPayAt }))) {
+  const replacement = await db.collection(COL_ORDER).add({ data: {
+    _openid: openid, outTradeNo: payOrderNo, goodsId: g.id, price, env: picked.env,
+    platform: picked.platform, status: 'created', createdAt: lastPayAt, lastPayAt,
+    replacesOrderNo: outTradeNo,
+  } });
+  const changed = await changeUnpaidOrder(order, { status: 'cancelled', cancelledAt: lastPayAt,
+    replacementOrderNo: payOrderNo });
+  if (!changed) {
+    await updateOrder(replacement._id, { status: 'cancelled', cancelledAt: Date.now() });
     return { code: -2, msg: '订单状态已更新，请重试' };
   }
 
   return {
     code: 0,
     data: Object.assign(buildPayParams(g, payOrderNo, price, openid, picked.env, picked.appKey, sk.sessionKey),
-      replace ? { replacedOrderNo: outTradeNo } : {}),
+      { replacedOrderNo: outTradeNo }),
   };
 }
 

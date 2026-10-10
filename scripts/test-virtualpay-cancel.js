@@ -120,7 +120,9 @@ async function run() {
     row = reset({ status: state });
     const r = await call('repay', row, { code: 'good', platform: 'android' });
     assert.strictEqual(r.code, 0, state + ' 明确未支付应该能续付');
-    assert.strictEqual(row.status, 'created');
+    assert.strictEqual(row.status, 'cancelled');
+    assert.notStrictEqual(r.data.outTradeNo, row.outTradeNo, 'SDK 单号只能使用一次，续付必须换号');
+    assert.strictEqual(r.data.replacedOrderNo, row.outTradeNo);
   }
   for (const [index, no] of orderNos.entries()) {
     const row = reset({ outTradeNo: no });
@@ -157,6 +159,13 @@ async function run() {
   assert.strictEqual(row.status, 'delivered'); assert.strictEqual(grants, 1);
 
   row = reset();
+  queryResponse = (q) => ({ errcode: 0, order: { order_id: q.order_id, order_fee: 300, paid_fee: 300, status: 2 } });
+  assert.strictEqual((await call('repay', row, { code: 'good', platform: 'ios' })).code, -2);
+  assert.strictEqual(row.status, 'delivered');
+  assert.strictEqual(records.orders.length, 1, '已付款时不允许新建替代单');
+  assert.strictEqual(grants, 1);
+
+  row = reset();
   queryResponse = (q) => ({ errcode: 0, order: { order_id: q.order_id, order_fee: 300, status: 0 } });
   const failed = await call('repay', row, { code: 'bad', platform: 'android' });
   assert.strictEqual(failed.code, -3);
@@ -175,13 +184,35 @@ async function run() {
   assert.strictEqual(JSON.parse(replaced.data.signData).goodsPrice, 200, '替代订单保留原订单价格');
   const again = await call('repay', row, { code: 'good', platform: 'android' });
   assert.strictEqual(again.code, 0);
-  assert.strictEqual(again.data.outTradeNo, replaced.data.outTradeNo, '旧入口重试复用已关联替代单');
+  assert.notStrictEqual(again.data.outTradeNo, replaced.data.outTradeNo, '旧入口重试跟随替代链后再次换新号');
   assert.strictEqual(again.data.replacedOrderNo, row.outTradeNo, '旧入口重试仍须让客户端立即更新旧卡片');
 
   row = reset({ env: 1 });
   const sameEnv = await call('repay', row, { code: 'good', platform: 'android' });
   assert.strictEqual(sameEnv.code, 0);
   assert.strictEqual(sameEnv.data.env, 1, '全局配置切换后仍使用原单环境和对应密钥');
+
+  for (const remote of ['unpaid', 'not-found']) {
+    row = reset({ platform: 'ios', price: 200 });
+    queryResponse = remote === 'unpaid'
+      ? (q) => ({ errcode: 0, order: { order_id: q.order_id, order_fee: 200, status: 1, paid_fee: 0 } })
+      : { errcode: 268490002, errmsg: '数据不存在 rid: ios-test' };
+    const ios = await call('repay', row, { code: 'good', platform: 'ios' });
+    assert.strictEqual(ios.code, 0);
+    assert.notStrictEqual(ios.data.outTradeNo, row.outTradeNo, remote + ' 的 iOS 单不能复用旧号');
+    assert.strictEqual(JSON.parse(ios.data.signData).goodsPrice, 200);
+    assert.strictEqual(ios.data.env, 0);
+    assert.strictEqual(row.status, 'cancelled');
+  }
+  row = reset({ env: 1, platform: 'ios' });
+  const iosProduction = await call('repay', row, { code: 'good', platform: 'ios' });
+  assert.strictEqual(iosProduction.data.env, 0, 'iOS 续付只能用现网新单');
+
+  row = reset();
+  beforeChange = () => { row.status = 'delivered'; row.verifiedPaymentAt = Date.now(); };
+  assert.strictEqual((await call('repay', row, { code: 'good', platform: 'ios' })).code, -2);
+  assert.strictEqual(row.status, 'delivered');
+  assert.strictEqual(records.orders[1].status, 'cancelled', '并发支付成功时新准备单作废，不能再拉起付款');
 
   row = reset();
   beforeChange = () => { row.status = 'delivered'; row.verifiedPaymentAt = Date.now(); };

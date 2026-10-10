@@ -102,10 +102,11 @@ Page({
 
   /** 写操作后废弃旧列表请求，立即展示本地结果，再读取云端最新状态。 */
   refreshAfterOrderAction(cancelledNo) {
-    if (cancelledNo) {
+    const cancelledNos = new Set((Array.isArray(cancelledNo) ? cancelledNo : [cancelledNo]).filter(Boolean));
+    if (cancelledNos.size) {
       if (!this._recentCancelled) this._recentCancelled = {};
-      this._recentCancelled[cancelledNo] = Date.now();
-      const markCancelled = (item) => item.outTradeNo === cancelledNo
+      cancelledNos.forEach((no) => { this._recentCancelled[no] = Date.now(); });
+      const markCancelled = (item) => cancelledNos.has(item.outTradeNo)
         ? Object.assign({}, item, { status: 'cancelled', statusText: STATUS_TEXT.cancelled,
           userNotice: STATUS_HINT.cancelled, noticeClass: '' }) : item;
       this.setData({ list: this.data.list.map(markCancelled), loadError: '' });
@@ -255,16 +256,16 @@ Page({
   },
 
   /**
-   * 继续支付：云端核对后复用可用原单，或关联替代订单。
+   * 继续支付：云端核对未支付后关联新订单号。
    */
   async onPayAgain(e) {
     const no = e.currentTarget.dataset.no;
     if (!no || this.data.paying || this.data.cancellingNo) return;
     this.setData({ paying: true });
-    let replacedNo = '';
+    let replacedNo = [];
     try {
       const r = await quota.payAgain(no);
-      replacedNo = r.replacedOrderNo || '';
+      replacedNo = r.replacedOrderNos || r.replacedOrderNo || '';
       if (r.ok) {
         wx.showToast({ title: '支付成功', icon: 'success' });
       } else {
@@ -275,7 +276,7 @@ Page({
         });
       }
     } catch (err) {
-      replacedNo = err.replacedOrderNo || '';
+      replacedNo = err.replacedOrderNos || err.replacedOrderNo || '';
       const msg = (err && err.message) || '支付失败';
       // 「已取消」不用弹窗，toast 一下就行；长报错用弹窗（toast 截 30 字看不出原因）
       if (err.paymentCancelled) wx.showToast({ title: '已取消支付', icon: 'none' });
