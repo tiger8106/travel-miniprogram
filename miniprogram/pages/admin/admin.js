@@ -221,6 +221,7 @@ Page({
       this.setData({
         paymentError: '',
         paymentSummary: {
+          serviceVersion: d.serviceVersion || '',
           scope: d.scope || '最近50笔本地订单',
           total: d.total || 0,
           verified: d.verified || 0,

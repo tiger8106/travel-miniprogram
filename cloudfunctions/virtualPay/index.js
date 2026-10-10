@@ -39,6 +39,7 @@ const R = require('./quota-rules');
 const db = cloud.database();
 const COL_ORDER = 'orders';
 const MAX_PENDING_ORDERS = 10;
+const VERSION = 'v1.5-order-actions';
 
 const OFFER_ID = String(process.env.XPAY_OFFER_ID || '');
 const ENV = Number(process.env.XPAY_ENV || 0);          // 0 现网 / 1 沙箱
@@ -260,10 +261,11 @@ async function reconcileOrder(order, options) {
   const now = Date.now();
   if (q.platform) {
     await updateOrder(order._id, Object.assign({}, q.platform, {
-      lastQueriedAt: now, lastQueryReason: q.reason || '',
+      lastQueriedAt: now, lastQueryReason: q.reason || '', lastQueryDetail: q.detail || '',
     }));
   } else {
-    await updateOrder(order._id, { lastQueriedAt: now, lastQueryReason: q.reason || 'unknown' });
+    await updateOrder(order._id, { lastQueriedAt: now,
+      lastQueryReason: q.reason || 'unknown', lastQueryDetail: q.detail || '' });
   }
   if (!q.ok) {
     // 老版本把查单失败也标记为 paid；现在不允许用这个状态补发。
@@ -481,11 +483,21 @@ async function actionRepay(openid, event) {
   if (order.status === 'paid') return { code: -2, msg: '这笔订单已支付，权益正在发放，请稍后查看我的订单' };
   if (order.status === 'cancelled') return { code: -2, msg: '这笔订单已取消，请回到付费页重新下单' };
   const checked = await queryOrder(order);
+  await updateOrder(order._id, Object.assign({ lastQueriedAt: Date.now(),
+    lastQueryReason: checked.reason || '', lastQueryDetail: checked.detail || '' }, checked.platform || {}));
   if (checked.ok) {
     await reconcileOrder(order);
     return { code: -2, msg: '微信侧已支付，正在处理权益，请勿重复付款' };
   }
-  if (!checked.canCancel) return { code: -2, msg: '微信侧支付状态暂无法确认，请稍后再试，避免重复扣款' };
+  if (checked.canCancel && [0, 6].includes(checked.status)) {
+    // 微信侧原单不可再支付：留存旧单用于对账，另开一笔同商品订单供用户继续。
+    await updateOrder(order._id, { status: 'cancelled', cancelledAt: Date.now() });
+    return actionCreateOrder(openid, { goodsId: order.goodsId,
+      code: event.code, platform: event.platform || order.platform });
+  }
+  if (!checked.canRepay || (checked.notFound && (order.paymentReturnedAt || order.paidAt || order.platformOrderId))) {
+    return { code: -2, msg: '原订单暂不能继续支付，请稍后查看订单状态；如未扣款，可重新选择套餐下单' };
+  }
 
   const g = R.goodsById(order.goodsId);
   if (!g) return { code: -3, msg: '商品已下架，请回到付费页重新购买' };
@@ -531,13 +543,13 @@ async function actionCancelOrder(openid, event) {
 
   const checked = await queryOrder(order);
   await updateOrder(order._id, Object.assign({ lastQueriedAt: Date.now(),
-    lastQueryReason: checked.reason || '' }, checked.platform || {}));
+    lastQueryReason: checked.reason || '', lastQueryDetail: checked.detail || '' }, checked.platform || {}));
   if (checked.ok) {
     await reconcileOrder(order);
     return { code: -2, msg: '微信侧已支付，不能取消；权益正在处理，请稍后查看我的订单' };
   }
-  if (!checked.canCancel) {
-    return { code: -2, msg: '微信侧支付状态暂无法确认，为避免误取消已付款订单，请稍后重试；如已扣款请联系客服' };
+  if (!checked.canCancel || (checked.notFound && (order.paymentReturnedAt || order.paidAt || order.platformOrderId))) {
+    return { code: -2, msg: '这笔订单暂时无法取消，请稍后重试；如已扣款请联系客服' };
   }
 
   await updateOrder(order._id, { status: 'cancelled', cancelledAt: Date.now() });
@@ -683,6 +695,7 @@ async function actionAdminLedger(openid, event) {
   return {
     code: 0,
     data: {
+      serviceVersion: VERSION,
       scope: '最近50笔本地订单',
       total: rows.length,
       verified: verified.length,
@@ -712,6 +725,7 @@ async function actionAdminLedger(openid, event) {
         refundOrderId: String(o.refundOrderId || ''),
         refundWxOrderId: String(o.refundWxOrderId || ''),
         lastQueryReason: String(o.lastQueryReason || ''),
+        lastQueryDetail: String(o.lastQueryDetail || ''),
       })),
     },
   };
@@ -866,7 +880,7 @@ function actionDiag() {
   return {
     code: 0,
     data: {
-      version: 'v1.4-unpaid-cancel',
+      version: VERSION,
       env: ENV,
       envText: ENV === 1 ? '沙箱（安卓可自测）' : '现网',
       offerId: OFFER_ID ? `${OFFER_ID.slice(0, 4)}****` : '',

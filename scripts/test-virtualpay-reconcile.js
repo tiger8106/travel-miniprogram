@@ -39,6 +39,31 @@ const unpaid = X.readQueryResponse({
 assert.strictEqual(unpaid.status, 1);
 assert.strictEqual(unpaid.canCancel, true);
 assert.strictEqual(unpaid.platform.paidFee, 0);
+assert.strictEqual(unpaid.canRepay, true);
+const missingRemote = X.readQueryResponse({ errcode: 0 }, local);
+assert.strictEqual(missingRemote.notFound, true);
+assert.strictEqual(missingRemote.canCancel, true);
+assert.strictEqual(missingRemote.canRepay, true);
+const explicitMissing = X.readQueryResponse({ errcode: 268490002,
+  errmsg: 'order_id not exist' }, local);
+assert.strictEqual(explicitMissing.notFound, true);
+assert.strictEqual(explicitMissing.canCancel, true);
+const badParams = X.readQueryResponse({ errcode: 268490002,
+  errmsg: 'missing env field' }, local);
+assert.strictEqual(badParams.canCancel, false);
+assert.strictEqual(badParams.detail, 'missing env field');
+assert(!X.readQueryResponse({ errcode: 268490002,
+  errmsg: 'access_token=private-token env invalid' }, local).detail.includes('private-token'));
+const initialized = X.readQueryResponse({ errcode: 0, order: {
+  order_id: local.outTradeNo, order_fee: 300, status: 0, env_type: 1,
+} }, local);
+assert.strictEqual(initialized.canCancel, true);
+assert.strictEqual(initialized.canRepay, false);
+const closed = X.readQueryResponse({ errcode: 0, order: {
+  order_id: local.outTradeNo, order_fee: 300, status: 6, env_type: 1,
+} }, local);
+assert.strictEqual(closed.canCancel, true);
+assert.strictEqual(closed.canRepay, false);
 assert.strictEqual(X.readQueryResponse({
   errcode: 0,
   order: { order_id: local.outTradeNo, order_fee: 300, status: 1, paid_fee: 300 },

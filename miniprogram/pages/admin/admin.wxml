@@ -79,6 +79,7 @@
       <view class="primary-btn payment-refresh" bindtap="onReconcilePayments">向微信核对近期订单</view>
       <view wx:if="{{paymentError}}" class="payment-error">{{paymentError}}</view>
       <view wx:if="{{paymentSummary}}" class="payment-summary">
+        <view wx:if="{{paymentSummary.serviceVersion}}">支付服务版本 {{paymentSummary.serviceVersion}}</view>
         <view>{{paymentSummary.scope}}：{{paymentSummary.total}} 笔</view>
         <view>平台确认 {{paymentSummary.verified}} 笔 · 实付 {{paymentSummary.verifiedPaid}}</view>
         <view>平台标记结算 {{paymentSummary.settled}} 笔 · 实付 {{paymentSummary.settledGross}}</view>
@@ -99,6 +100,7 @@
         <view wx:elif="{{item.paymentReview}}" class="payment-error">本地已发货但平台支付未确认，请人工核查权益</view>
         <view wx:if="{{item.platformNotifyError}}" class="payment-error">发货回传待重试：{{item.platformNotifyError}}</view>
         <view wx:if="{{item.lastQueryReason}}" class="user-meta">最近查单：{{item.lastQueryReason}}</view>
+        <view wx:if="{{item.lastQueryDetail}}" class="user-meta">查单说明：{{item.lastQueryDetail}}</view>
       </view>
     </view>
 

@@ -69,6 +69,7 @@ Page({
     list: [],
     pendingCount: 0,   // 「处理中」的笔数
     paying: false,     // 正在拉起支付，防连点出两个支付弹窗
+    cancellingNo: '',  // 取消请求进行中，防连点
     loadError: '',
     page: 0,
     hasMore: false,
@@ -81,6 +82,7 @@ Page({
     if (this._account && this._account !== openid) {
       this._epoch = (this._epoch || 0) + 1;
       this._refreshing = false;
+      this._recentCancelled = {};
       this.setData({ list: [], pendingCount: 0, page: 0, hasMore: false, loading: true });
     }
     if (!this.data.page) this.showCached();
@@ -95,6 +97,26 @@ Page({
     this.setData({ loggedIn: true, loading: false, list: snap.list,
       pendingCount: snap.pendingCount || 0, page: snap.page || 1, hasMore: !!snap.hasMore });
     return true;
+  },
+
+  /** 写操作后废弃旧列表请求，立即展示本地结果，再读取云端最新状态。 */
+  refreshAfterOrderAction(cancelledNo) {
+    if (cancelledNo) {
+      if (!this._recentCancelled) this._recentCancelled = {};
+      this._recentCancelled[cancelledNo] = Date.now();
+      const markCancelled = (item) => item.outTradeNo === cancelledNo
+        ? Object.assign({}, item, { status: 'cancelled', statusText: STATUS_TEXT.cancelled,
+          userNotice: STATUS_HINT.cancelled, noticeClass: '' }) : item;
+      this.setData({ list: this.data.list.map(markCancelled), loadError: '' });
+      const openid = auth.getOpenid();
+      const snap = homeCache.readPage(CACHE_KEY);
+      if (snap && snap.openid === openid && Array.isArray(snap.list)) {
+        homeCache.writePage(CACHE_KEY, Object.assign({}, snap, { list: snap.list.map(markCancelled) }));
+      }
+    }
+    this._epoch = (this._epoch || 0) + 1;
+    this._refreshing = false;
+    this.refresh();
   },
 
   async refresh() {
@@ -115,7 +137,15 @@ Page({
       const result = await quota.orderList(1);
       if (auth.getOpenid() !== openid || (this._epoch || 0) !== epoch) return;
       this._account = openid;
-      const first = (result.list || []).map(decorate);
+      const first = (result.list || []).map((item) => {
+        const cancelledAt = this._recentCancelled && this._recentCancelled[item.outTradeNo];
+        if (item.status !== 'created' && cancelledAt) delete this._recentCancelled[item.outTradeNo];
+        // 云数据库短暂读到旧副本时，不让已取消按钮闪回。
+        if (item.status === 'created' && cancelledAt && Date.now() - cancelledAt < 60000) {
+          return decorate(Object.assign({}, item, { status: 'cancelled', userNotice: STATUS_HINT.cancelled }));
+        }
+        return decorate(item);
+      });
       const seen = new Set(first.map((o) => o.outTradeNo));
       // 后台对账更新首批状态时，不把用户已滚动展开的历史订单突然收回去。
       const older = this.data.page > 1 ? this.data.list.filter((o) => !seen.has(o.outTradeNo)) : [];
@@ -228,18 +258,18 @@ Page({
       else wx.showModal({ title: '支付没走成', content: msg.slice(0, 200), showCancel: false });
     } finally {
       this.setData({ paying: false });
-      this.refresh();
+      this.refreshAfterOrderAction();
     }
   },
 
   /** 取消订单（云端只允许取消「待支付」的，已支付/已到账的会拒绝并给出原因） */
   async onCancel(e) {
     const no = e.currentTarget.dataset.no;
-    if (!no) return;
+    if (!no || this.data.cancellingNo) return;
     const r = await new Promise((resolve) => {
       wx.showModal({
         title: '取消订单',
-        content: '将先向微信核实支付状态。只有微信侧确认尚未支付，才能取消这笔本地订单。',
+        content: '确定取消这笔订单吗？',
         confirmText: '取消订单',
         confirmColor: '#e64340',
         cancelText: '再想想',
@@ -249,15 +279,21 @@ Page({
     });
     if (!r.confirm) return;
 
+    this.setData({ cancellingNo: no });
     wx.showLoading({ title: '取消中…', mask: true });
+    let cancelled = false;
+    let error = null;
     try {
       await quota.cancelOrder(no);
-      wx.hideLoading();
-      wx.showToast({ title: '订单已取消', icon: 'success' });
+      cancelled = true;
     } catch (err) {
+      error = err;
+    } finally {
       wx.hideLoading();
-      wx.showModal({ title: '取消不了', content: (err && err.message) || '取消失败', showCancel: false });
+      this.setData({ cancellingNo: '' });
+      this.refreshAfterOrderAction(cancelled ? no : '');
     }
-    this.refresh();
+    if (cancelled) wx.showToast({ title: '订单已取消', icon: 'success' });
+    else wx.showModal({ title: '取消不了', content: (error && error.message) || '取消失败', showCancel: false });
   },
 });
