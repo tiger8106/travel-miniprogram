@@ -227,7 +227,7 @@ async function orderList(page) {
   return d || { list: [], hasMore: false, page: 1 };
 }
 
-/** 手动补发：付了钱但额度没到账时点「刷新」用它 */
+/** 订单页后台自动核对和补发；不向用户展示手动同步入口。 */
 async function syncOrders() {
   const r = await callFnKeepCode('virtualPay', { action: 'sync' });
   if (r.code !== 0) throw new Error(r.msg || '订单同步失败');

@@ -144,7 +144,9 @@
   flex: 0 0 auto;
   color: #2b7bfa;
   font-size: 22rpx;
-  line-height: 1.5;
+  line-height: 48rpx;
+  min-width: 64rpx;
+  text-align: center;
   margin-left: 12rpx;
 }
 

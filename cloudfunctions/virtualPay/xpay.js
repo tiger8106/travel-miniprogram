@@ -88,16 +88,21 @@ function notifyResponse(result, format) {
 
 function readQueryResponse(response, local) {
   const r = response || {};
-  if (r.errcode !== 0 || !r.order || typeof r.order !== 'object') {
+  if ((r.errcode !== 0 && r.errcode !== '0') || !r.order || typeof r.order !== 'object') {
     return { ok: false, reason: `query_error:${r.errcode === undefined ? 'invalid' : r.errcode}` };
   }
   const p = r.order;
   const status = Number(p.status);
+  if (!Number.isInteger(status)) return { ok: false, reason: 'status_invalid' };
   if (String(p.order_id || '') !== String(local.outTradeNo || '')) return { ok: false, reason: 'order_id_mismatch' };
   if (!Number.isInteger(Number(p.order_fee)) || Number(p.order_fee) !== Number(local.price)) {
     return { ok: false, reason: 'order_fee_mismatch' };
   }
-  if (!Number.isInteger(Number(p.paid_fee)) || Number(p.paid_fee) < 0 || Number(p.paid_fee) > Number(p.order_fee)) {
+  // 尚未支付的订单可能没有 paid_fee；只对该状态按 0 处理。
+  // 已支付订单仍必须带明确的实付金额，不能因字段缺失误发权益。
+  const paidFeeMissing = p.paid_fee === undefined || p.paid_fee === null || p.paid_fee === '';
+  const paidFee = paidFeeMissing ? (status === 1 ? 0 : NaN) : Number(p.paid_fee);
+  if (!Number.isInteger(paidFee) || paidFee < 0 || paidFee > Number(p.order_fee)) {
     return { ok: false, reason: 'paid_fee_invalid' };
   }
   if (p.env_type !== undefined && Number(p.env_type) !== Number(local.env || 0) + 1) {
@@ -109,7 +114,7 @@ function readQueryResponse(response, local) {
     platformOrderId: String(p.wx_order_id || ''),
     channelOrderId: String(p.channel_order_id || ''),
     wxpayOrderId: String(p.wxpay_order_id || ''),
-    paidFee: Number(p.paid_fee || 0),
+    paidFee,
     platformPaidAt: Number(p.paid_time || 0) * 1000,
     platformProvidedAt: Number(p.provide_time || 0) * 1000,
     settlementState: p.sett_state === undefined ? null : Number(p.sett_state),
@@ -119,7 +124,8 @@ function readQueryResponse(response, local) {
     refundFee: Number(p.refund_fee || 0),
     leftFee: Number(p.left_fee || 0),
   };
-  return { ok: paid, paid, status, platform, reason: paid ? '' : `platform_status:${status}` };
+  return { ok: paid, paid, status, canCancel: status === 1 && paidFee === 0,
+    platform, reason: paid ? '' : `platform_status:${status}` };
 }
 
 module.exports = {

@@ -4,7 +4,7 @@
 // 数据来源：virtualPay 云函数的 action: 'orderList'（只返回 _openid 自己的订单）
 // 状态口径：
 //   delivered 已到账 —— 额度/会员已经加上了
-//   paid      处理中 —— 钱付了、额度还没到账（查单或回调还没跑完），可点「同步订单」补发
+//   paid      处理中 —— 钱付了、额度还没到账，由后台自动核对和补发
 //   created   待支付 —— 单子建了但支付没走完（一般不用管）
 
 const quota = require('../../utils/quota');
@@ -16,7 +16,7 @@ const STATUS_TEXT = { delivered: '权益已到账', refunded: '已退款', paid:
 const STATUS_HINT = {
   delivered: '权益已到账，可以使用',
   refunded: '订单已退款；如权益状态有疑问，请联系客服',
-  paid: '支付已完成，权益正在发放，请稍后同步订单',
+  paid: '支付已完成，权益正在发放，请稍后查看',
   verifying: '正在确认支付结果，请勿重复付款',
   created: '尚未完成支付，可以继续支付',
   cancelled: '订单已取消；如已扣款，请联系客服',
@@ -67,8 +67,7 @@ Page({
     loggedIn: false,
     loading: true,
     list: [],
-    pendingCount: 0,   // 「处理中」的笔数，>0 才显示同步按钮
-    syncing: false,
+    pendingCount: 0,   // 「处理中」的笔数
     paying: false,     // 正在拉起支付，防连点出两个支付弹窗
     loadError: '',
     page: 0,
@@ -145,7 +144,9 @@ Page({
       const r = await quota.syncOrders();
       if (auth.getOpenid() === openid && r.delivered) this.refresh();
     } catch (e) {
-      if (auth.getOpenid() === openid) this.setData({ loadError: e.message || '订单同步失败' });
+      // 自动补偿失败不覆盖已加载的订单列表；下次进页继续重试。
+      this._lastSyncAt = 0;
+      console.warn('[orders] 后台订单核对失败', e);
     }
   },
 
@@ -174,27 +175,6 @@ Page({
     if (ok) this.refresh();
   },
 
-  /** 有订单卡在「处理中」时：手动触发一次补发（幂等，不会重复加额度） */
-  async onSync() {
-    if (this.data.syncing) return;
-    this.setData({ syncing: true });
-    wx.showLoading({ title: '同步中…', mask: true });
-    try {
-      const r = await quota.syncOrders();
-      this._lastSyncAt = Date.now();
-      wx.hideLoading();
-      wx.showToast({
-        title: r.delivered ? `已补发 ${r.delivered} 笔` : `已尝试核对 ${r.checked || 0} 笔`,
-        icon: r.delivered ? 'success' : 'none',
-      });
-    } catch (e) {
-      wx.hideLoading();
-      wx.showToast({ title: '同步失败，请稍后再试', icon: 'none' });
-    }
-    this.setData({ syncing: false });
-    this.refresh();
-  },
-
   /** 展开/收起联系客服或退款所需的订单信息 */
   onToggleDetails(e) {
     const no = e.currentTarget.dataset.no;
@@ -211,6 +191,10 @@ Page({
     wx.setClipboardData({
       data: value,
       success: () => wx.showToast({ title: '已复制', icon: 'success' }),
+      fail: (err) => {
+        console.warn('[orders] 复制订单号失败', err);
+        wx.showToast({ title: '复制失败，请长按订单号复制', icon: 'none' });
+      },
     });
   },
 
@@ -233,7 +217,7 @@ Page({
       } else {
         wx.showModal({
           title: '支付已提交',
-          content: `${r.msg || '额度稍后自动到账'}\n\n如果一直没到账，点「同步订单」手动同步（不会重复扣款）。`,
+          content: `${r.msg || '额度稍后自动到账'}\n\n请稍后查看订单和额度；如长时间未到账，请保留支付凭证联系客服。`,
           showCancel: false,
         });
       }

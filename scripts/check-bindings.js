@@ -635,8 +635,14 @@ ok('付费页已注册且展示计费说明（避免"为什么又扣钱"的投�
   /pages\/pay\/pay/.test(appJson2) && /计费说明/.test(payPageWxml)
     && /一次完整攻略 = 1 次额度/.test(payPageWxml));
 
-ok('付了钱额度没到账有补救入口（sync 补发，幂等不重复加）',
-  /onSync\(\)/.test(payPageJs) && /action: 'sync'/.test(quotaUtil));
+ok('订单自动核对补发，用户界面不出现手动同步订单入口',
+  /syncInBackground\(openid\)/.test(ordersPageJs)
+    && /quota\.syncOrders\(\)/.test(ordersPageJs)
+    && /action: 'sync'/.test(quotaUtil)
+    && !/onSync\(\)/.test(payPageJs)
+    && !/onSync\(\)/.test(ordersPageJs)
+    && !/同步订单/.test(payPageWxml)
+    && !/同步订单/.test(fs.readFileSync(path.join(MP, 'pages/orders/orders.wxml'), 'utf8')));
 
 // ---------- ⑮ 有额度就不限量 + 后台生成 + 联网班次 ----------
 const rulesJs = fs.readFileSync(path.join(CF, 'quota/rules.js'), 'utf8');

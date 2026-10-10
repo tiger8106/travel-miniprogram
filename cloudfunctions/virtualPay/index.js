@@ -478,14 +478,14 @@ async function actionRepay(openid, event) {
   const order = await loadOrder(outTradeNo);
   if (!order || order._openid !== openid) return { code: -1, msg: '订单不存在' };
   if (order.status === 'delivered') return { code: -2, msg: '这笔订单已经到账了，不用再付' };
-  if (order.status === 'paid') return { code: -2, msg: '这笔订单已支付，额度发放中，点「同步订单」即可' };
+  if (order.status === 'paid') return { code: -2, msg: '这笔订单已支付，权益正在发放，请稍后查看我的订单' };
   if (order.status === 'cancelled') return { code: -2, msg: '这笔订单已取消，请回到付费页重新下单' };
   const checked = await queryOrder(order);
   if (checked.ok) {
     await reconcileOrder(order);
-    return { code: -2, msg: '微信侧已支付，订单已同步，请勿重复付款' };
+    return { code: -2, msg: '微信侧已支付，正在处理权益，请勿重复付款' };
   }
-  if (checked.status !== 1) return { code: -2, msg: '微信侧支付状态尚未确认，请先同步订单，避免重复扣款' };
+  if (!checked.canCancel) return { code: -2, msg: '微信侧支付状态暂无法确认，请稍后再试，避免重复扣款' };
 
   const g = R.goodsById(order.goodsId);
   if (!g) return { code: -3, msg: '商品已下架，请回到付费页重新购买' };
@@ -530,12 +530,14 @@ async function actionCancelOrder(openid, event) {
   }
 
   const checked = await queryOrder(order);
+  await updateOrder(order._id, Object.assign({ lastQueriedAt: Date.now(),
+    lastQueryReason: checked.reason || '' }, checked.platform || {}));
   if (checked.ok) {
     await reconcileOrder(order);
-    return { code: -2, msg: '微信侧已支付，不能取消；已为你同步订单' };
+    return { code: -2, msg: '微信侧已支付，不能取消；权益正在处理，请稍后查看我的订单' };
   }
-  if (checked.status !== 1) {
-    return { code: -2, msg: '微信侧状态尚未确认，暂不能取消，请稍后同步订单' };
+  if (!checked.canCancel) {
+    return { code: -2, msg: '微信侧支付状态暂无法确认，为避免误取消已付款订单，请稍后重试；如已扣款请联系客服' };
   }
 
   await updateOrder(order._id, { status: 'cancelled', cancelledAt: Date.now() });
@@ -558,11 +560,11 @@ async function actionConfirm(openid, event) {
   if (result.delivered) return { code: 0, data: { ok: true, delivered: true } };
   return {
     code: 0,
-    data: { ok: false, pending: true, msg: '正在向微信核实支付结果，请稍后到我的订单同步' },
+    data: { ok: false, pending: true, msg: '正在向微信核实支付结果，请稍后查看我的订单' },
   };
 }
 
-/** 把所有"已支付未发货"的订单补发一遍（用户点「额度没到账？刷新」时调） */
+/** 订单页后台自动核对并补发，客户端不展示手动同步入口。 */
 async function actionSync(openid) {
   const all = await loadOrderByOpenid(openid, 50);
   const priority = (o) => o.status !== 'delivered' ? 0 : (o.platformNotifyError ? 1 : 2);
@@ -599,7 +601,7 @@ function userOrderNotice(order) {
     return '订单状态需要人工核对，请联系客服。';
   }
   if (status === 'delivered') return '权益已到账，可以使用。';
-  if (status === 'paid') return '支付已完成，权益正在发放，请稍后同步订单。';
+  if (status === 'paid') return '支付已完成，权益正在发放，请稍后查看。';
   if (status === 'verifying') return '正在确认支付结果，请勿重复付款。';
   if (status === 'created') return '尚未完成支付，可以继续支付。';
   if (status === 'cancelled') return '订单已取消；如已扣款，请联系客服。';
@@ -864,7 +866,7 @@ function actionDiag() {
   return {
     code: 0,
     data: {
-      version: 'v1.3-order-scroll',
+      version: 'v1.4-unpaid-cancel',
       env: ENV,
       envText: ENV === 1 ? '沙箱（安卓可自测）' : '现网',
       offerId: OFFER_ID ? `${OFFER_ID.slice(0, 4)}****` : '',

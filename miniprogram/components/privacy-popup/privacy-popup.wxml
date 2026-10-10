@@ -3,7 +3,7 @@
     <view class="pp-title">🛡️ 用户隐私保护提示</view>
     <view class="pp-body">
       在使用{{feature}}前，请先阅读并同意
-      <text class="pp-link" bindtap="openContract">《用户隐私保护指引》</text>。
+      <text class="pp-link" catchtap="openContract">《用户隐私保护指引》</text>。
     </view>
     <view class="pp-desc">
       {{desc}}

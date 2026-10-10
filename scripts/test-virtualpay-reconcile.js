@@ -21,6 +21,7 @@ const paid = {
 };
 const verified = X.readQueryResponse(paid, local);
 assert.strictEqual(verified.ok, true);
+assert.strictEqual(verified.canCancel, false);
 assert.strictEqual(verified.platform.channelOrderId, 'apple-123');
 assert.strictEqual(verified.platform.settlementState, 4);
 const refunded = X.readQueryResponse({
@@ -30,12 +31,25 @@ const refunded = X.readQueryResponse({
 assert.strictEqual(refunded.ok, false);
 assert.strictEqual(refunded.platform.refundFee, 300);
 assert.strictEqual(refunded.platform.leftFee, 0);
+// 未支付订单可以没有实付金额；这是取消和继续支付所需的明确证据。
+const unpaid = X.readQueryResponse({
+  errcode: '0',
+  order: { order_id: local.outTradeNo, order_fee: 300, status: 1, env_type: 1 },
+}, local);
+assert.strictEqual(unpaid.status, 1);
+assert.strictEqual(unpaid.canCancel, true);
+assert.strictEqual(unpaid.platform.paidFee, 0);
+assert.strictEqual(X.readQueryResponse({
+  errcode: 0,
+  order: { order_id: local.outTradeNo, order_fee: 300, status: 1, paid_fee: 300 },
+}, local).canCancel, false);
 
 for (const response of [
   { ...paid, errcode: -1 },
   { ...paid, order: { ...paid.order, order_id: 'OTHER-ORDER' } },
   { ...paid, order: { ...paid.order, order_fee: 100 } },
   { ...paid, order: { ...paid.order, paid_fee: undefined } },
+  { ...paid, order: { ...paid.order, paid_fee: null } },
   { ...paid, order: { ...paid.order, paid_fee: 301 } },
   { ...paid, order: { ...paid.order, env_type: 2 } },
   { ...paid, order: { ...paid.order, status: 1, paid_fee: 300 } },

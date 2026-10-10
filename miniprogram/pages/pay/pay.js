@@ -117,10 +117,10 @@ Page({
         // 客户端支付入口已返回，但云端仍需从微信侧核实结果。
         wx.showModal({
           title: '支付已提交',
-          content: `${r.msg || '支付状态待核实'}\n\n请到「我的订单」查看并点「同步订单」；如已扣款但未出现订单，请保存购买凭证联系客服。`,
-          confirmText: '刷新额度',
+          content: `${r.msg || '支付状态待核实'}\n\n系统会自动核对，请稍后到「我的订单」查看；如已扣款但未出现订单，请保存购买凭证联系客服。`,
+          confirmText: '查看订单',
           cancelText: '知道了',
-          success: (res) => { if (res.confirm) this.onSync(); },
+          success: (res) => { if (res.confirm) this.onTapOrders(); },
         });
       }
     } catch (err) {
@@ -133,23 +133,6 @@ Page({
       this.setData({ payingId: '' });
       this.refresh();
     }
-  },
-
-  /** 付了钱额度没到 → 手动补发（幂等，不会重复加） */
-  async onSync() {
-    wx.showLoading({ title: '同步中…', mask: true });
-    try {
-      const r = await quota.syncOrders();
-      wx.hideLoading();
-      wx.showToast({
-        title: r.delivered ? `已补发 ${r.delivered} 笔` : '暂无可补发的订单',
-        icon: r.delivered ? 'success' : 'none',
-      });
-    } catch (e) {
-      wx.hideLoading();
-      wx.showToast({ title: '同步失败，请稍后再试', icon: 'none' });
-    }
-    this.refresh();
   },
 
   // ---------- 邀请 ----------
