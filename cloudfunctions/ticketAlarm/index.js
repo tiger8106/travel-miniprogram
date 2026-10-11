@@ -6,7 +6,8 @@ cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
 const COL = 'ticket_alarms';
 const COL_TRIP = 'trips';
-const ALARM_VERSION = 'v1.6-hotel-checkout-date';
+const ALARM_VERSION = 'v1.7-ticket-intent-filter';
+const { filterTicketAlarms } = require('./ticket-products');
 const { synchronizeTrip, usageInfoForItem } = require('./booking-sync');
 const {
   DEFAULT_LEAD_MINUTES,
@@ -225,10 +226,10 @@ async function list(db, openid, tripId) {
     .limit(200)
     .get();
   const tripRes = tripId ? await db.collection(COL_TRIP).doc(tripId).get().catch(() => null) : null;
-  const trip = tripRes && tripRes.data;
+  const trip = tripRes && tripRes.data && tripRes.data._openid === openid ? tripRes.data : null;
   return {
     code: 0,
-    data: (res.data || []).map((a) => {
+    data: filterTicketAlarms(res.data || [], trip && trip.items, trip && trip.ticketPolicies).map((a) => {
       const tripItems = trip && Array.isArray(trip.items) ? trip.items : [];
       let linked = a.linkedItemId
         ? tripItems.find((item) => String(item && item.itemId || '') === String(a.linkedItemId))

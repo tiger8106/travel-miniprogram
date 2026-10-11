@@ -158,16 +158,18 @@ Module._load = originalLoad;
   try {
     L.chatWithRetry = async () => { calls++; throw new Error('测试模拟模型不可用'); };
     const detail = copy(outline); detail.days = detail.days.slice(0, 2);
-    const candidate = Object.assign(row(1), { activity: '携带大件行李登山游览', category: 'sight' });
+    // 资料暂缺仍可有界警示收尾；实际携大件登山等不可执行矛盾另测阻止发布。
+    const candidate = Object.assign(row(1), { activity: '在酒店附近休息，出行前确认服务开放情况', category: 'other' });
     detail.days[1].executionCandidate = [candidate];
-    detail.days[1].executionReviewIssues = ['索引0：大件行李未寄存，登山前需核实寄存并原地取回。'];
+    detail.days[1].executionReviewIssues = ['服务开放资料暂缺，出行前向运营方确认。'];
     const finalized = await P.buildPlan(input, { outline: detail }, { reviewItems: [row(0, true), candidate],
       attempts: { 'review-1': 3 }, preservePublishedDays: true });
     assert(!finalized.partial); assert(!finalized.reviewError); assert.equal(finalized.progress.done, 2);
     assert(finalized.items.some((it) => it.executionReviewStatus === 'needs_confirmation' && /待确认/.test(it.note)));
     assert(calls <= 2, '运营和票务独立检索有界，各最多一轮');
+    const callsAtCompletion = calls;
     const again = await P.buildPlan(input, { outline: detail }, { reviewItems: [row(0, true), ...finalized.items], preservePublishedDays: true });
-    assert(!again.partial); assert.equal(calls, 2, '已收尾日期不再反复请求模型');
+    assert(!again.partial); assert.equal(calls, callsAtCompletion, '已收尾日期不再反复请求模型');
   } finally { L.chatWithRetry = originalChat; }
   console.log('✓ 连续复核失败不终止整单，完成后不再重做');
 

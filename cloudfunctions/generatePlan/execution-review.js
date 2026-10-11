@@ -3,9 +3,9 @@
 const llm = require('./llm');
 const evidence = require('./route-evidence');
 const schedules = require('./schedule');
-const { normalizeTicketProducts } = require('./ticket-products');
+const { normalizeTicketProducts, normalizeTicketPolicies, ticketAccessOnly, ticketKey: ticketPlaceKey } = require('./ticket-products');
 const { solarEventMinute } = require('./solar-time');
-const REVIEW_VERSION = 'v6';
+const REVIEW_VERSION = 'v7';
 const clock = (n) => `${String(Math.floor(Math.max(0, n) / 60)).padStart(2, '0')}:${String(Math.max(0, n) % 60).padStart(2, '0')}`;
 
 function referenceSchedules(day) {
@@ -427,6 +427,30 @@ function fitEstimatedConnections(rows, context) {
     }
   });
   return result;
+}
+
+// 模型只差进站缓冲时，尝试整体提前未锁定准备链，保留交通/游览时长。
+// 修改后必须全部验收通过才采用；不能靠提前掩盖开放时间、太阳窗口或其他错误。
+function advanceFlexibleRailAccess(rows, context) {
+  if (context.isFirst || !executionIssues(rows, context).some((s) => /铁路进站接驳没有40分钟/.test(s))) return rows;
+  const result = rows.map((r) => Object.assign({}, r)).sort((a, b) => minute(a.startTime) - minute(b.startTime));
+  const railIndex = result.findIndex((r, i) => r.transportType === 'train' && fixedWindow(r, context)
+    && result.slice(0, i).some((a) => a.category === 'transport' && sameEndpoint(a.endLocation, r.startLocation)
+      && minute(a.endTime) > minute(r.startTime) - 40));
+  if (railIndex < 0) return rows;
+  const rail = result[railIndex];
+  const accessIndex = result.slice(0, railIndex).reduce((last, r, i) =>
+    r.category === 'transport' && sameEndpoint(r.endLocation, rail.startLocation) ? i : last, -1);
+  const advance = minute(result[accessIndex].endTime) - minute(rail.startTime) + 40;
+  const prefix = result.slice(0, accessIndex + 1);
+  if (prefix.some((r) => r.timingLocked || fixedWindow(r, context) || minute(r.startTime) === null || minute(r.startTime) < advance
+    || (context.sailingWindows || []).some((f) => (f.departures || []).length
+      && sameWaterEndpoint(f.from, r.startLocation) && sameWaterEndpoint(f.to, r.endLocation)))) return rows;
+  const waits = result.slice(accessIndex + 1, railIndex);
+  if (waits.length > 1 || waits.some((r) => r.category !== 'other' || !/候车|安检|检票/.test(r.activity))) return rows;
+  prefix.forEach((r) => { r.startTime = clock(minute(r.startTime) - advance); r.endTime = clock(minute(r.endTime) - advance); r.timingEstimated = true; });
+  if (waits.length) { waits[0].startTime = result[accessIndex].endTime; waits[0].endTime = rail.startTime; }
+  return executionIssues(result, context).length ? rows : result;
 }
 
 function fitEstimatedReturn(rows, context) {
@@ -1144,6 +1168,7 @@ function executionIssues(rows, context) {
   const lastSight = sorted.reduce((index, row, i) => row.category === 'sight' ? i : index, -1);
   let checkins = 0;
   let checkouts = 0;
+  let checkedInAt = -1;
   let storage = '';
   const earlierStorage = new Set(context.previousStorage || []);
   sorted.forEach((row, i) => {
@@ -1178,7 +1203,19 @@ function executionIssues(rows, context) {
         && !/入住|取回|身体|疲劳/.test(text)
         && sorted.slice(i + 1).some((next) => next.category === 'food' && /晚餐|晚饭/.test(next.activity || '')))
       issues.push('晚餐前非必要折返酒店，应保留附近游览或按用户休息需求安排');
-    const actualCheckin = /办理入住|入住.*(?:放下|寄存)/.test(positiveInstructions(row.activity || ''));
+    const actualCheckin = /入住/.test(action) && !/^(?:已入住|入住前|明日|次日|准备|计划)|退房|不.*入住|无需.*入住/.test(action)
+      && (row.category === 'hotel' || /办理入住|入住.*(?:放下|寄存)/.test(action));
+    if (/退房|办理离店/.test(action)) checkedInAt = -1;
+    if (row.category === 'transport' && /^(?:train|plane)$/.test(row.transportType || '') && checkedInAt >= 0) {
+      // 允许确有往返的住宿基地日游；单向转城/返程不能发生在当晚入住之后。
+      const returns = sorted.slice(checkedInAt + 1).some((entry) => entry !== row && entry.category === 'transport'
+        && entry.transportType === row.transportType && sameEndpoint(entry.startLocation, row.endLocation)
+        && sameEndpoint(entry.endLocation, row.startLocation))
+        && sorted.slice(i + 1).some((entry) => sameEndpoint(entry.endLocation, context.hotel)
+          && /回房|返回|回到|休息/.test(entry.activity || ''));
+      if (!returns) issues.push(`索引${i}入住后仍单向跨城乘车，须先抵达当晚住宿地再入住，或明确退房及实际往返闭环`);
+    }
+    if (actualCheckin) checkedInAt = i;
     if (row.category === 'hotel' && /入住/.test(action) && sorted.slice(0, i).some((entry) =>
       sameEndpoint(entry.endLocation, context.hotel) && /入住.*(?:放下|寄存|放置)/.test(positiveInstructions(entry.activity))
       && minute(row.startTime) - minute(entry.endTime) > 30)) issues.push('到达时已入住并放下行李，晚间应回房而非再次入住');
@@ -1281,8 +1318,8 @@ async function collectOperatingEvidence(profile, day, previous, original, deadli
     .map((row) => ({ from: row.startLocation, to: row.endLocation, mode: row.transportType }));
   const references = (day.operatingReferences || []).filter((reference) => reference && /^https?:\/\//.test(reference.sourceUrl || ''));
   const visits = original.filter((row) => ['sight', 'ticket'].includes(row.category) || row.transportType === 'ship');
-  const key = JSON.stringify(['operating-windows-v8-tickets', day.date, day.highlights, previous.hotel, day.hotel, routes,
-    visits.map((row) => [row.endLocation || row.startLocation, row.visitScope, (row.activity || '').match(/索道|缆车|游船|游轮|船票|竹筏|漂流|演出|观光车/g)]), references]);
+  const key = JSON.stringify(['operating-windows-v9-ticket-policies', day.date, day.highlights, previous.hotel, day.hotel, routes,
+    visits.map((row) => [row.activity, row.ticketPlace, row.visitScope, row.startLocation, row.endLocation, row.note]), references]);
   const usable = (value) => value && ((value.routeFacts || []).length || (value.visitWindows || []).length
     || (value.sailingWindows || []).length || (value.ticketProducts || []).length || value.scenicRoute || value.notes || (value.warnings || []).length);
   const addReferences = (result) => {
@@ -1297,13 +1334,23 @@ async function collectOperatingEvidence(profile, day, previous, original, deadli
   const end = Math.min(deadline, Date.now() + 40000);
   if (end - Date.now() < 5000) return {};
   try {
-    const ticketRequest = original.some((row) => ['sight', 'ticket'].includes(row.category) || row.transportType === 'ship') ? llm.chatWithRetry([
+    const ticketVisits = visits.filter((row) => !ticketAccessOnly(row));
+    const ticketKey = JSON.stringify([day.date, day.city, ticketVisits.map((row) =>
+      [row.activity, row.ticketPlace, row.visitScope, row.startLocation, row.endLocation, row.note])]);
+    const cachedTickets = day.executionTicketEvidence;
+    const ticketRequest = cachedTickets && cachedTickets.key === ticketKey ? Promise.resolve(cachedTickets)
+      : ticketVisits.length ? llm.chatWithRetry([
       { role: 'system', content: '联网核查旅行票务，只输出JSON，不编造链接，不制定时间线。优先运营方和政府公开资料。' },
-      { role: 'user', content: `日期${day.date}，区域${day.city}。实际游览：${JSON.stringify(original.filter((row) =>
-        ['sight', 'ticket'].includes(row.category) || row.transportType === 'ship').map((row) => ({ activity: row.activity, place: row.endLocation || row.startLocation, note: row.note })))}。
-逐个核对所有确定需要门票的实际景点（不按名称关键词猜收费），免费需预约也保留；免费无需预约不列。独立入园票、索道、观光车、游船、竹筏和演出按收费产品分别列出，包含在同一通票的项目不重复购票。仅途经/外观不提取。返回{"ticketProducts":[{"place":"实际景区名","product":"完整景区及单一票种名","ticketRequired":true,"reservationRequired":false,"sourceUrl":"真实运营/售票来源URL，不得用示例或编造域名","basisDate":"资料日期","note":"是否包含内部项目、有效期、免费预约等注意事项"}]}。不确定不要断言收费；未来政策待官方确认。必须逐一检查下列实际游览地点，不能只提取第一处；每个收费地点及独立收费产品均必须返回：${JSON.stringify([...new Set(visits.map((row) => row.endLocation || row.activity))])}。` },
+      { role: 'user', content: `日期${day.date}，区域${day.city}。实际游览：${JSON.stringify(ticketVisits.map((row) => ({ activity: row.activity, place: row.ticketPlace || row.visitScope || row.endLocation || row.startLocation, note: row.note })))}。
+逐个核对所有确定需要门票的实际景点（不按名称关键词猜收费），免费需预约也保留；免费无需预约必须保存到ticketPolicies，而不是省略。政策要对应具体活动与游览范围：散步/骑行不等于乘船，码头接驳/检票不是另一收费体验。独立入园票、索道、观光车、游船、竹筏和演出按收费产品分别列出，包含在同一通票的项目不重复购票。仅途经/外观不提取。返回{"ticketPolicies":[{"place":"实际地点","activity":"对应输入实际活动原文","ticketRequired":false,"reservationRequired":false,"sourceUrl":"真实当前政策来源URL","note":"适用范围及依据"}],"ticketProducts":[{"place":"实际景区名","product":"完整景区及单一票种名","ticketRequired":true,"reservationRequired":false,"sourceUrl":"真实运营/售票来源URL，不得用示例或编造域名","basisDate":"资料日期","note":"是否包含内部项目、有效期、免费预约等注意事项"}]}。不确定不要断言收费；未来政策待官方确认。必须逐一检查所有实际游览地点，每个收费地点及独立收费产品均必须返回。` },
     ], { deadline: Math.min(end, Date.now() + 35000), enableSearch: true, temperature: 0.1 })
-      .then((text) => normalizeTicketProducts(llm.parseJSONFromText(text).ticketProducts)).catch(() => []) : Promise.resolve([]);
+      .then((text) => {
+        const parsed = llm.parseJSONFromText(text);
+        const result = { key: ticketKey, products: normalizeTicketProducts(parsed.ticketProducts),
+          policies: normalizeTicketPolicies(parsed.ticketPolicies) };
+        if (result.products.length || result.policies.length) day.executionTicketEvidence = result;
+        return result;
+      }).catch(() => ({ products: [], policies: [] })) : Promise.resolve({ products: [], policies: [] });
     const text = await llm.chatWithRetry([
       { role: 'system', content: '你只核查旅行运营知识，不制定时间线。联网查运营方、属地政府、运营公众号/小程序的公开发布；无正规官方渠道时可参考可信旅行平台及多份近期实地资料，但标注来源层级、日期、待确认，不能冒称官方。找不到就明确未知，不复制候选的地理假设。只输出JSON。' },
       { role: 'user', content: `核查日期${day.date}，昨晚在${previous.hotel || profile.origin}，今晚在${day.hotel || profile.origin}。景点${JSON.stringify(day.highlights)}。待核查路线${JSON.stringify(routes)}。
@@ -1322,8 +1369,13 @@ async function collectOperatingEvidence(profile, day, previous, original, deadli
     });
     let parsed;
     try { parsed = llm.parseJSONFromText(text); } catch (_) { parsed = null; }
-    const ticketProducts = await ticketRequest;
-    if (ticketProducts.length) parsed = Object.assign({}, parsed && !Array.isArray(parsed) ? parsed : {},
+    const tickets = await ticketRequest;
+    const ticketProducts = tickets.products;
+    day.ticketPolicies = tickets.policies.flatMap((fact) => ticketVisits.filter((row) => fact.activity
+      ? fact.activity === row.activity : [row.activity, row.ticketPlace, row.visitScope, row.startLocation, row.endLocation]
+        .some((value) => value && ticketPlaceKey(value).includes(ticketPlaceKey(fact.place))))
+      .map((row) => ({ ...fact, activity: row.activity, dayIndex: original[0].dayIndex || 0, visitDate: day.date })));
+    if (ticketProducts.length || day.ticketPolicies.length) parsed = Object.assign({}, parsed && !Array.isArray(parsed) ? parsed : {},
       { routeFacts: Array.isArray(parsed) ? parsed : parsed && parsed.routeFacts || [],
         ticketProducts: [...ticketProducts, ...(parsed && parsed.ticketProducts || [])] });
     if (Array.isArray(parsed)) parsed = { routeFacts: parsed };
@@ -1339,7 +1391,7 @@ async function collectOperatingEvidence(profile, day, previous, original, deadli
       return result;
     }
     if (!parsed.routeFacts.length && !parsed.scenicRoute && !(parsed.warnings || []).length
-        && !(parsed.visitWindows || []).length && !(parsed.sailingWindows || []).length && !(parsed.ticketProducts || []).length && !references.length) {
+        && !(parsed.visitWindows || []).length && !(parsed.sailingWindows || []).length && !(parsed.ticketProducts || []).length && !day.ticketPolicies.length && !references.length) {
       console.warn('[generatePlan.review] 运营知识返回空内容，不能视为已核查');
       return {};
     }
@@ -1347,9 +1399,9 @@ async function collectOperatingEvidence(profile, day, previous, original, deadli
     // 最终按实际游览再筛，弃用景点不会留下提醒。
     const ticketProductsByKey = new Map();
     [...(day.ticketProducts || []), ...((day.executionEvidence || {}).ticketProducts || []), ...normalizeTicketProducts(parsed.ticketProducts)]
-      .forEach((fact) => ticketProductsByKey.set(`${fact.place}|${fact.product}`, fact));
+      .forEach((fact) => ticketProductsByKey.set(`${fact.place}|${fact.product}`, { ...fact, dayIndex: original[0].dayIndex || 0 }));
     day.ticketProducts = [...ticketProductsByKey.values()];
-    const result = { key, ticketProducts: day.ticketProducts,
+    const result = { key, ticketProducts: day.ticketProducts, ticketPolicies: day.ticketPolicies,
     localMobility: Array.isArray(parsed.localMobility) ? parsed.localMobility.filter((fact) =>
       fact && fact.area && /^https?:\/\//.test(fact.sourceUrl || '')).slice(0, 5) : [],
     aliases: Array.isArray(parsed.aliases) ? parsed.aliases.filter((fact) => fact && fact.place
@@ -1422,9 +1474,10 @@ function finalizeWithWarnings(rows, dayIndex, day, issues, context = {}) {
   context = Object.assign({}, context, { solar: context.solar || rows.filter((row) => row.timingLocked) });
   const result = normalizeReviewRows(rows, dayIndex, context);
   if (!result.length) return result;
-  // 严格铁路模式不能靠“待确认”发布虚构列车或改坏的到发时刻。
-  const scheduleIssues = executionIssues(result, context).filter((issue) => /铁路缺少匹配|修改或遗漏了官方班次/.test(issue));
-  if (context.enforceRailSchedules && scheduleIssues.length) {
+  // 资料未知可以警示，已确认的不可执行矛盾不可通过“待确认”发布。
+  const scheduleIssues = executionIssues(result, context).filter((issue) => /入住后仍单向跨城乘车/.test(issue)
+    || context.enforceRailSchedules && /铁路缺少匹配|修改或遗漏了官方班次|铁路进站接驳没有40分钟|携带大件行李安排了不便|取回行李前没有同地点|行李取回地点与寄存地点不一致|寄存行李未在离开前取回|位置凭空跳转|时段重叠/.test(issue));
+  if (scheduleIssues.length) {
     day.executionReviewIssues = [...new Set([...(issues || []), ...scheduleIssues])];
     day.executionCandidate = result;
     return [];
@@ -1505,11 +1558,8 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
     // 此轮只补查班次并持久化，下轮再请求重排，避免长查询挤占云函数预算。
     if (await collectExecutionSchedules(day, candidate, context, deadline)) return original;
     const regions = [profile.origin, profile.dest, previous.overnight, day.overnight, day.city].filter(Boolean).join(' ');
-    // 运营检索与整天重排拆轮，不能把两个约20秒的联网请求挤进一个云函数。
-    // 首轮仅缓存独立知识，下一轮重排；未核查的日期不提前标成通过。
-    const hadEvidence = !!day.executionEvidence && ((day.executionEvidence.routeFacts || []).length
-      || (day.executionEvidence.visitWindows || []).length || (day.executionEvidence.sailingWindows || []).length
-      || (day.executionEvidence.ticketProducts || []).length || day.executionEvidence.scenicRoute || day.executionEvidence.notes || (day.executionEvidence.warnings || []).length);
+    // 独立运营证据先缓存；预算足够同轮完整审计，不足则持久化到下一轮。
+    // 未完整核查的日期不提前标成通过。
     const accessProbe = context.accessConstraint ? [{ category: 'transport', transportType: 'ride',
       startLocation: previous.hotel || previous.overnight || previous.city,
       endLocation: context.accessConstraint.to }, { category: 'transport', transportType: 'ride',
@@ -1521,9 +1571,11 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
     ]);
     const points = Object.assign({}, day.executionPoints || {}, freshPoints);
     day.executionPoints = points;
-    const roads = await evidence.collectRoadTravelFacts(accessProbe.concat(candidate), points, Math.min(deadline - 15000, Date.now() + 3500));
-    const transits = await evidence.collectUrbanTransitFacts(candidate, points, Math.min(deadline - 15000, Date.now() + 2000));
-    if (!operating.key || !hadEvidence) {
+    const [roads, transits] = await Promise.all([
+      evidence.collectRoadTravelFacts(accessProbe.concat(candidate), points, Math.min(deadline - 15000, Date.now() + 3500)),
+      evidence.collectUrbanTransitFacts(candidate, points, Math.min(deadline - 15000, Date.now() + 2000)),
+    ]);
+    if (!operating.key) {
       console.log('[generatePlan.review] 第%d天%s，下一轮执行时间线复核', dayIndex + 1,
         operating.key ? '运营知识已检索' : '运营知识暂未取得');
       return original;
@@ -1558,9 +1610,13 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
           sameEndpoint(proof.from, fact.from) && sameEndpoint(proof.to, fact.to) && proof.mode === fact.mode)).concat(updatedRoads);
         checked = normalizeReviewRows(checked, dayIndex, context);
       }
+      checked = advanceFlexibleRailAccess(checked, context);
       if (!executionIssues(checked, context).length) return acceptExecutionRows(checked, dayIndex, day, context);
     }
-    const prompt = `你是旅行执行审计员，逐段复核并重排这一天，返回完整可执行时间线，不要解释。当前条目是未经信任的候选，可能包含错误地理、编造铁路或地铁、错误游船方向。请用联网检索核对运营知识，再重排，不能直接复制这些错误。已核验铁路事实和太阳窗口除外。
+    // 新证据已完整缓存且预算够时，同轮继续完整模型审计；不足则照常后台接力。
+    if (deadline - Date.now() < 20000) return original;
+    const prompt = `你是旅行执行审计员，逐段复核并重排这一天，返回完整可执行时间线，不要解释。当前条目是未经信任的候选，可能包含错误地理、编造铁路或地铁、错误游船方向。请用联网检索核对运营知识，再重排，不能直接复制这些错误。已核验铁路事实和太阳窗口除外。入住必须发生在抵达当晚住宿地后；入住后不能再单向乘高铁/飞机去另一个城市，确实已入住的基地往返游需有完整返程及回房安排，不能把寄存行李误写成入住。
+完整审计所有原候选的交通、游线、票务、入住、行李、开放时间和用户约束。如果代码检查为空且你独立核查也确认无语义/执行问题，不需重写同一份时间线，可以仅返回{"acceptOriginal":true}；这表示完整核查通过，不可用于跳过审计、忽略未知关键事实或带着错误放行。任何错误或必要修改仍返回完整items或合法replacements。
 用户需求：${JSON.stringify(requirements)}
 本日（第${dayIndex + 1}天）：${JSON.stringify({ date: day.date, city: day.city, theme: day.theme,
       hotel: day.hotel, overnight: day.overnight, highlights: day.highlights, note: day.note,
@@ -1628,6 +1684,10 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
       ], { deadline, enableSearch: !infeasibleDay && !context.accessConstraint, temperature: 0.1 });
       day.executionReviewAttempted = true;
       let parsed = llm.parseJSONFromText(text);
+      if (parsed && parsed.acceptOriginal === true && !Array.isArray(parsed.items)) {
+        // 模型仍需完成语义审计；原候选下方继续经过同一定位、班次和执行验收。
+        parsed.items = candidate.map((row) => Object.assign({}, row));
+      }
       if (Array.isArray(parsed)) parsed = { items: parsed };
       // 等价容器名不值得重做整天；内部字段仍走同一套严格验收。
       if (parsed && !Array.isArray(parsed.items) && Array.isArray(parsed.timeline)) parsed.items = parsed.timeline;
@@ -1659,6 +1719,7 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
         console.log('[generatePlan.review] 第%d天重排新增铁路，保存候选后下一轮补查运行图', dayIndex + 1);
         return original;
       }
+      cleaned = advanceFlexibleRailAccess(cleaned, context);
       let errors = executionIssues(cleaned, context);
       if (errors.length) { day.executionReviewIssues = errors; day.executionCandidate = cleaned; }
       if (errors.length && !repairing && deadline - Date.now() >= 25000) {
@@ -1671,6 +1732,7 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
         if (retry && Array.isArray(retry.items)) {
           parsed = retry;
           cleaned = normalizeReviewRows(parsed.items, dayIndex, context);
+          cleaned = advanceFlexibleRailAccess(cleaned, context);
           errors = executionIssues(cleaned, context);
         }
       }
@@ -1698,4 +1760,4 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
   return results.flat();
 }
 
-module.exports = { REVIEW_VERSION, referenceSchedules, selectExecutionSchedules, deferUnbookedRail, needsWholeDayRebuild, deriveSolarWindows, fitLockedReturnAccess, requiredPlacesForDay, previousStoragePlaces, collectMealNames, invalidateRepeatedMeals, invalidateUnsafeAcceptedDays, syncAcceptedMoves, finalizeWithWarnings, applyExecutionPatch, minute, sameEndpoint, fitEstimatedReturn, fitEstimatedConnections, normalizeReviewRows, executionIssues, reviewExecutionItems };
+module.exports = { REVIEW_VERSION, referenceSchedules, selectExecutionSchedules, deferUnbookedRail, needsWholeDayRebuild, deriveSolarWindows, fitLockedReturnAccess, advanceFlexibleRailAccess, requiredPlacesForDay, previousStoragePlaces, collectMealNames, invalidateRepeatedMeals, invalidateUnsafeAcceptedDays, syncAcceptedMoves, finalizeWithWarnings, applyExecutionPatch, minute, sameEndpoint, fitEstimatedReturn, fitEstimatedConnections, normalizeReviewRows, executionIssues, reviewExecutionItems };

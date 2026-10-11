@@ -4,13 +4,14 @@
 
 const cloud = require('wx-server-sdk');
 const { alarmNotificationTitleOf } = require('./alarm-title');
+const { filterTicketAlarms } = require('./ticket-products');
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
 const COL = 'ticket_alarms';
 const DEFAULT_LEAD_MINUTES = 5;
 
 // 诊断标记：改一次升一次，用来确认线上跑的是不是最新代码
-const DEPLOY_TAG = 'v8-concise-ticket-titles';
+const DEPLOY_TAG = 'v9-ticket-intent-filter';
 
 function leadOf(alarm) {
   const n = Number(alarm && alarm.leadMinutes);
@@ -240,9 +241,17 @@ async function pollAndPush() {
       return { code: 0, data: { sent: 0 } };
     }
 
+    // 旧自动错误票务在列表和通知使用同一判据；按行程并行读取一次，不修改用户记录。
+    const tripIds = [...new Set(candidates.filter((a) => a.type === 'ticket' && a.source !== 'manual').map((a) => a.tripId).filter(Boolean))];
+    const trips = new Map(await Promise.all(tripIds.map(async (id) => {
+      try { const result = await db.collection('trips').doc(id).get(); return [id, result.data]; }
+      catch (_) { return [id, null]; } // 无法取得依据时保持未知，不误删提醒。
+    })));
     let sent = 0;
     for (const alarm of candidates) {
       try {
+        const trip = trips.get(alarm.tripId);
+        if (trip && trip._openid === alarm._openid && !filterTicketAlarms([alarm], trip.items, trip.ticketPolicies).length) continue;
         const layoutKey = process.env.SUBSCRIBE_LAYOUT || 'H_thing2_date4_time30_thing11';
         const build = LAYOUTS[layoutKey] || LAYOUTS.H_thing2_date4_time30_thing11;
         const actionAt = actionAtOf(alarm);

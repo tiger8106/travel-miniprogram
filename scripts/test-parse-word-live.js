@@ -59,8 +59,13 @@ const meta = buildDocMeta(raw);
   const alarmContext = { title: meta.title, startDate: meta.startDate, endDate: meta.endDate, items: clean, days: meta.days };
   const inferred = await inferAlarms(alarmContext);
   const alarms = completeReservationAlarms(alarmContext, inferred);
+  assert.equal(alarms.filter((alarm) => alarm.type === 'ticket' && /遇龙河/.test(alarm.title)).length, 1,
+    '遇龙河只提实际竹筏，不为前往码头再购票');
+  assert(!alarms.some((alarm) => alarm.type === 'ticket' && /明仕田园|两江四湖/.test(alarm.ticketPlace || alarm.bookingInfo || alarm.title)),
+    '原文田园骑行、湖边散步不补入园收费或预约核验卡');
   const reportDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'travel-word-verified-'));
-  fs.writeFileSync(path.join(reportDir, 'result.json'), JSON.stringify({ fingerprint, meta, items: clean, inferred, alarms, hotelReminders: reminders }, null, 2));
+  fs.writeFileSync(path.join(reportDir, 'result.json'), JSON.stringify({ fingerprint, meta, items: clean, inferred, alarms,
+    ticketPolicies: alarmContext.ticketPolicies || [], hotelReminders: reminders }, null, 2));
   console.log('完整解析与提醒验收记录：' + path.join(reportDir, 'result.json'));
   const rawCodes = [...new Set([...raw.matchAll(/\b[GDCZTK]\d{1,5}\b/g)].map((match) => match[0]))];
   for (const day of meta.days) for (const line of day.lines) {

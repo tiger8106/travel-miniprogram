@@ -41,7 +41,7 @@ const COL_SCHED = 'schedule_cache';
 const SCHED_TTL_MS = 36 * 3600 * 1000;
 
 // 生成引擎版本（用于确认线上跑的是哪一版）
-const GEN_VERSION = 'v2.21-fixed-rail-ticket-coverage';
+const GEN_VERSION = 'v2.22-ticket-intent-review-speed';
 const { publicationState, collectGenerationRows } = require('./publication');
 
 async function generateOutlineWithHotelCheck(input, opts) {
@@ -325,6 +325,7 @@ async function savePlan(openid, plan, tripId, jobId, outline, input) {
   // 私有候选不能进入首页 items。job 和非 job 续跑均可恢复这些候选。
   genPatch.genDraftItems = plan.partial ? publication.pending : [];
   genPatch.genDraftOutline = plan.partial ? outline : null;
+  genPatch.ticketPolicies = (outline.days || []).flatMap((day) => day.ticketPolicies || []);
 
   // 等哪一轮真有内容了再建，否则中途放弃会在「我的行程」里留下一条 0 条的空攻略。
   if (!finalTripId && !storedItems.length && !publication.pending.length && plan.partial) {

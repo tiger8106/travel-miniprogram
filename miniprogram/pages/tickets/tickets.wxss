@@ -58,11 +58,6 @@
   flex-shrink: 0;
 }
 
-.settings-value.muted {
-  color: var(--text-secondary);
-  background: #f2f3f5;
-}
-
 .settings-divider {
   height: 1rpx;
   background: var(--border-color, #f0f0f0);

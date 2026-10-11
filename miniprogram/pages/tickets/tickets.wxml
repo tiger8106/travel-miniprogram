@@ -32,18 +32,6 @@
         </picker>
       </view>
 
-      <view class="settings-divider"></view>
-
-      <view class="settings-row" bindtap="onSyncAllToCalendar">
-        <text class="settings-icon">📅</text>
-        <view class="settings-main">
-          <view class="settings-label">同步到系统日历</view>
-          <view class="settings-sub">系统日历提醒，微信不用打开</view>
-        </view>
-        <view class="settings-value {{futureCount ? '' : 'muted'}}">
-          {{futureCount ? futureCount + ' 个 ›' : '无待同步'}}
-        </view>
-      </view>
       <view wx:if="{{devMode}}" class="settings-divider"></view>
 
       <view wx:if="{{devMode}}" class="settings-row" bindtap="onSelfCheck">

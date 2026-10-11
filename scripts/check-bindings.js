@@ -66,8 +66,8 @@ fs.readdirSync(CF).forEach((dir) => {
 });
 ['generatePlan/plan.js', 'generatePlan/schedule.js', 'generatePlan/rail12306.js', 'generatePlan/hotel-validation.js',
   'generatePlan/execution-review.js', 'generatePlan/publication.js', 'generatePlan/route-evidence.js', 'generatePlan/solar-time.js',
-  'generatePlan/ticket-products.js', 'parseTravelPlan/ticket-products.js', 'parseTravelPlan/ticket-source.js',
-  'parseTravelPlan/alarm-infer.js', 'parseTravelPlan/llm.js', 'sendAlarm/alarm-title.js'].forEach((rel) => {
+  'generatePlan/ticket-products.js', 'parseTravelPlan/ticket-products.js', 'ticketAlarm/ticket-products.js', 'parseTravelPlan/ticket-source.js',
+  'parseTravelPlan/alarm-infer.js', 'parseTravelPlan/llm.js', 'sendAlarm/alarm-title.js', 'sendAlarm/ticket-products.js'].forEach((rel) => {
   const err = syntaxOk(path.join(CF, rel));
   ok(`JS 语法 cloudfunctions/${rel}`, !err, err || '');
 });
@@ -370,7 +370,7 @@ ok('细化失败/残缺天有骨架重建（skeletonForEmptyDays，只在非 par
     && /skeletonForEmptyDays\(p, outline, detail\.items, detail\.doneDayIndexes\)/.test(planJs));
 ok('门票闹钟按关联行程校正类型，普通接驳不会伪装成门票放票',
   /function normalizeBookingAlarmKinds/.test(planJs)
-    && /alarms = normalizeBookingAlarmKinds\(alarms, items, p\)/.test(planJs)
+    && /alarms = normalizeBookingAlarmKinds\(alarms, items, p[,)]/.test(planJs)
     && /const textualMode/.test(planJs)
     && /releaseDate <= today/.test(planJs));
 ok('包车/大巴段宽松匹配，已有同向交通条目时不重复补（isScheduledMove 分流）',
@@ -859,7 +859,11 @@ ok('客户端/订阅消息标题展示规则副本一致',
     === fs.readFileSync(path.join(CF, 'sendAlarm/alarm-title.js'), 'utf8'));
 ok('生成/上传票务产品证据规则副本一致',
   fs.readFileSync(path.join(CF, 'generatePlan/ticket-products.js'), 'utf8')
-    === fs.readFileSync(path.join(CF, 'parseTravelPlan/ticket-products.js'), 'utf8'));
+    === fs.readFileSync(path.join(CF, 'parseTravelPlan/ticket-products.js'), 'utf8')
+    && fs.readFileSync(path.join(CF, 'generatePlan/ticket-products.js'), 'utf8')
+      === fs.readFileSync(path.join(CF, 'ticketAlarm/ticket-products.js'), 'utf8')
+    && fs.readFileSync(path.join(CF, 'generatePlan/ticket-products.js'), 'utf8')
+      === fs.readFileSync(path.join(CF, 'sendAlarm/ticket-products.js'), 'utf8'));
 const cfgBodies = cfgRel.map((n) => fs.readFileSync(path.join(CF, n, 'cloudCfg.js'), 'utf8'));
 ok('配置下发模块 4 份副本完全一致（generatePlan/parseTravelPlan/suggestions/admin）',
   cfgBodies.every((b) => b === cfgBodies[0]));

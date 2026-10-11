@@ -19,10 +19,10 @@ const { parseJSONFromText, asArray, SYS_PROMPT } = require('./llm');
 const { sanitizeItems, META_PAT, META_HARD, parseDurationMin } = require('./normalize');
 const { parseCnTime, tsToDateStr, tsToCnDateTimeStr } = require('./cn-time');
 const { cacheKeyOf: scheduleKeyOf, sameStation } = require('./schedule');
-const { reviewExecutionItems, executionIssues, invalidateRepeatedMeals, invalidateUnsafeAcceptedDays, syncAcceptedMoves, finalizeWithWarnings, REVIEW_VERSION } = require('./execution-review');
+const { reviewExecutionItems, executionIssues, previousStoragePlaces, invalidateRepeatedMeals, invalidateUnsafeAcceptedDays, syncAcceptedMoves, finalizeWithWarnings, REVIEW_VERSION } = require('./execution-review');
 const { finalizedDays } = require('./publication');
 const { solarEventMinute } = require('./solar-time');
-const { knownTicketProducts } = require('./ticket-products');
+const { knownTicketProducts, ticketAccessOnly, actualTicketExperience, freeAdmissionFor, openLeisureVisit, filterTicketAlarms } = require('./ticket-products');
 
 // 近期运行图虽不是未来开行承诺，其车次到发时刻同样不能被时间线修补移动。
 const fixedSchedule = (item) => item && ['12306', 'reference'].includes(item.schedSource);
@@ -9164,7 +9164,10 @@ function syncHotelReferences(items, outline) {
       .flatMap((move) => [move.from, move.to]).filter(Boolean);
     const statedDestination = knownDestinations.find((name) =>
       ['前往', '赶往', '去往', '赴'].some((verb) => activity.includes(`${verb}${name}`)));
-    if (statedDestination && statedDestination !== end && /退房/.test(activity)) {
+    // 只纠正把退房接驳终点写成酒店的旧错误；不能把已核验的具体寄存处
+    // 降格为大纲中的码头/景区节点，否则复核通过后的存取闭环会被破坏。
+    if (statedDestination && statedDestination !== end && /退房/.test(activity)
+      && (!end || LODGING_WORD_RE.test(end))) {
       end = out.endLocation = statedDestination;
       out.endLon = ''; out.endLat = '';
     }
@@ -9514,7 +9517,7 @@ function backfillDetailAlarms(p, outline, items, existing) {
     const waitingOnly = /取票|安检|候车|候船|检票/.test(action) && !actualBooking;
     const baggageOnly = it.category !== 'sight' && /行李|箱子|大件/.test(action)
       && /寄存|暂存|取回|退房|整理/.test(action) && !actualBooking;
-    if (waitingOnly || baggageOnly) return;
+    if (waitingOnly || baggageOnly || ticketAccessOnly(it)) return;
     const day = days[Number(it.dayIndex || 0)] || {};
     const date = validDate(day.date) ? day.date : shiftDate(p.startDate, Number(it.dayIndex || 0));
     if (it.category === 'transport' && /^(?:乘坐|搭乘|乘|坐).{0,16}(?:景区)?观光车/.test(action)
@@ -9529,9 +9532,8 @@ function backfillDetailAlarms(p, outline, items, existing) {
       return;
     }
     const titleText = String(it.activity || it.endLocation || it.startLocation || '该项目').slice(0, 28);
-    const freeAdmission = /(?:无需|不用|不必)(?:购买|购|买)?门票|免门票|免费(?:开放|入园|参观)/.test(text);
-    if (freeAdmission && !/需(?:要)?(?:提前|实名)?预约|必须预约|索道|缆车|游船|竹筏|演出/.test(action)
-      && it.reservationRequired !== true) return;
+    if (!actualTicketExperience(it) && (freeAdmissionFor(it, day.ticketPolicies)
+      || openLeisureVisit(it) && it.ticketRequired !== true && it.reservationRequired !== true)) return;
     const statusType = it.category === 'transport' ? bookingKindOf(text) : it.category === 'ticket' ? 'ticket' : '';
     if (BOOKING_DONE_RE.test(text)
       || (statusType && bookingStatusMatches(p, `${titleText} ${text}`, statusType))) return;
@@ -10577,7 +10579,7 @@ function linkBookingAlarms(alarms, items) {
 }
 
 /** 修正 LLM 把普通接驳误标成门票提醒的情况，并按实际交通类型归类。 */
-function normalizeBookingAlarmKinds(alarms, items, p) {
+function normalizeBookingAlarmKinds(alarms, items, p, policies = []) {
   const rows = asArray(items);
   const experienceTicket = /门票|购票|放票|入园预约|实名预约|竹筏|游船|漂流|缆车|索道|温泉|演出|跟拍/;
   const scenicEntry = /景区|景点|瀑布|梯田|古镇|公园|博物馆|游客中心|观光车|园区|游览基地/;
@@ -10588,7 +10590,7 @@ function normalizeBookingAlarmKinds(alarms, items, p) {
       ? note : [hotelNote, note].filter(Boolean).join('');
   };
   const filtered = [];
-  asArray(alarms).forEach((alarm) => {
+  filterTicketAlarms(alarms, rows, policies).forEach((alarm) => {
     const current = Object.assign({}, alarm);
     const workflow = rows.find((row) => row.itemId && row.itemId === current.linkedItemId);
     if (workflow && current.type !== 'hotel') {
@@ -10825,11 +10827,12 @@ function annotateAlarmUsage(alarms, items, outline) {
 }
 
 /** 详情生成和联网执行复核分轮进行，已通过日期绝不重复生成。 */
-function warningContext(profile, outline, di) {
+function warningContext(profile, outline, di, items = []) {
   const day = outline.days[di], previous = outline.days[di - 1] || {};
   return { isFirst: di === 0, isLast: di === outline.days.length - 1,
     origin: profile.origin, goTime: profile.goTime, backTime: profile.backTime, date: day.date,
     hotel: day.hotel, overnight: day.overnight, previousHotel: previous.hotel,
+    previousStorage: previousStoragePlaces(items, di),
     sameHotel: !!day.hotel && day.hotel === previous.hotel,
     noDrive: !drivingAllowed(profile), selfDriveAllowed: (row) => explicitSelfDriveSegment(profile, row),
     lightLuggage: explicitCarryLuggagePreference(profile), points: day.executionPoints || {},
@@ -10910,15 +10913,15 @@ async function buildExecutionReview(rawInput, outlineData, opts) {
   exhausted.forEach((di) => {
     const day = days[di];
     const rows = day.executionCandidate || reviewed.filter((row) => Number(row.dayIndex || 0) === di);
-    const done = finalizeWithWarnings(rows, di, day, day.executionReviewIssues, warningContext(p, outline, di));
+    const done = finalizeWithWarnings(rows, di, day, day.executionReviewIssues, warningContext(p, outline, di, all));
     reviewed = reviewed.filter((row) => Number(row.dayIndex || 0) !== di).concat(done);
     if (done.length) { delete attempts[`review-${di}`]; delete attempts[`review-round-${di}`]; }
   });
   accepted = finalizedDays(reviewed);
   const ready = days.map((_, di) => di).filter((di) => accepted.has(di)
     || (!mealChanged.has(di) && finalizedDays(all).has(di)));
-  const unsafeRailDays = exhausted.filter((di) => !accepted.has(di));
-  const reviewError = unsafeRailDays.length ? `第${unsafeRailDays.map((di) => di + 1).join('、')}天铁路班次未核实，请续跑重新选路；已完成日期保留，不发布估算列车` : '';
+  const unsafeDays = exhausted.filter((di) => !accepted.has(di));
+  const reviewError = unsafeDays.length ? `第${unsafeDays.map((di) => di + 1).join('、')}天执行校验未通过，请续跑重排交通、入住或行李；已完成日期保留，不发布不安全候选` : '';
   const items = ensureStableItemIds(annotateHotelItems(reviewed, outline));
   const complete = ready.length === days.length;
   const returnedDays = new Set(items.map((row) => Number(row.dayIndex || 0)));
@@ -10942,7 +10945,7 @@ async function buildExecutionReview(rawInput, outlineData, opts) {
     alarms = fallbackAlarms(p, outline);
     alarms = alarms.concat(backfillDetailAlarms(p, outline, merged, alarms));
     alarms = annotateAlarmUsage(dedupeBookingAlarmRecords(normalizeBookingAlarmKinds(
-      linkBookingAlarms(alarms, merged), merged, p,
+      linkBookingAlarms(alarms, merged), merged, p, days.flatMap((day) => day.ticketPolicies || []),
     )), merged, outline).map((alarm) => Object.assign({}, alarm, {
       leadMinutes: p.leadMinutes, remindAt: Number(alarm.fireAt) - p.leadMinutes * 60000,
     }));
@@ -10974,7 +10977,7 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
       if (ready.has(di)) return;
       const rows = day.executionCandidate || all.filter((row) => Number(row.dayIndex || 0) === di);
       items.push(...(rows.length ? finalizeWithWarnings(rows, di, day,
-        day.executionReviewIssues || ['自动复核已达到时间预算，此段运营信息需出行前确认。'], warningContext(profile, outline, di))
+        day.executionReviewIssues || ['自动复核已达到时间预算，此段运营信息需出行前确认。'], warningContext(profile, outline, di, all))
         : fallbackDayWithWarnings(profile, outline, di)));
     });
     if (!outline.executionSuggestions) outline.executionSuggestions = {};
@@ -11327,7 +11330,7 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
     console.log('[generatePlan] 详细行程规则查漏补齐 %d 条待办', detailBackfill.length);
   }
   alarms = linkBookingAlarms(alarms, items);
-  alarms = normalizeBookingAlarmKinds(alarms, items, p);
+  alarms = normalizeBookingAlarmKinds(alarms, items, p, outline.days.flatMap((day) => day.ticketPolicies || []));
   alarms = dedupeBookingAlarmRecords(alarms);
   alarms = annotateAlarmUsage(alarms, items, outline);
   alarms = alarms.map((alarm) => Object.assign({}, alarm, {

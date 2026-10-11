@@ -24,7 +24,7 @@ const COL_TASK = 'parse_tasks';
 const GEOCODE_DEADLINE_MS = 35 * 1000;
 
 // 解析引擎版本：返回给前端展示，用于确认线上跑的是不是最新代码
-const PARSE_VERSION = 'v4.10-ticket-evidence-coverage';
+const PARSE_VERSION = 'v4.11-ticket-intent-policies';
 const DEFAULT_ALARM_LEAD_MINUTES = 5;
 
 function alarmType(type) {
@@ -412,15 +412,10 @@ exports.main = async (event, context) => {
     // 5. 入库 - 闹钟
     //    文档里没写抢票时间（很常见：攻略只写"9月30日 G2249 出发"）→ 用行程反推一份
     //    「什么时候该抢票/预订/准备」的待办清单，别让闹钟页空着
+    const reminderContext = { title: tripData.title, startDate, endDate, items, days: buildDocMeta(rawText).days };
     if (items.length) {
       try {
-        const inferred = await inferAlarms({
-          title: tripData.title,
-          startDate,
-          endDate,
-          items,
-          days: buildDocMeta(rawText).days,
-        });
+        const inferred = await inferAlarms(reminderContext);
         const have = new Set(alarms.map((a) => `${a.fireAt}|${a.title.replace(/\s+/g, '')}`));
         inferred.forEach((a) => {
           const key = `${a.fireAt}|${a.title.replace(/\s+/g, '')}`;
@@ -432,7 +427,8 @@ exports.main = async (event, context) => {
         console.error('[parseTravelPlan] 待办反推异常（不影响主流程）:', e.message);
       }
     }
-    alarms = completeReservationAlarms({ startDate, endDate, items, days: buildDocMeta(rawText).days }, alarms);
+    alarms = completeReservationAlarms(reminderContext, alarms);
+    await db.collection(COL_TRIP).doc(tripId).update({ data: { ticketPolicies: reminderContext.ticketPolicies || [] } });
 
     const storedAlarms = prepareAlarmRecords(alarms, openid, tripId, now, event.leadMinutes, items, startDate,
       buildDocMeta(rawText).booking);
@@ -692,15 +688,10 @@ async function handleStep(event, ctx) {
       let alarms = cleanAlarms(task.alarmsRaw, openid, now, (task.booking || []).join('\n'));
 
       // 文档里没写抢票时间（很常见）→ 用行程反推一份待办清单，别让闹钟页空着
+      const reminderContext = { title: task.title, startDate, endDate, items, days: task.days };
       if (items.length) {
         try {
-          const inferred = await inferAlarms({
-            title: task.title,
-            startDate,
-            endDate,
-            items,
-            days: task.days,
-          });
+          const inferred = await inferAlarms(reminderContext);
           const have = new Set(alarms.map((a) => `${a.fireAt}|${a.title.replace(/\s+/g, '')}`));
           inferred.forEach((a) => {
             const key = `${a.fireAt}|${a.title.replace(/\s+/g, '')}`;
@@ -712,7 +703,7 @@ async function handleStep(event, ctx) {
           console.error('[step/infer] 待办反推异常（不影响主流程）:', e.message);
         }
       }
-      alarms = completeReservationAlarms({ startDate, endDate, items, days: task.days }, alarms);
+      alarms = completeReservationAlarms(reminderContext, alarms);
 
       // 汇总去重要编码的地址（geocode 步按这个清单分批跑）
       const addrSet = new Set();
@@ -724,6 +715,7 @@ async function handleStep(event, ctx) {
       await saveTask(db, event.taskId, {
         items,
         alarms,
+        ticketPolicies: reminderContext.ticketPolicies || [],
         addrList: [...addrSet],
         geoNextIndex: 0,
         coords: {},
@@ -818,6 +810,7 @@ async function handleStep(event, ctx) {
         endDate: task.endDate,
         region,               // 大地名（省 市）：前端导航实时定位时消歧用，不做展示
         sourceFileID: task.fileID,
+        ticketPolicies: task.ticketPolicies || [],
         items,
         createdAt: now,
         updatedAt: now,

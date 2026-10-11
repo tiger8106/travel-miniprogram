@@ -54,7 +54,6 @@ Page({
     delItem: null,        // 待删除的闹钟（删除确认卡）
     typeOptions: TYPE_OPTIONS,
     pendingCount: 0,      // 所有未完成事项数
-    futureCount: 0,       // 尚未到办理时间的事项数（同步到日历入口显示）
     completedCount: 0,    // 已完成但仍保留在分类清单中的事项数
     advanceOptions: [1, 2, 3, 5, 10, 15, 30, 60],  // 提前提醒分钟数可选项
     advanceOptionsLabel: ['1 分钟', '2 分钟', '3 分钟', '5 分钟', '10 分钟', '15 分钟', '30 分钟', '60 分钟'],
@@ -76,7 +75,7 @@ Page({
         this._tripId = null;
         this._sig = '';
         this.setData({
-          loading: false, alarms: [], pendingCount: 0, futureCount: 0, completedCount: 0, editForm: null, delItem: null,
+          loading: false, alarms: [], pendingCount: 0, completedCount: 0, editForm: null, delItem: null,
           groups: [], nowAlarms: [], nowExtra: 0, hotelHint: false,
         });
       },
@@ -135,7 +134,6 @@ Page({
     this.setData(Object.assign({
       loading: false, needLogin: false, alarms: items,
       pendingCount: snap.pendingCount || 0,
-      futureCount: snap.futureCount || 0,
       completedCount: snap.completedCount || 0,
     }, this.buildViews(items)));
     return true;
@@ -181,7 +179,7 @@ Page({
     if (!ok) {
       this.setData({
         loading: false, needLogin: true,
-        alarms: [], pendingCount: 0, futureCount: 0, completedCount: 0, editForm: null, delItem: null,
+        alarms: [], pendingCount: 0, completedCount: 0, editForm: null, delItem: null,
         groups: [], nowAlarms: [], nowExtra: 0, hotelHint: false,
       });
       return;
@@ -193,7 +191,7 @@ Page({
     if (!tripId) {
       this.setData({
         loading: false, alarms: [], groups: [], nowAlarms: [], nowExtra: 0, hotelHint: false,
-        pendingCount: 0, futureCount: 0, completedCount: 0,
+        pendingCount: 0, completedCount: 0,
       });
       return;
     }
@@ -240,7 +238,6 @@ Page({
           status: this.computeStatus(remindAt, completed),
         };
       });
-      const now = Date.now();
       // 未完成事项在前，已完成事项沉底；各自按提醒时间排序。
       items.sort((a, b) => {
         if (a.completed !== b.completed) return a.completed ? 1 : -1;
@@ -249,16 +246,15 @@ Page({
         return ta - tb;
       });
       const pendingCount = items.filter((a) => !a.completed).length;
-      const futureCount = items.filter((a) => !a.completed && a.actionAt && a.actionAt > now).length;
       const completedCount = items.filter((a) => a.completed).length;
       const views = this.buildViews(items);
 
       // ② 内容没变就不 setData，避免无谓重绘（视图派生数据一起比，避免状态过期）
-      const snap = { openid, tripId, alarms: items, pendingCount, futureCount, completedCount };
+      const snap = { openid, tripId, alarms: items, pendingCount, completedCount };
       const sig = JSON.stringify(snap);
       if (sig !== this._sig) {
         this._sig = sig;
-        this.setData(Object.assign({ alarms: items, pendingCount, futureCount, completedCount }, views));
+        this.setData(Object.assign({ alarms: items, pendingCount, completedCount }, views));
         homeCache.writePage(CACHE_KEY, snap);
       } else {
         // 数据没变，但"正在进行/即将进行"是按当前时间算的，仍要刷新一次
@@ -688,40 +684,6 @@ Page({
       await alarm.addToCalendar(item);
       wx.hideLoading();
       wx.showToast({ title: '已加入系统日历', icon: 'success' });
-    } catch (err) {
-      wx.hideLoading();
-      this.handleCalendarError(err);
-    }
-  },
-
-  // 一键同步所有未来闹钟 → 系统日历
-  async onSyncAllToCalendar() {
-    const { alarms, futureCount } = this.data;
-    if (!futureCount) {
-      wx.showToast({ title: '没有未来的事项', icon: 'none' });
-      return;
-    }
-    const res = await new Promise((resolve) => {
-      wx.showModal({
-        title: '同步到系统日历',
-        content: `将把 ${futureCount} 个未来事项写入手机系统日历，到点锁屏也会响铃震动（微信关了也有效）。`,
-        confirmText: '开始同步',
-        success: resolve,
-      });
-    });
-    if (!res.confirm) return;
-    try {
-      wx.showLoading({ title: '同步中…' });
-      const { ok, total, cancelled } = await alarm.addAllToCalendar(alarms);
-      wx.hideLoading();
-      // 全部被用户取消 —— 静默收工，不弹任何失败提示
-      if (!ok && cancelled) return;
-      const cancelPart = cancelled ? `，${cancelled} 个已取消` : '';
-      wx.showModal({
-        title: '同步完成',
-        content: `成功 ${ok}/${total} 个${cancelPart}。可以在手机日历 App 里查看，将提前 ${this.data.advanceMin} 分钟提醒。`,
-        showCancel: false,
-      });
     } catch (err) {
       wx.hideLoading();
       this.handleCalendarError(err);

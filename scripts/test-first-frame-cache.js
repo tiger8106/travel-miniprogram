@@ -7,7 +7,7 @@ const app = { globalData: { currentTripId: 'trip-a' } };
 const pages = {};
 const snapshots = {
   tickets: {
-    openid, tripId: 'trip-a', pendingCount: 2, futureCount: 1, completedCount: 0,
+    openid, tripId: 'trip-a', pendingCount: 2, completedCount: 0,
     alarms: [
       { _id: 'hotel-1', type: 'hotel', title: '测试酒店', completed: false,
         actionAt: Date.now() + 86400000, remindAt: Date.now() + 80000000 },

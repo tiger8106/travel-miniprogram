@@ -55,7 +55,11 @@ Module._load = function (request, parent, isMain) {
       asArray: (v) => v || [], extractDay: async () => [{ dayIndex: 0, activity: '游览象鼻山', category: 'sight' }],
       extractAlarms: async () => [], extractSuggestions: async () => ({}),
     };
-    if (request === './alarm-infer') return { inferAlarms: async () => [], completeReservationAlarms: () => [] };
+    if (request === './alarm-infer') return { inferAlarms: async (ctx) => {
+      ctx.ticketPolicies = [{ place: '免费公共游线', activity: '散步', ticketRequired: false, reservationRequired: false,
+        sourceUrl: 'https://www.glljsh.com/category/164.html', dayIndex: 0 }];
+      return [];
+    }, completeReservationAlarms: () => [] };
     if (request === './geocode') return { geocodeBatch: async () => ({}), geocodeOne: async () => null, pickCity: () => '' };
   }
   return originalLoad.call(this, request, parent, isMain);
@@ -73,6 +77,7 @@ Module._load = originalLoad;
   }
   assert.strictEqual(tables.parse_tasks[0].status, 'done');
   assert.strictEqual(tables.trips.length, 1);
+  assert.equal(tables.trips[0].ticketPolicies.length, 1, '免费无需预约证据经 infer→任务→行程持久化，不能在查漏时丢失');
   const again = await parser.main({ action: 'resume', taskId: 'task-1' });
   assert.strictEqual(again.data.status, 'done');
   assert.strictEqual(tables.trips.length, 1, '重试不能重复入库');

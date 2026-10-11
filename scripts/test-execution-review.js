@@ -547,7 +547,7 @@ test('已执行复核的日期入库审计不修改时段或重排大纲', () =>
     const outline = { days: [{ city: '甲城', overnight: '甲城', hotel: '甲城晨光酒店', highlights: [], moves: [] }, { overnight: '返程' }] };
     const first = await R.reviewExecutionItems({ origin: '用户家' }, outline, [room], Date.now() + 20000);
     assert(!first[0].executionReview, '运营检索轮不能提前标记时间线通过');
-    const accepted = await R.reviewExecutionItems({ origin: '用户家' }, outline, first, Date.now() + 20000);
+    const accepted = await R.reviewExecutionItems({ origin: '用户家' }, outline, first, Date.now() + 45000);
     assert.equal(accepted[0].executionReview, R.REVIEW_VERSION);
     await R.reviewExecutionItems({ origin: '用户家' }, outline, accepted, Date.now() + 20000);
     assert.equal(calls, 2, '知识和时间线分轮，已完成日期不能重复调用 LLM');

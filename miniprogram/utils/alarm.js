@@ -301,49 +301,6 @@ function addToCalendar(a) {
 }
 
 /**
- * 批量添加未来闹钟到系统日历（逐个串行，避免弹窗打架）
- * 用户中途点取消 → 停止批次，不算失败
- * @returns {Promise<{ok:number, total:number, cancelled:number}>}
- */
-async function addAllToCalendar(list) {
-  const now = Date.now();
-  const future = (list || []).filter((a) => {
-    const t = actionAtOf(a);
-    return t && t > now && !isCompleted(a);
-  });
-  if (!future.length) return { ok: 0, total: 0, cancelled: 0 };
-
-  let ok = 0;
-  let cancelled = 0;
-  let authDenied = false;
-  for (const a of future) {
-    try {
-      await addToCalendar(a);
-      ok++;
-    } catch (e) {
-      if (e.code === 'CANCELLED') {
-        // 用户取消了系统弹窗，不想继续写，直接收工
-        cancelled++;
-        break;
-      }
-      if (/auth|deny|authorize|permission/i.test(e.message || '')) {
-        authDenied = true;
-        break;
-      }
-      // 单个失败（如已过期、重复）跳过，继续下一个
-    }
-    await new Promise((r) => setTimeout(r, 150));
-  }
-
-  if (authDenied) {
-    const err = new Error('日历权限被拒绝');
-    err.code = 'AUTH_DENIED';
-    throw err;
-  }
-  return { ok, total: future.length, cancelled };
-}
-
-/**
  * 请求订阅消息授权（微信「服务通知」推送的前提）
  * @returns {Promise<'accept'|'reject'|'unavailable'>} 永不 reject
  */
@@ -377,7 +334,6 @@ module.exports = {
   alarmPopupContent,
   fireAlarm,         // 暴露供测试
   addToCalendar,
-  addAllToCalendar,
   getAdvanceMin,
   setAdvanceMin,
   requestSubscribe,
