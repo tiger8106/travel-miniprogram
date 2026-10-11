@@ -41,7 +41,7 @@ const COL_SCHED = 'schedule_cache';
 const SCHED_TTL_MS = 36 * 3600 * 1000;
 
 // 生成引擎版本（用于确认线上跑的是哪一版）
-const GEN_VERSION = 'v2.20-reference-schedules-execution';
+const GEN_VERSION = 'v2.21-fixed-rail-ticket-coverage';
 const { publicationState, collectGenerationRows } = require('./publication');
 
 async function generateOutlineWithHotelCheck(input, opts) {

@@ -64,6 +64,22 @@ const scenarios = [
   },
 ];
 
+// 收费景点名字不靠“景区”关键词识别；真实小行程减少联网回归成本。
+const ticketScenarios = [
+  { name: '成都—都江堰—青城山票务', expectedTickets: ['都江堰', '青城(?:山)?前山'], input: {
+    origin: '成都春熙路', dest: '都江堰、青城山前山', startDate: '2026-11-05', endDate: '2026-11-07',
+    startTime: '07:00', endTime: '20:00', party: '情侣出行', people: 2, budget: '经济实惠', pace: '劳逸适中',
+    interests: ['自然山水', '当地美食'], transport: '高铁/动车优先',
+    extra: '高铁动车优先，不自驾；都江堰水利景区和青城山前山都要实际游览，核对所有入园票和实际使用的索道/游船票，免费点不要虚构门票。不安排毕棚沟。',
+  } },
+  { name: '上海—苏州园林票务', expectedTickets: ['拙政园', '狮子林', '留园'], input: {
+    origin: '上海静安寺', dest: '苏州（拙政园、狮子林、留园）', startDate: '2026-11-10', endDate: '2026-11-11',
+    startTime: '08:00', endTime: '20:00', party: '朋友出行', people: 2, budget: '经济实惠', pace: '劳逸适中',
+    interests: ['人文历史', '当地美食'], transport: '高铁/动车优先',
+    extra: '往返优先高铁动车，苏州市内公交地铁或打车，不自驾。拙政园、狮子林、留园都要实际入园游览，所有确定收费门票都单独保留；不要新增其他远郊目的地。',
+  } },
+];
+
 function offlineDay(date, city, overnight, highlights, moves) {
   return {
     date, city, theme: `${city}路线`, overnight, hotel: '',
@@ -260,7 +276,7 @@ function inspectScenario(scenario, outline, items) {
   if (untimed.length) issues.push(`${untimed.length} 条行程缺少起止时间`);
   items.forEach((item) => {
     if (toMinutes(item.endTime) <= toMinutes(item.startTime)) issues.push(`非正时长条目：${fmt(item)}`);
-    if (item.schedSource !== '12306') return;
+    if (!['12306', 'reference'].includes(item.schedSource)) return;
     const day = (outline.days || [])[Number(item.dayIndex || 0)] || {};
     const matches = (day.moves || []).flatMap((move) => move.sched || []).some((schedule) =>
       String(item.startLocation || '').replace(/站$/, '') === String(schedule.from || '').replace(/站$/, '')
@@ -371,6 +387,7 @@ function inspectScenario(scenario, outline, items) {
       localMobility: (day.executionEvidence || {}).localMobility || [],
       previousStorage: require('../cloudfunctions/generatePlan/execution-review').previousStoragePlaces(items, dayIndex),
       references: require('../cloudfunctions/generatePlan/execution-review').referenceSchedules(day),
+      enforceRailSchedules: !process.argv.includes('--offline'),
       sailingWindows: (day.executionEvidence || {}).sailingWindows || [],
       sameHotel: !!day.hotel && sameEndpoint(day.hotel, (outline.days[dayIndex - 1] || {}).hotel),
       lightLuggage: P.explicitCarryLuggagePreference(profile),
@@ -445,7 +462,9 @@ function inspectScenario(scenario, outline, items) {
     const usedRows = new Set();
     (day.moves || []).filter((move) => move && move.from && move.to).forEach((move) => {
       const row = rows.find((item) => !usedRows.has(item)
-        && routeMatches(move.from, item.startLocation) && routeMatches(move.to, item.endLocation));
+        && sameEndpoint(move.from, item.startLocation) && sameEndpoint(move.to, item.endLocation))
+        || rows.find((item) => !usedRows.has(item)
+          && routeMatches(move.from, item.startLocation) && routeMatches(move.to, item.endLocation));
       if (row) { usedRows.add(row); orderedMoves.push({ move, row }); }
     });
     for (let i = 1; i < orderedMoves.length; i++) {
@@ -488,8 +507,8 @@ function inspectScenario(scenario, outline, items) {
 
   const firstDay = items.filter((item) => Number(item.dayIndex || 0) === 0);
   const firstTransfer = firstDay.find((item) => item.category === 'transport'
-    && String(item.startLocation || '').includes('金童路'));
-  if (!firstTransfer) issues.push('首日缺少从金童路出发的接驳');
+    && routeMatches(scenario.input.origin, item.startLocation));
+  if (!firstTransfer) issues.push(`首日缺少从${scenario.input.origin}出发的接驳`);
   else if (scenario.input.startTime && firstTransfer.startTime !== scenario.input.startTime) {
     issues.push(`首日出发接驳应为 ${scenario.input.startTime}，实际 ${firstTransfer.startTime}`);
   }
@@ -511,6 +530,7 @@ function inspectScenario(scenario, outline, items) {
     (day.moves || []).some((move) => routeMatches(scenario.input.origin, move.from)
       && /train|高铁|动车|火车/i.test(String(move.mode || ''))));
   if (/高铁|动车/.test(profile.transport) && hasOutboundRail && returnMove
+      && !lastDay.some((item) => item.transportType === 'train')
       && !/train|高铁|动车|火车/i.test(String(returnMove.mode || ''))) {
     issues.push(`已存在去程铁路走廊，返程仍未优先使用铁路：${returnMove.from}→${returnMove.to}（${returnMove.mode || '未注明'}）`);
   }
@@ -893,12 +913,17 @@ async function runScenario(scenario) {
   alarms = P.annotateAlarmUsage(alarms, finalItems, outline);
   const bookingAlarms = alarms.filter((alarm) => ['train', 'plane', 'bus', 'ticket', 'hotel'].includes(alarm.type));
   issues.push(...inspectBookingReminders(profile, finalItems, alarms));
+  (scenario.expectedTickets || []).forEach((name) => {
+    if (!alarms.some((alarm) => alarm.type === 'ticket' && new RegExp(name).test(`${alarm.title} ${alarm.bookingInfo}`)))
+      issues.push(`已确认收费且明确必游的地点缺少门票分类：${name}`);
+  });
   const missingUsage = bookingAlarms.filter((alarm) => !String(alarm.usageInfo || '').trim());
   if (missingUsage.length) issues.push(`${missingUsage.length} 条分类闹钟缺少实际使用日期/时间信息`);
   const linkedAlarmCounts = new Map();
   bookingAlarms.forEach((alarm) => {
     if (!alarm.linkedItemId) return;
-    linkedAlarmCounts.set(String(alarm.linkedItemId), (linkedAlarmCounts.get(String(alarm.linkedItemId)) || 0) + 1);
+    const key = `${alarm.linkedItemId}|${alarm.type}|${alarm.ticketProduct || alarm.bookingInfo || alarm.title}`;
+    linkedAlarmCounts.set(key, (linkedAlarmCounts.get(key) || 0) + 1);
   });
   const duplicateLinked = [...linkedAlarmCounts.entries()].filter(([, count]) => count > 1);
   if (duplicateLinked.length) issues.push(`${duplicateLinked.length} 个票务/酒店行程条目生成了重复闹钟`);
@@ -974,8 +999,10 @@ function inspectBookingReminders(profile, items, alarms) {
 (async () => {
   if (replayPath) {
     const saved = JSON.parse(fs.readFileSync(path.resolve(replayPath), 'utf8'));
-    const scenario = scenarios.find((entry) => entry.input.dest === saved.input.dest);
-    if (!scenario) throw new Error('重放文件不属于两条指定测试路线');
+    const scenario = scenarios.concat(ticketScenarios).find((entry) => entry.input.dest === saved.input.dest);
+    if (!scenario) throw new Error('重放文件不属于指定测试路线');
+    // 验收必须使用实际生成时的输入，不能丢掉行李/时刻等补充要求。
+    scenario.input = saved.input;
     if (process.argv.includes('--evidence-file')) {
       const evidencePath = process.argv[process.argv.indexOf('--evidence-file') + 1];
       const references = JSON.parse(fs.readFileSync(path.resolve(evidencePath), 'utf8'));
@@ -1010,9 +1037,14 @@ function inspectBookingReminders(profile, items, alarms) {
         if (!requested.includes(Number(row.dayIndex || 0))) return row;
         const out = Object.assign({}, row); delete out.executionReview; return out;
       });
-      requested.forEach((di) => { delete saved.outline.days[di].executionEvidence; });
+      requested.forEach((di) => {
+        const day = saved.outline.days[di];
+        day.ticketProducts = day.ticketProducts || (day.executionEvidence || {}).ticketProducts || [];
+        delete day.executionEvidence;
+      });
     }
     const reportDir = liveReview ? fs.mkdtempSync(path.join(require('os').tmpdir(), 'travel-review-')) : '';
+    const neededModelReview = items.some((row) => row.executionReview !== require('../cloudfunctions/generatePlan/execution-review').REVIEW_VERSION);
     const checkpoint = () => {
       if (!reportDir) return;
       fs.writeFileSync(path.join(reportDir, 'result.json'), JSON.stringify({
@@ -1039,6 +1071,10 @@ function inspectBookingReminders(profile, items, alarms) {
     }
     const inspected = inspectScenario(scenario, saved.outline, items);
     const reminders = alarms.filter((alarm) => ['train', 'plane', 'bus', 'ticket', 'hotel'].includes(alarm.type));
+    (scenario.expectedTickets || []).forEach((name) => {
+      if (liveReview && !alarms.some((alarm) => alarm.type === 'ticket' && new RegExp(name).test(`${alarm.title} ${alarm.bookingInfo}`)))
+        inspected.issues.push(`明确收费且实际游览的地点缺少门票分类：${name}`);
+    });
     if (liveReview) {
       if (!reminders.length) inspected.issues.push('完整复核后缺少票务/住宿提醒');
       inspected.issues.push(...inspectBookingReminders(P.normalizeInput(saved.input), items, alarms));
@@ -1058,13 +1094,17 @@ function inspectBookingReminders(profile, items, alarms) {
       day.rows.forEach((row) => console.log(`  ${row}`));
     });
     inspected.issues.forEach((issue) => console.error(`❌ ${issue}`));
-    console.log(`${liveReview ? '真实 LLM 逐日复核' : '真实结果离线重放'}：${inspected.issues.length ? '失败' : '通过'}${liveReview ? '' : '（不代表重新调用 LLM）'}`);
+    console.log(`${liveReview && neededModelReview ? '真实 LLM 逐日复核' : '已验收结果与最新规则重放'}：${inspected.issues.length ? '失败' : '通过'}${liveReview && neededModelReview ? '' : '（本次未重新调用逐日模型）'}`);
     process.exitCode = inspected.issues.length ? 1 : 0;
     return;
   }
   const requested = process.argv.includes('--route')
     ? Number(process.argv[process.argv.indexOf('--route') + 1]) : 0;
-  const selected = requested ? [scenarios[requested - 1]] : scenarios;
+  const pool = process.argv.includes('--ticket-suite') ? ticketScenarios : scenarios;
+  const selected = requested ? [pool[requested - 1]] : pool;
+  if (process.argv.includes('--light-luggage')) selected.forEach((scenario) => {
+    scenario.input.extra += '；只带随身小背包，无大件行李；不增加其它可选景点。';
+  });
   if (selected.some((scenario) => !scenario)) throw new Error('--route 只接受 1 或 2');
   let failed = 0;
   for (const scenario of selected) {

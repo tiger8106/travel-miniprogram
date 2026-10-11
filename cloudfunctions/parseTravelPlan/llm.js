@@ -73,7 +73,7 @@ function disableThinking() {
   return REASONING_MODEL.test(getModel());
 }
 
-function chat(messages, maxTokens, timeoutMs) {
+function chat(messages, maxTokens, timeoutMs, options = {}) {
   return new Promise((resolve, reject) => {
     const bodyObj = {
       model: getModel(),
@@ -82,6 +82,9 @@ function chat(messages, maxTokens, timeoutMs) {
       max_tokens: maxTokens || 4000,
     };
     if (disableThinking()) bodyObj.enable_thinking = false;
+    // 只在票务查漏阶段联网，结构化提取仍忠于原文。
+    if (options.enableSearch && process.env.LLM_ENABLE_SEARCH !== '0'
+      && (process.env.LLM_SEARCH_CAPABLE === '1' || /dashscope/.test(getBaseURL()))) bodyObj.enable_search = true;
     const body = JSON.stringify(bodyObj);
     const url = `${getBaseURL()}/chat/completions`;
     const u = new URL(url);
@@ -184,12 +187,12 @@ const SYS_PROMPT =
 /**
  * 带一次重试的 chat
  */
-async function chatWithRetry(messages, maxTokens, timeoutMs) {
+async function chatWithRetry(messages, maxTokens, timeoutMs, options) {
   try {
-    return await chat(messages, maxTokens, timeoutMs);
+    return await chat(messages, maxTokens, timeoutMs, options);
   } catch (e) {
     console.error('[llm] 调用失败，重试一次:', e.message);
-    return chat(messages, maxTokens, timeoutMs);
+    return chat(messages, maxTokens, timeoutMs, options);
   }
 }
 
@@ -218,7 +221,9 @@ const DAY_RULES = `# 拆分与时间规则（必须遵守）
 
 # 覆盖度：宁可多拆，不许漏
 11. 原文每一句含时间或动作的话都必须有对应条目。没写时间的句子（如"晚上可以看《印象刘三姐》""17:30左右回酒店洗澡休息"之后的安排）也要提取，startTime 按上一条 endTime 顺延。
-12. 备注类信息（"注：…""建议…""务必确认…""终极哪一段开放以公告为准"）放进最近一条行程项的 note，不要单独成条。`;
+12. 备注类信息（"注：…""建议…""务必确认…""终极哪一段开放以公告为准"）放进最近一条行程项的 note，不要单独成条。
+13. 原文明示门票价格或需购买/预约时，保留ticketRequired:true或reservationRequired:true、ticketPlace准确景区、ticketProduct准确产品；明确免费无需门票为ticketRequired:false。没有原文证据时不要猜true，交由后续联网查漏。索道/观光车等独立票与景区入园票分开；游玩、车次和酒店名本身不等于已订。
+14. 列车时刻和车次号严格取自原文，不因上一条重叠而移动铁路到发时间、缩短运行时长或换同城另一车站。冲突保留原文并在note标出待调整接驳。乘船填transportType:ship，汽车大巴填bus。`;
 
 /**
  * 解析"一天"：原文行 → 行程项数组。失败抛错（上层决定重试/跳过）。
@@ -228,7 +233,7 @@ async function extractDay(d) {
   const prevBlock = d.prevText
     ? `【背景：今天之前的行程原文，仅供理解上下文——特别是前一天结束时所在的位置/住宿，禁止从中提取行程项】\n${d.prevText}\n\n`
     : '';
-  const body = `${prevBlock}【今天：${d.date}｜${d.title}，只提取这一天的行程】\n${d.lines.join('\n')}\n\n提取"今天"所有行程项为 JSON 数组，dayIndex 全部为 ${d.index}。每个元素格式：{"dayIndex":${d.index},"startTime":"HH:mm","endTime":"HH:mm","activity":"描述","category":"sight/food/hotel/transport/ticket/other","startLocation":"","endLocation":"","transportType":"car/walk/ride/train/plane","note":""}。只输出数组。\n\n${DAY_RULES}`;
+  const body = `${prevBlock}【今天：${d.date}｜${d.title}，只提取这一天的行程】\n${d.lines.join('\n')}\n\n提取"今天"所有行程项为 JSON 数组，dayIndex 全部为 ${d.index}。每个元素格式：{"dayIndex":${d.index},"startTime":"HH:mm","endTime":"HH:mm","activity":"描述","category":"sight/food/hotel/transport/ticket/other","startLocation":"","endLocation":"","transportType":"car/walk/ride/train/plane/bus/ship","note":""}。有原文票务证据时另加ticketRequired/reservationRequired布尔值、ticketPlace、ticketProduct。只输出数组。\n\n${DAY_RULES}`;
   const text = await chatWithRetry(
     [
       { role: 'system', content: SYS_PROMPT },

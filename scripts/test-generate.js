@@ -2285,12 +2285,13 @@ llm.chatWithRetry = async (messages) => {
     && item.category === 'transport' && item.endLocation === '重庆西');
   const officialLateTransfer = officialLateHome.find((item) => item.dayIndex === 1
     && item.endLocation === '重庆市金童路');
-  ok(officialLateTrain && officialLateTrain.endTime === '15:20'
-    && !/D1734/.test(officialLateTrain.activity || '')
-    && officialLateTransfer && officialLateTransfer.endTime === '16:00'
-    && officialLateOutline.days[1].moves[0].code === ''
-    && officialLateOutline.days[1].moves[0].schedSource === 'return-deadline-conflict',
-  '官方返程班次赶不上用户到家时间时清除冲突车次并保持末日顺序', JSON.stringify({ officialLateHome, move: officialLateOutline.days[1].moves[0] }));
+  ok(officialLateTrain && officialLateTrain.startTime === '17:35' && officialLateTrain.endTime === '23:00'
+    && /D1734/.test(officialLateTrain.activity || '')
+    && officialLateTransfer && P.toMin(officialLateTransfer.startTime) >= P.toMin(officialLateTrain.endTime)
+    && officialLateOutline.days[1].moves[0].code === 'D1734'
+    && officialLateOutline.days[1].moves[0].schedSource === '12306'
+    && /无法衔接/.test(officialLateTrain.note),
+  '已有班次赶不上到家目标时保留车次及准确时刻并明确冲突，不造更早列车', JSON.stringify({ officialLateHome, move: officialLateOutline.days[1].moves[0] }));
   const waitingRows = P.removeOrphanStationWaitingItems([
     { dayIndex: 0, startTime: '18:30', endTime: '19:00', category: 'other', startLocation: '成都茶店子客运站', endLocation: '理县客运站候车厅', activity: '抵达后进站候车，准备乘坐长途大巴' },
     { dayIndex: 1, startTime: '08:30', endTime: '09:00', category: 'other', startLocation: '成都东站', endLocation: '成都东站候车厅', activity: '到站安检候车' },

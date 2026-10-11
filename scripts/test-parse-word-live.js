@@ -63,15 +63,28 @@ const meta = buildDocMeta(raw);
   fs.writeFileSync(path.join(reportDir, 'result.json'), JSON.stringify({ fingerprint, meta, items: clean, inferred, alarms, hotelReminders: reminders }, null, 2));
   console.log('完整解析与提醒验收记录：' + path.join(reportDir, 'result.json'));
   const rawCodes = [...new Set([...raw.matchAll(/\b[GDCZTK]\d{1,5}\b/g)].map((match) => match[0]))];
+  for (const day of meta.days) for (const line of day.lines) {
+    const code = (String(line).match(/\b[GDCZTK]\d{1,5}\b/) || [])[0];
+    const times = String(line).match(/\b\d{1,2}:\d{2}\b/g) || [];
+    if (!code || times.length < 2) continue;
+    const row = clean.find((item) => Number(item.dayIndex) === day.index && item.transportType === 'train'
+      && String(item.activity).includes(code));
+    assert(row && row.startTime === times[0] && row.endTime === times[1], `${code}必须保留原文运行时间${times[0]}–${times[1]}`);
+  }
   for (const code of rawCodes) assert(alarms.some((alarm) => alarm.type === 'train' && alarm.title.includes(code)), `未提取${code}订票提醒`);
   assert.equal(alarms.filter((alarm) => alarm.type === 'train').length, rawCodes.length, '五段铁路不要重复泛称车票');
-  assert.equal(alarms.filter((alarm) => alarm.type === 'ticket' && /游船/.test(alarm.title)).length, 1, '同一段漓江游船不要重复生成船票');
-  assert.equal(alarms.filter((alarm) => alarm.type === 'bus').length, 2, '桂林与金坑往返专线按方向分开且不重复');
-  const raftAlarm = alarms.find((alarm) => alarm.type === 'ticket' && /遇龙河|竹筏漂流/.test(alarm.title));
+  assert.equal(alarms.filter((alarm) => alarm.type === 'ticket' && /漓江|竹江|磨盘山/.test(alarm.title)
+    && /游船|游轮|船票/.test(alarm.title)).length, 1, '同一段漓江游船不要重复生成船票');
+  assert.equal(alarms.filter((alarm) => alarm.type === 'bus').length, 3, '桂林与金坑两方向专线及明确提前买的德天汽车票必须完整且不重复');
+  assert(!alarms.some((alarm) => alarm.type === 'ticket' && /前往德天.*公交车票/.test(alarm.title)), '汽车票不能混入景区门票分类');
+  const raftAlarm = alarms.find((alarm) => alarm.type === 'ticket' && /遇龙河/.test(alarm.title));
   assert(raftAlarm && raftAlarm.fireAtStr === `${meta.year}-10-03 20:00`, '原文注明20点买次日筏票，不能退回提前7天9点估计');
   for (const topic of ['游船', '竹筏', '索道|缆车', '龙脊梯田.*门票', '德天']) assert(alarms.some((alarm) => alarm.type === 'ticket'
     && new RegExp(topic).test(alarm.title + alarm.note)), `未提取${topic}门票/体验提醒`);
   assert(!alarms.some((alarm) => alarm.type === 'train' && /电动车|自行车|前往.*码头/.test(alarm.title)), '不能把骑行/码头接驳当火车票');
+  assert(!alarms.some((alarm) => alarm.type === 'ticket' && /象鼻山/.test(alarm.title)
+    && (alarm.ticketRequired === true || /门票预订|预约购票/.test(alarm.title))), '免费入园不能误提成付费门票，未核实可保留预约核验');
+  assert(!alarms.some((alarm) => alarm.type === 'ticket' && /大榕树/.test(alarm.title)), '仅骑行至大榕树附近并未入园，不应催购入园票');
   console.log('票务提醒：' + alarms.filter((alarm) => ['train', 'ticket', 'bus'].includes(alarm.type)).map((alarm) => `${alarm.type}: ${alarm.title}`).join('；'));
   console.log('酒店提醒：' + reminders.map((item) => `${item.title}〔${item.note}〕`).join('；'));
   console.log('每日酒店：' + hotels.map((item) => `${item.dayIndex + 1}日 ${item.endLocation}`).join('；'));

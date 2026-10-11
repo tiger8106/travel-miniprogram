@@ -329,4 +329,174 @@ test('导航扩张上游耗时优先消费多余候车，仍留40分钟且不改
     { ...wait, startTime: '15:00' }, rail], 1, context);
   assert(R.executionIssues(short, context).some((issue) => /重叠|安检缓冲/.test(issue)));
 });
+test('近期参考列车与官方列车一样锁定，不能被相邻接驳顺延', () => {
+  const move = { from: '甲站', to: '乙站', mode: 'train', code: 'D1003', startTime: '14:00', endTime: '16:00',
+    schedSource: 'reference', referenceDate: '2026-10-10', sourceUrl: 'https://example.com/rail',
+    sched: [{ code: 'D1003', from: '甲站', to: '乙站', s: '14:00', e: '16:00' }] };
+  const outline = { days: [{ moves: [{ from: '甲景区', to: '甲站', mode: 'ride', startTime: '13:00', endTime: '14:30' }, move] }] };
+  P.alignOutlineMoveTimes(outline);
+  assert.equal(move.startTime, '14:00'); assert.equal(move.endTime, '16:00');
+  const restored = P.enforceOfficialRailItems([{ ...item('乘D1003列车'), startTime: '14:40', endTime: '16:40' }], outline)[0];
+  assert.equal(restored.startTime, '14:00'); assert.equal(restored.endTime, '16:00'); assert.equal(restored.schedSource, 'reference');
+  const rows = P.fixDayTimeOverlaps([item('前往甲站', 'transport', '甲景区', '甲站', 'ride'), restored]);
+  assert.equal(rows.find((row) => row.transportType === 'train').startTime, '14:00');
+});
+test('严格执行验收不接受只有估算运行时间、没有查询证据的铁路', () => {
+  const row = item('乘G9999列车');
+  assert(R.executionIssues([row], { enforceRailSchedules: true }).some((error) => error.includes('具体车次')));
+  const fact = { startLocation: '甲站', endLocation: '乙站', code: 'G9999', startTime: '14:00', endTime: '16:00' };
+  assert(!R.executionIssues([row], { enforceRailSchedules: true, official: [fact] }).some((error) => error.includes('具体车次')));
+});
+test('无景区关键词的已确定收费景点在生成与上传两条链路都保留门票', () => {
+  const visits = [{ ...item('参观甲园', 'sight', '', '甲园', ''), ticketRequired: true, ticketProduct: '甲园门票' },
+    { ...item('游览乙馆', 'sight', '', '乙馆', ''), note: '门票30元' },
+    { ...item('参观丙馆', 'sight', '', '丙馆', ''), note: '免费参观，必须预约' },
+    { ...item('游览免费街区', 'sight', '', '免费街区', ''), note: '免费开放，无需门票' }];
+  const p = P.normalizeInput({ startDate: '2027-12-01', endDate: '2027-12-02' });
+  const outline = { days: [{ date: p.startDate, moves: [] }, { date: p.endDate, moves: [] }] };
+  const alarms = P.normalizeBookingAlarmKinds(P.linkBookingAlarms(P.backfillDetailAlarms(p, outline, P.ensureStableItemIds(visits), []), P.ensureStableItemIds(visits)), P.ensureStableItemIds(visits), p);
+  for (const name of ['甲园', '乙馆', '丙馆']) assert(alarms.some((alarm) => alarm.type === 'ticket' && alarm.title.includes(name)), name);
+  assert(!alarms.some((alarm) => alarm.title.includes('免费街区')));
+  const parsed = A.completeReservationAlarms({ startDate: p.startDate, endDate: p.endDate, items: visits }, []);
+  for (const name of ['甲园', '乙馆', '丙馆']) assert(parsed.some((alarm) => alarm.type === 'ticket' && alarm.title.includes(name)), name);
+});
+test('运营票务证据覆盖已游览景点、不催购弃用候选，入园和索道不按同一行程ID误合并', () => {
+  const p = P.normalizeInput({ startDate: '2027-12-01', endDate: '2027-12-02' });
+  const visits = P.ensureStableItemIds([item('游览甲山前后山，乘索道', 'sight', '', '甲山', '')]);
+  const sourceUrl = 'https://www.djy517.com/online.html';
+  const outline = { days: [{ date: p.startDate, executionEvidence: { ticketProducts: [
+    { place: '甲山', product: '甲山门票', ticketRequired: true, sourceUrl },
+    { place: '甲山', product: '甲山索道票', ticketRequired: true, sourceUrl },
+    { place: '乙园', product: '乙园门票', ticketRequired: true, sourceUrl },
+  ] } }, {}] };
+  const alarms = P.dedupeBookingAlarmRecords(P.normalizeBookingAlarmKinds(P.linkBookingAlarms(P.backfillDetailAlarms(p, outline, visits, []), visits), visits, p));
+  assert(alarms.some((alarm) => alarm.type === 'ticket' && /甲山门票/.test(alarm.title)));
+  assert(alarms.some((alarm) => alarm.type === 'ticket' && /甲山索道/.test(alarm.title)));
+  assert(!alarms.some((alarm) => /乙园/.test(alarm.title)));
+});
+test('船可在编辑面板选择，明确船类型优先于文字里的高铁站/步行', () => {
+  let component;
+  const previous = global.Component;
+  global.Component = (value) => { component = value; };
+  const target = require.resolve('../miniprogram/components/activity-item/activity-item');
+  delete require.cache[target];
+  try { require(target); } finally { global.Component = previous; }
+  assert(component.data.transportOptions.some((option) => option.value === 'ship' && option.icon === '⛴️'));
+  let view;
+  component.observers.item.call({ setData: (data) => { view = data; }, buildNavLegs: () => [], schedTip: () => '' },
+    { category: 'transport', transportType: 'ship', activity: '步行登船，抵达高铁站码头' });
+  assert.equal(view.icon, '⛴️');
+});
+test('上传清洗不能因后续安排重叠缩短已有列车运行时间', () => {
+  const rows = require('../cloudfunctions/parseTravelPlan/normalize').sanitizeItems([
+    item('乘坐G100列车'), { ...item('提前安排午餐', 'food', '', '乙餐厅', ''), startTime: '15:00', endTime: '16:00' },
+  ]);
+  assert.equal(rows.find((row) => row.transportType === 'train').endTime, '16:00');
+  assert(rows.find((row) => row.transportType === 'train').note.includes('不缩短'));
+});
+test('同一游览行程的前后山独立入园票不因关联ID相同合并', () => {
+  const alarms = ['前山', '后山'].map((area) => ({ type: 'ticket', linkedItemId: 'visit',
+    title: `甲山${area}门票`, ticketPlace: '甲山', ticketProduct: `甲山${area}门票`, fireAt: 1 }));
+  assert.equal(P.dedupeBookingAlarmRecords(alarms).length, 2);
+});
+test('运营来源拒绝示例/占位链接，入园票产品必须带具体地点', () => {
+  const { normalizeTicketProducts } = require('../cloudfunctions/generatePlan/ticket-products');
+  const fact = { place: '甲园', product: '入园票', ticketRequired: true };
+  assert.equal(normalizeTicketProducts([{ ...fact, sourceUrl: 'https://example.com/tickets' },
+    { ...fact, sourceUrl: 'https://mp.weixin.qq.com/s/官方公告链接(示例)' }]).length, 0);
+  assert.equal(normalizeTicketProducts([{ ...fact, sourceUrl: 'https://www.djy517.com/online.html' }])[0].product, '甲园入园票');
+});
+test('走过湖区不是乘游船，不能因运营方有船票就催购未安排的体验', () => {
+  const { knownTicketProducts } = require('../cloudfunctions/generatePlan/ticket-products');
+  const visits = [item('漫步甲湖', 'sight', '', '甲湖', '')];
+  assert.equal(knownTicketProducts(visits, [{ place: '甲湖', product: '甲湖游船票', ticketRequired: true,
+    sourceUrl: 'https://www.djy517.com/online.html' }]).length, 0);
+});
+test('汽车预购归车票、明确收费观光车归独立项目票，提醒使用日与办理日分开', () => {
+  const visits = [{ ...item('购买次日前往乙园的公交车票', 'ticket', '', '甲游客中心', ''), startTime: '16:00' },
+    { ...item('抵达甲山停车场，乘观光车到入口', 'transport', '甲山停车场', '甲山入口', 'bus'),
+      ticketRequired: true, ticketPlace: '甲山停车场', ticketProduct: '观光车票' }];
+  const alarms = A.completeReservationAlarms({ startDate: '2027-12-01', endDate: '2027-12-02', items: visits }, []);
+  assert(alarms.some((alarm) => alarm.type === 'bus' && alarm.visitDate === '2027-12-02' && alarm.fireAtStr === '2027-12-01 16:00'));
+  assert(alarms.some((alarm) => alarm.type === 'ticket' && /观光车/.test(alarm.title)));
+  assert(!alarms.some((alarm) => alarm.type === 'ticket' && /公交车票/.test(alarm.title)));
+});
+test('严格铁路验收失败不能通过待确认收尾发布，候选仍可续跑', () => {
+  const day = { city: '乙城', moves: [] };
+  const done = R.finalizeWithWarnings([item('乘C字头城际列车')], 0, day, [], { enforceRailSchedules: true });
+  assert.equal(done.length, 0); assert(day.executionCandidate.length && day.executionReviewIssues.length);
+});
+test('返家接驳倒排不得提前至固定列车抵达之前', () => {
+  const railRow = { ...item('乘D1001'), startTime: '18:00', endTime: '19:19' };
+  const access = { ...item('打车回家', 'transport', '乙站', '用户家', 'ride'), startTime: '19:20', endTime: '20:00' };
+  const result = R.fitEstimatedReturn([railRow, access], { isLast: true, origin: '用户家', backTime: '20:00', homeAccessMin: 45,
+    references: [{ startLocation: '甲站', endLocation: '乙站', startTime: '18:00', endTime: '19:19', code: 'D1001' }] });
+  assert.equal(result[1].startTime, '19:20'); assert.equal(result[0].endTime, '19:19');
+});
+test('只有随身小背包的例外在生成和发布审计中保持一致', () => {
+  assert(P.explicitCarryLuggagePreference({ extra: '只带随身小背包，无大件行李' }));
+  assert(!P.explicitCarryLuggagePreference({ extra: '行李不方便随身携带' }));
+});
+test('游览地点只在起点字段也须保留已确认票务', () => {
+  const tickets = require('../cloudfunctions/generatePlan/ticket-products');
+  const visits = [{ ...item('游览甲园', 'sight', '甲园', ''), ticketRequired: true }];
+  assert.equal(tickets.knownTicketProducts(visits)[0].place, '甲园');
+});
+test('上传同景区入园、观光车和演出为独立产品', () => {
+  const visits = [ { ...item('游览甲景区并乘观光车观看演出', 'sight', '', '甲景区'),
+    ticketRequired: true, ticketPlace: '甲景区', ticketProduct: '入园门票' } ];
+  const facts = ['入园门票', '观光车票', '演出票'].map((product) => ({ place: '甲景区', product,
+    ticketRequired: true, sourceUrl: 'https://www.djy517.com/online.html' }));
+  const alarms = A.completeReservationAlarms({ startDate: '2027-12-01', items: visits, ticketProducts: facts }, []);
+  assert.equal(alarms.filter((alarm) => alarm.type === 'ticket').length, 3);
+});
+test('只到景点附近或远眺不提取内部收费入园票', () => {
+  const tickets = require('../cloudfunctions/generatePlan/ticket-products');
+  const facts = [{ place: '甲园', product: '甲园门票', ticketRequired: true, sourceUrl: 'https://www.djy517.com/' }];
+  assert.equal(tickets.knownTicketProducts([item('骑行至甲园附近', 'sight', '', '甲园附近')], facts).length, 0);
+});
+test('公开票务来源禁止私网与IPv4映射，未知来源不确认收费', () => {
+  const source = require('../cloudfunctions/parseTravelPlan/ticket-source');
+  for (const address of ['127.0.0.1', '10.0.0.1', '172.16.0.1', '192.168.1.1', '169.254.169.254', '::1', '::ffff:127.0.0.1', '2001:db8::1'])
+    assert(!source.publicAddress(address));
+  assert(source.publicAddress('8.8.8.8'));
+  assert.deepEqual(source.admissionPolicy('<p>甲园景区全面免费开放。</p>', '甲园景区'), { paid: false });
+  assert.equal(source.admissionPolicy('', '甲园'), null);
+});
+test('餐馆与新景点之间不能省略接驳并直接开始游览', () => {
+  const rows = [{ ...item('午餐', 'food', '', '甲餐馆'), startTime: '12:00', endTime: '13:00' },
+    { ...item('游览乙园', 'sight', '', '乙园'), startTime: '13:00', endTime: '15:00' }];
+  assert(R.executionIssues(rows, {}).some((issue) => /缺少独立接驳/.test(issue)));
+});
+test('其它真实购票不能替未入园的模型提名通过核验', () => {
+  const visits = [{ ...item('游览乙园', 'sight', '', '乙园'), ticketPlace: '乙园', ticketProduct: '入园门票', ticketRequired: true },
+    item('骑行至甲园附近', 'sight', '', '甲园附近')];
+  const alarms = A.completeReservationAlarms({ startDate: '2027-12-01', items: visits }, [{
+    type: 'ticket', source: 'ai', title: '甲园门票预订', ticketPlace: '甲园', ticketProduct: '甲园门票',
+    ticketRequired: true, sourceUrl: 'https://www.djy517.com/', visitDate: '2027-12-01', fireAt: Date.parse('2027-11-24T09:00:00+08:00') }]);
+  assert(!alarms.some((alarm) => /甲园/.test(alarm.title))); assert(alarms.some((alarm) => /乙园/.test(alarm.title)));
+});
+test('景区范围不延续到离园后餐馆与其它街区，自环交通不因起点空而漏清洗', () => {
+  const rows = R.normalizeReviewRows([item('游览甲园', 'sight', '', '甲园'),
+    item('步行至餐馆', 'transport', '甲园', '甲餐馆', 'walk'),
+    { ...item('游览乙街区', 'sight', '', '乙街区'), visitScope: '甲园' },
+    item('乘公共交通从乙站前往乙站', 'transport', '', '乙站', 'bus')], 0, { required: ['甲园'] });
+  assert(!rows.find((row) => row.endLocation === '乙街区').visitScope);
+  assert(!rows.some((row) => /从乙站前往乙站/.test(row.activity)));
+});
+test('规则提醒生成器必须保留票务产品元数据，观光车不改归普通汽车票', () => {
+  const row = { ...item('乘坐景区观光车前往山门', 'transport', '甲景区入口', '甲山门', 'bus'), itemId: 'shuttle1' };
+  const profile = { startDate: '2027-12-01', endDate: '2027-12-01' };
+  const alarms = P.backfillDetailAlarms(profile, { days: [{ date: profile.startDate }] }, [row], []);
+  assert(alarms[0].reservationRequired && alarms[0].ticketProduct);
+  assert(P.normalizeBookingAlarmKinds(alarms, [row], profile).some((alarm) => alarm.type === 'ticket' && /观光车/.test(alarm.ticketProduct)));
+});
+test('运营证据缺失也保留无景区关键词的实际入园核验，已确认产品缓存不随重查丢失', () => {
+  const profile = { startDate: '2027-12-01', endDate: '2027-12-01' };
+  const row = { ...item('游览甲园', 'sight', '甲园', ''), itemId: 'garden' };
+  const outline = { days: [{ date: profile.startDate, city: '乙城' }] };
+  assert(P.backfillDetailAlarms(profile, outline, [row], []).some((alarm) => alarm.type === 'ticket' && /甲园/.test(alarm.title)));
+  outline.days[0].ticketProducts = [{ place: '甲园', product: '甲园入园票', ticketRequired: true, sourceUrl: 'https://www.djy517.com/' }];
+  assert(P.backfillDetailAlarms(profile, outline, [row], []).some((alarm) => alarm.ticketRequired === true && alarm.ticketProduct));
+});
 console.log(`旅行质量专项：${count} 项通过`);

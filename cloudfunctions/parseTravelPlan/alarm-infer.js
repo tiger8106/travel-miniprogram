@@ -10,6 +10,7 @@
 
 const { chatWithRetry, parseJSONFromText } = require('./llm');
 const { parseCnTime, tsToDateStr, tsToCnDateTimeStr } = require('./cn-time');
+const { knownTicketProducts, ticketKey, evidenceUrl } = require('./ticket-products');
 
 const DAY_MS = 86400000;
 const INFER_THRESHOLD = 3;   // 仅保留旧接口兼容；完整查漏不再受数量门槛限制。
@@ -84,6 +85,19 @@ function backfillRuleAlarms(ctx, existing) {
       sourceReservation: true }];
   }));
   const items = sourceItems.concat(asArray(c.items));
+  knownTicketProducts(asArray(c.items), c.ticketProducts).forEach((fact) => {
+    const date = shiftDate(c.startDate, fact.dayIndex);
+    const old = base.concat(out).find((alarm) => alarm.type === 'ticket'
+      && (/索道|缆车|竹筏|漂流|游船|游轮|船票|演出|观光车/.exec(alarm.ticketProduct || alarm.title) || [''])[0]
+        === (/索道|缆车|竹筏|漂流|游船|游轮|船票|演出|观光车/.exec(fact.product) || [''])[0]
+      && ticketKey(alarm.bookingInfo || alarm.title).includes(ticketKey(fact.product)));
+    if (old) return;
+    const candidate = ruleAlarm(`${date} ${fact.product}${fact.ticketRequired ? '预订' : '预约提醒'}`,
+      shiftDate(date, -7), '09:00', 'ticket', `${fact.note || ''}；关注时间非官方起售时刻，办理前核对运营方规则`);
+    if (candidate) out.push({ ...candidate, dayIndex: fact.dayIndex, bookingInfo: fact.product,
+      ticketPlace: fact.place, ticketProduct: fact.product, ticketRequired: fact.ticketRequired,
+      usageInfo: `使用时间：${date} ${fact.item.startTime || '待确认'}；${fact.product}` });
+  });
   const dayDate = (it) => shiftDate(c.startDate, Number(it && it.dayIndex) || 0);
   const normalized = (s) => String(s || '').replace(/[\s\u3000→（）()：:，,。；;]/g, '').toLowerCase();
   const already = (candidate, text) => {
@@ -120,6 +134,17 @@ function backfillRuleAlarms(ctx, existing) {
     const activity = String(it.activity || it.endLocation || it.startLocation || '该事项').slice(0, 70);
     const mode = String(it.transportType || '').toLowerCase();
     const action = String(it.activity || '').replace(/^\s*\d{1,2}[:：]\d{2}(?:\s*[-–—~～至]\s*\d{1,2}[:：]\d{2})?\s*(?:左右)?\s*/, '');
+    // 明确的提前购汽车票事项归车票，不因解析为ticket而误当景区门票。
+    if (/购买|预购|预订/.test(action) && /公交车票|大巴车票|汽车票|班车票/.test(action)) {
+      const tomorrow = /第二天|次日|翌日/.test(action);
+      const use = shiftDate(date, tomorrow ? 1 : 0);
+      const candidate = ruleAlarm(`准备${use} ${activity}`, date, it.startTime || '09:00', 'bus',
+        '按原文提前购票安排；出发站点、发车时间及售票规则向运营方核实');
+      if (candidate) Object.assign(candidate, { dayIndex: Number(it.dayIndex || 0) + (tomorrow ? 1 : 0),
+        visitDate: use, usageInfo: `乘车时间：${use}，具体班次以运营方为准`, reminderTimeSource: 'document' });
+      add(candidate, activity);
+      return;
+    }
     const transferOnly = /安检|检票|候车|候船|乘船手续|确认.*末班|抵达.*停车场/.test(action)
       || (/^(?:步行|打车|出发|前往|抵达).{0,50}(?:车站|高铁站|火车站|码头|索道游客中心)/.test(action)
         && !/购买|预订|预约|乘坐.*(?:游船|竹筏|索道)/.test(action));
@@ -168,6 +193,9 @@ function backfillRuleAlarms(ctx, existing) {
     const ticketLike = it.category === 'ticket'
       || (it.category === 'sight' && /(?:游览|参观|游玩|入园).{0,40}(?:景区|梯田|瀑布|主题公园|博物馆)/.test(String(it.activity || '')))
       || (!cycling && /门票|船票|游船|竹筏|漂流|演出|缆车|索道|温泉|跟拍/.test(action));
+    const freeAdmission = /(?:无需|不用|不必)(?:购买|购|买)?门票|免门票|免费(?:开放|入园|参观)/.test(text);
+    if (freeAdmission && !/需(?:要)?(?:提前|实名)?预约|必须预约|索道|缆车|游船|竹筏|演出/.test(action)
+      && it.reservationRequired !== true) return;
     if (ticketLike) {
       const productWords = action.match(/游船|竹筏|漂流|索道|缆车|演出/g) || [];
       const sourceEvidence = asArray(c.days).filter((day) => Number(day.index) === Number(it.dayIndex))
@@ -184,6 +212,7 @@ function backfillRuleAlarms(ctx, existing) {
       );
       if (candidate) candidate.reservationPlace = /游船|竹筏|漂流|缆车|索道/.test(action)
         ? String(it.startLocation || it.endLocation || '').replace(/(?:游客中心|观景台|码头)$/, '') : it.endLocation || '';
+      if (candidate && nextDaySale) candidate.reminderTimeSource = 'document';
       if (candidate) Object.assign(candidate, { dayIndex: Number(it.dayIndex) || 0,
         usageInfo: `使用时间：${date} ${it.startTime || '时段待确认'}${it.endTime ? '–' + it.endTime : ''}；${activity}`.slice(0, 180) });
       add(candidate, activity);
@@ -237,18 +266,27 @@ function backfillRuleAlarms(ctx, existing) {
 /** 合并原文、模型提名和规则兜底：使用日期/产品/实际路段去重，不用四字前缀。 */
 function completeReservationAlarms(ctx, existing) {
   const c = ctx || {}, source = asArray(existing);
-  const rules = backfillRuleAlarms(c, []);
+  const verifiedProducts = source.filter((alarm) => alarm.type === 'ticket' && alarm.ticketPlace && alarm.ticketProduct)
+    .map((alarm) => ({ place: alarm.ticketPlace, product: alarm.ticketProduct, ticketRequired: alarm.ticketRequired,
+      reservationRequired: alarm.reservationRequired, sourceUrl: alarm.sourceUrl, note: alarm.note,
+      dayIndex: Math.round((parseCnTime(`${alarm.visitDate}T00:00:00`) - parseCnTime(`${c.startDate}T00:00:00`)) / DAY_MS) }));
+  const rules = backfillRuleAlarms({ ...c, ticketProducts: asArray(c.ticketProducts).concat(verifiedProducts) }, []);
   const normalize = (value) => String(value || '').replace(/[\s（）()·-]/g, '').replace(/跨国|风景区|景区|游客中心|站/g, '');
   const codeOf = (alarm) => (String(alarm.title || '').match(/\b[GDCKTZ]\d{1,5}\b/i) || [''])[0].toUpperCase();
-  const useDate = (alarm) => (String(alarm.usageInfo || alarm.title || '').match(/20\d{2}-\d{2}-\d{2}/) || [])[0]
+  const useDate = (alarm) => alarm.visitDate || (String(alarm.usageInfo || alarm.title || '').match(/20\d{2}-\d{2}-\d{2}/) || [])[0]
     || shiftDate(dateOf(alarm.fireAt), alarm.type === 'train' ? 14 : alarm.type === 'ticket' ? 7 : alarm.type === 'bus' ? 5 : 0);
   const gateNames = [...new Set(asArray(c.days).flatMap((day) =>
-    String(day.title || '').match(/[\u4e00-\u9fa5·]{1,18}(?:梯田|瀑布|景区|博物馆|主题公园)/g) || []))];
+    String(day.title || '').match(/[\u4e00-\u9fa5·]{1,18}(?:梯田|瀑布|景区|博物馆|主题公园)/g) || [])
+    .concat(verifiedProducts.map((fact) => fact.place), asArray(c.items).map((item) => item.ticketPlace).filter(Boolean)))];
   const product = (alarm) => {
-    const text = String(alarm.title || '');
+    const text = `${alarm.ticketProduct || ''} ${alarm.title || ''}`;
     if (/索道|缆车/.test(text)) return 'cable';
-    if (/游船|船票/.test(text)) return 'cruise';
+    if (/游船|游轮|船票|轮渡/.test(text)) return 'cruise';
     if (/竹筏|漂流/.test(text)) return 'raft';
+    if (/演出|演艺/.test(text)) return 'show';
+    if (/观光车|景区.*接驳/.test(text)) return 'shuttle';
+    // 同一个景区的独立收费区域不能被父景区归并键吞掉。
+    if (alarm.ticketProduct && /前山|后山|东区|西区|南区|北区/.test(alarm.ticketProduct)) return `area:${normalize(alarm.ticketProduct)}`;
     const gate = gateNames.find((name) => normalize(text).includes(normalize(name))
       || normalize(name).replace(/梯田|瀑布|博物馆|主题公园$/, '').length >= 2
         && normalize(text).includes(normalize(name).replace(/梯田|瀑布|博物馆|主题公园$/, '')));
@@ -264,6 +302,13 @@ function completeReservationAlarms(ctx, existing) {
   // 规则具备逐段日期/时间信息；原文精确提醒仍优先保留实际办理时刻。
   rules.concat(source).forEach((raw) => {
     const alarm = Object.assign({}, raw);
+    // 联网提名仍须对应真实体验，散步经过湖区不能被升级为另一次游船。
+    if (alarm.type === 'ticket' && alarm.ticketPlace && alarm.ticketProduct && alarm.source === 'ai') {
+      const fact = verifiedProducts.find((entry) => entry.product === alarm.ticketProduct && entry.place === alarm.ticketPlace);
+      if (fact && !knownTicketProducts(c.items, [fact]).some((accepted) =>
+        ticketKey(accepted.place) === ticketKey(fact.place)
+        && ticketKey(accepted.product).endsWith(ticketKey(fact.product)))) return;
+    }
     let date = useDate(alarm);
     let code = codeOf(alarm);
     const kind = alarm.type === 'ticket' ? product(alarm) : '';
@@ -302,7 +347,8 @@ function completeReservationAlarms(ctx, existing) {
       ? `ticket:${date}:${kind}` : `${alarm.type}:${date}:${normalize(alarm.title)}`;
     const previous = groups.get(identity);
     if (!previous) { groups.set(identity, alarm); return; }
-    const winner = alarm.source === 'parsed' ? alarm : previous;
+    const winner = previous.source === 'parsed' ? previous : alarm.source === 'parsed' ? alarm
+      : previous.reminderTimeSource === 'document' ? previous : alarm.reminderTimeSource === 'document' ? alarm : previous;
     const other = winner === previous ? alarm : previous;
     winner.usageInfo = winner.usageInfo || other.usageInfo;
     winner.bookingInfo = winner.bookingInfo || other.bookingInfo;
@@ -356,6 +402,11 @@ function sanitize(list, endDate) {
       fireAtStr: tsToCnDateTimeStr(ts),
       type: ['train', 'plane', 'ticket', 'hotel', 'bus', 'other'].includes(a.type) ? a.type : 'other',
       source: 'ai',
+      visitDate: /^20\d{2}-\d{2}-\d{2}$/.test(a.visitDate || '') ? a.visitDate : '',
+      ticketPlace: String(a.ticketPlace || '').slice(0, 80), ticketProduct: String(a.ticketProduct || '').slice(0, 100),
+      ...(typeof a.ticketRequired === 'boolean' ? { ticketRequired: a.ticketRequired } : {}),
+      ...(typeof a.reservationRequired === 'boolean' ? { reservationRequired: a.reservationRequired } : {}),
+      sourceUrl: String(a.sourceUrl || '').slice(0, 500),
     });
   });
   return out.sort((x, y) => x.fireAt - y.fireAt);
@@ -375,18 +426,22 @@ async function inferAlarms(ctx) {
     const today = `${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())}`;
 
     const prompt = `请根据完整行程逐项查漏，补齐所有需要提前购票/预订的待办。写了车次、时间、酒店名、票价或出行路线不等于已经买票/预订；只有原文明确已买/已订/已预约才免催订。需要门票的景区即使未写“门票”二字也必须提名，不为免费景点虚构收费。
+联网逐个核对实际游览的收费景点及产品，不依据名字有没有“景区/山/公园”猜收费。优先运营方/政府售票资料；免费但需预约仍归ticket并说明免费，不虚构门票价格；仅经过不进入的地点不催购票。即使不需提前预约，确定需要门票也保存在ticket分类。票务标题写准确景区和产品（入园/前山/后山/索道/竹筏等），同一入园票覆盖内部观景点时不重复，独立收费项目不得漏。
 今天是 ${today}（北京时间）。
 
 【行程】${c.startDate} ~ ${c.endDate}｜${c.title || '我的行程'}
 ${brief}
+原文逐日购票/预约说明（用于确认实际时间和是否已购买）：${JSON.stringify(asArray(c.days).map((day) => ({ date: day.date,
+      lines: asArray(day.lines).filter((line) => /票|预约|起售|抢|预订|已买|已订/.test(String(line))) })))}
 
 请穷举所有需要提前预订、抢购、预约或准备的事项，输出 JSON 数组：
-[{"title":"...","fireAt":"YYYY-MM-DD HH:mm","type":"train/plane/bus/ticket/hotel/other","note":"..."}]
+[{"title":"...","fireAt":"YYYY-MM-DD HH:mm","type":"train/plane/bus/ticket/hotel/other","note":"...","visitDate":"实际使用日期YYYY-MM-DD","ticketPlace":"ticket准确地点","ticketProduct":"ticket单一产品名称","ticketRequired":true,"reservationRequired":false,"sourceUrl":"ticket真实运营证据URL，禁止示例/占位链接"}]
 
 # 覆盖类别
 去程/返程火车票(train)、机票(plane)、长途汽车票(bus)、行程内每段城际交通、
 需预约的景区门票与体验项目(ticket)、证件与装备等行前准备(other)。
 酒店由代码按逐晚原文单独归并，勿在本次输出酒店，以免重复。
+每个ticket只包含一个产品，入园票和另付费竹筏/索道分别列出。免费且无需预约不输出；不确定是否收费只能写“核验预约要求”，不得断言需要门票。公交车票不是景区入园票，原文明确提前购车票才放bus。
 
 # 时间推算（按国内各平台可查的实际开放时间）
 - 火车票 12306 预售 15 天（含乘车当日）：乘车日减 14 天 = 开票日，取 09:00。
@@ -401,13 +456,58 @@ ${brief}
 2. title 保留必要信息但不超过40字，note不超过40字，简述提前天数和官方核对要求，完整输出所有事项，不复制整段行程。
 3. 算不准宁可不输出，不要编造模糊日期。只输出数组。`;
 
+    // 独立并行查收费政策，避免通用待办模型把免费入园或组合促销当成必买票。
+    const visits = asArray(c.items).filter((row) => ['sight', 'ticket'].includes(row.category)
+      && !/购买.*车票|办理乘船手续/.test(row.activity || ''))
+      .map((row) => ({ date: shiftDate(c.startDate, Number(row.dayIndex) || 0),
+        place: row.ticketPlace || row.visitScope || row.endLocation || row.startLocation,
+        activity: String(row.activity || '').slice(0, 75) }));
+    const uniqueVisits = visits.filter((row, i) => visits.findIndex((other) =>
+      other.place === row.place && other.activity === row.activity) === i);
+    const batches = [];
+    for (let i = 0; i < uniqueVisits.length; i += 4) batches.push(uniqueVisits.slice(i, i + 4));
+    const policyRequest = Promise.all(batches.map((batch) => chatWithRetry([
+      { role: 'system', content: '联网核对景点当前入园和独立项目票务，优先运营方和政府最新公告。区分免费入园预约与付费项目、旧票价与现政策、入园与仅途经；不能编造链接或未来政策。只输出JSON。' },
+      { role: 'user', content: `行程${c.title}，逐一核对实际游览：${JSON.stringify(batch)}。只返回实际进入的地点和实际乘坐/观看的项目，不返回泛称酒店或附近景点。
+输出{"policies":[{"place":"准确地点","visitDate":"使用日期","ticketRequired":false,"reservationRequired":true,"sourceUrl":"真实入园政策URL","note":"免费预约或收费依据"}],"products":[{"place":"准确地点","visitDate":"使用日期","product":"包含地点的单一购票产品","ticketRequired":true,"reservationRequired":false,"sourceUrl":"真实售票来源URL","note":"规则"}]}。
+每个入园地点必须单独核对政策，免费点不要查到同运营方游船/套票就认定要买入园票。免费无需预约仅列policies不列products；免费需预约products只列免费预约。入园票、索道、观光车、船筏、演出分开，不输出门票+观光车等混合产品。未安排的体验不提取，未知不断言收费。未来日期说明出行前确认。` },
+    ], 1500, 25000, { enableSearch: true }).then((text) => parseJSONFromText(text)).catch((error) => {
+      console.warn('[parseTravelPlan] 独立票务核查暂不可用：%s', error.message);
+      return null;
+    }))).then((results) => ({ policies: results.flatMap((result) => asArray(result && result.policies)),
+      products: results.flatMap((result) => asArray(result && result.products)) }));
     const text = await chatWithRetry([
       { role: 'system', content: '你是行程待办助手，只输出严格 JSON，禁止 markdown 代码块和解释文字。' },
       { role: 'user', content: prompt },
-    ], 4000, 25000);
+    ], 4000, 25000, { enableSearch: true });
     const list = sanitize(asArray(parseJSONFromText(text)), c.endDate);
+    const policy = await policyRequest;
+    const policies = asArray(policy && policy.policies).filter((fact) => fact.place && evidenceUrl(fact.sourceUrl));
+    const checked = asArray(policy && policy.products).filter((fact) => fact.place && fact.product
+      && evidenceUrl(fact.sourceUrl) && (fact.ticketRequired === true || fact.reservationRequired === true));
+    console.log('[parseTravelPlan] 独立票务核查：入园政策%d项，收费/预约产品%d项', policies.length, checked.length);
+    const corrected = list.filter((alarm) => {
+      if (alarm.type !== 'ticket' || !alarm.ticketPlace) return true;
+      if (/门票|入园/.test(alarm.ticketProduct || alarm.title)
+        && /(?:及|和|[+＋]).*(?:观光车|索道|竹筏)/.test(alarm.ticketProduct || alarm.title)) return false;
+      const admission = !/游船|游轮|船票|索道|缆车|竹筏|漂流|演出|观光车/.test(alarm.ticketProduct || alarm.title);
+      // 免费入园政策只覆盖入园产品，不抹掉同地点真实的独立收费体验。
+      if (admission && policies.some((fact) => fact.ticketRequired === false
+        && ticketKey(alarm.ticketPlace) === ticketKey(fact.place))) return false;
+      return !checked.some((fact) => ticketKey(alarm.ticketPlace) === ticketKey(fact.place)
+        && ticketKey(alarm.ticketProduct) === ticketKey(fact.product));
+    });
+    checked.concat(policies.filter((fact) => fact.ticketRequired === false && fact.reservationRequired === true)
+      .map((fact) => ({ ...fact, product: `${fact.place}免费入园预约` }))).forEach((fact) => {
+      if (!/^20\d{2}-\d{2}-\d{2}$/.test(fact.visitDate || '')) return;
+      corrected.push(...sanitize([{ title: `${fact.visitDate} ${fact.product}${fact.ticketRequired ? '预订' : '提醒'}`,
+        fireAt: `${shiftDate(fact.visitDate, -7)} 09:00`, type: 'ticket', visitDate: fact.visitDate,
+        ticketPlace: fact.place, ticketProduct: fact.product, ticketRequired: fact.ticketRequired,
+        reservationRequired: fact.reservationRequired, sourceUrl: fact.sourceUrl,
+        note: `${fact.note || ''}；关注时间非官方起售，出行前确认` }], c.endDate));
+    });
     console.log('[parseTravelPlan] AI 反推待办 %d 条', list.length);
-    return list;
+    return await require('./ticket-source').verifyAdmissions(corrected);
   } catch (e) {
     console.error('[parseTravelPlan] 待办反推失败（不影响主流程）:', e.message);
     return [];

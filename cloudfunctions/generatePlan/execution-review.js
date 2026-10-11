@@ -3,8 +3,9 @@
 const llm = require('./llm');
 const evidence = require('./route-evidence');
 const schedules = require('./schedule');
+const { normalizeTicketProducts } = require('./ticket-products');
 const { solarEventMinute } = require('./solar-time');
-const REVIEW_VERSION = 'v5';
+const REVIEW_VERSION = 'v6';
 const clock = (n) => `${String(Math.floor(Math.max(0, n) / 60)).padStart(2, '0')}:${String(Math.max(0, n) % 60).padStart(2, '0')}`;
 
 function referenceSchedules(day) {
@@ -57,14 +58,23 @@ function needsExecutionSchedules(day, rows, context) {
   const rails = rows.filter((row) => row.transportType === 'train' && row.startLocation && row.endLocation);
   if (!rails.length || !schedules.canLookupSchedules()) return false;
   const known = (context.official || []).concat(context.references || []);
-  if (rails.every((row) => known.some((fact) => matchesSchedule(fact, row)))) return false;
-  const key = JSON.stringify(['v4', day.date, rails.map((row) => [row.startLocation, row.endLocation])]);
+  const accessMinutes = rows.slice(0, rows.indexOf(rails[0])).filter((row) => row.category === 'transport')
+    .reduce((sum, row) => sum + Math.max(0, minute(row.endTime) - minute(row.startTime)), 0);
+  const firstProof = known.find((fact) => matchesSchedule(fact, rails[0]));
+  const lastProof = known.find((fact) => matchesSchedule(fact, rails[rails.length - 1]));
+  const cannotMeetEdges = !context.railAlreadyBooked && (context.isFirst && firstProof
+    && minute(firstProof.startTime) < minute(context.goTime || '08:00') + Math.max(40, accessMinutes) + 40
+    || context.isLast && lastProof && minute(lastProof.endTime) + Math.max(40, context.homeAccessMin || 40) > minute(context.backTime || '23:00'));
+  if (!cannotMeetEdges && rails.every((row) => known.some((fact) => matchesSchedule(fact, row)))) return false;
+  const key = JSON.stringify(['v5-edges', day.date, context.goTime, context.backTime, context.homeAccessMin,
+    rails.map((row) => [row.startLocation, row.endLocation])]);
   return day.executionScheduleKey !== key;
 }
 async function collectExecutionSchedules(day, rows, context, deadline) {
   if (!needsExecutionSchedules(day, rows, context)) return false;
   const rails = rows.filter((row) => row.transportType === 'train' && row.startLocation && row.endLocation);
-  const key = JSON.stringify(['v4', day.date, rails.map((row) => [row.startLocation, row.endLocation])]);
+  const key = JSON.stringify(['v5-edges', day.date, context.goTime, context.backTime, context.homeAccessMin,
+    rails.map((row) => [row.startLocation, row.endLocation])]);
   if (deadline - Date.now() < 6000) return false;
   const segments = rails.map((row) => ({ from: row.startLocation, to: row.endLocation, date: day.date, mode: 'train' }));
   const found = await schedules.lookupSchedules(segments, Math.min(22000, deadline - Date.now() - 1500));
@@ -433,7 +443,11 @@ function fitEstimatedReturn(rows, context) {
     if (start === null || end === null || end <= start) return rows;
     const fixed = (context.official || []).concat(context.references || []).some((fact) => sameEndpoint(row.startLocation, fact.startLocation)
       && sameEndpoint(row.endLocation, fact.endLocation));
-    if (fixed || (context.solar || []).some((fact) => fact.startTime === row.startTime && fact.endTime === row.endTime)) break;
+    if (fixed || (context.solar || []).some((fact) => fact.startTime === row.startTime && fact.endTime === row.endTime)) {
+      // 倒排接驳不能回到列车到站之前；保留候选，另选可衔接真实班次或报告冲突。
+      if (result[i + 1] && minute(result[i + 1].startTime) < end) return rows;
+      break;
+    }
     let duration = end - start;
     if (i === result.length - 1) duration = Math.max(duration, context.homeAccessMin || 20);
     if (/安检|候车|检票/.test(row.activity || '') && result[i + 1] && result[i + 1].transportType === 'train') {
@@ -555,6 +569,9 @@ function normalizeReviewRows(raw, dayIndex, context = {}) {
     ['startTime', 'endTime', 'category', 'activity', 'startLocation', 'endLocation', 'transportType', 'note']
       .forEach((key) => { out[key] = String(row[key] || '').trim(); });
     if (Array.isArray(row.mealNames)) out.mealNames = row.mealNames.map(String);
+    ['ticketRequired', 'reservationRequired', 'ticketPlace', 'ticketProduct', 'visitScope', 'bookingInfo'].forEach((key) => {
+      if (row[key] !== undefined) out[key] = row[key];
+    });
     const solar = solarRows.get(row);
     if (solar) out.solarFact = solar;
     ['startLocation', 'endLocation'].forEach((key) => {
@@ -824,6 +841,11 @@ function normalizeReviewRows(raw, dayIndex, context = {}) {
       && !/退房|办理入住/.test(row.activity)) {
       // 前一段已到酒店，收尾只是回房，不能再次以车站为起点生成重复接驳。
       row.startLocation = ''; row.transportType = ''; row.activity = '回房休息';
+      // 前段已经实际抵达同一酒店，只调整派生回房收尾，不改变交通。
+      const arrival = minute(previous.endTime), start = minute(row.startTime), end = minute(row.endTime);
+      if (!fixedWindow(row, context) && arrival > start && end > arrival) {
+        row.startTime = previous.endTime; row.timingEstimated = true;
+      }
     }
   });
   let dropped = context.sameHotel;
@@ -859,8 +881,18 @@ function normalizeReviewRows(raw, dayIndex, context = {}) {
       visitScope = (context.scopeCandidates || context.required || []).find((name) =>
         String(row.endLocation || '').includes(name.replace(/市$/, ''))) || '';
     } else if (point) visitScope = point;
+    if (row.category === 'transport' && visitScope && sameEndpoint(row.startLocation, visitScope)
+      && !String(row.endLocation || '').includes(visitScope)
+      && /餐馆|餐厅|饭店|酒楼|酒店|民宿|\([^)]*店\)|（[^）]*店）/.test(row.endLocation || '')) visitScope = '';
+    // 旧候选的范围不能残留到已经离开景区后的街区游览。
+    if (row.category === 'sight' && !visitScope) delete row.visitScope;
     if (row.category === 'sight' && visitScope) row.visitScope = visitScope;
     if (row.category === 'transport' && /离开景区|出景区.*前往|返回.*客运|下山.*客运/.test(row.activity)) visitScope = '';
+  });
+  rows = rows.filter((row) => {
+    if (row.category !== 'transport' || row.startLocation || !row.endLocation) return true;
+    const loop = /从([^，。；]{1,60})前往\1/.exec(row.activity || '');
+    return !loop || !sameEndpoint(loop[1], row.endLocation); // 明确自环不因起点缺失漏过清洗。
   });
   const last = rows[rows.length - 1];
   const target = context.hotel || context.overnight;
@@ -910,6 +942,12 @@ function executionIssues(rows, context) {
       issues.push('铁路使用了非铁路上车/下车点');
     }
     if (row.category === 'transport' && row.transportType === 'train') {
+      if (context.enforceRailSchedules && !(context.official || []).concat(context.references || []).some((fact) =>
+        matchesSchedule(fact, row) && fact.startTime === row.startTime && fact.endTime === row.endTime
+          && /^[GDCKTZ]\d{1,5}$/i.test(fact.code || '')
+          && ((String(row.activity || '').match(/\b[GDCKTZ]\d{1,5}\b/i) || [''])[0].toUpperCase() === String(fact.code).toUpperCase()))) {
+        issues.push('铁路缺少匹配的具体车次及精确运行时间，须查询班次后重排，不能用估算列车验收通过');
+      }
       const queried = (context.scheduleChoices || []).find((choice) => (choice.list || []).some((candidate) =>
         schedules.sameStation(candidate.from, row.startLocation) && schedules.sameStation(candidate.to, row.endLocation)));
       if (queried && !(queried.list || []).some((candidate) => candidate.s === row.startTime
@@ -1208,6 +1246,11 @@ function executionIssues(rows, context) {
   let lastEnd = null;
   sorted.forEach((row) => {
     const start = row.startLocation;
+    const previous = sorted[sorted.indexOf(row) - 1];
+    if (previous && previous.category === 'food' && row.category === 'sight' && !start
+      && location && row.endLocation && !sameEndpoint(location, row.endLocation)) {
+      issues.push(`${location}→${row.endLocation}之间缺少独立接驳；用餐后前往新景点的移动和游览须分条`);
+    }
     const distance = evidence.distanceKm((context.points || {})[location], (context.points || {})[start]);
     if (location && start && !sameEndpoint(location, start) && distance > 1.5) {
       const gap = lastEnd === null ? 0 : minute(row.startTime) - lastEnd;
@@ -1237,9 +1280,11 @@ async function collectOperatingEvidence(profile, day, previous, original, deadli
   const routes = original.filter((row) => row.category === 'transport' && row.startLocation && row.endLocation)
     .map((row) => ({ from: row.startLocation, to: row.endLocation, mode: row.transportType }));
   const references = (day.operatingReferences || []).filter((reference) => reference && /^https?:\/\//.test(reference.sourceUrl || ''));
-  const key = JSON.stringify(['operating-windows-v4', day.date, day.highlights, previous.hotel, day.hotel, routes, references]);
+  const visits = original.filter((row) => ['sight', 'ticket'].includes(row.category) || row.transportType === 'ship');
+  const key = JSON.stringify(['operating-windows-v8-tickets', day.date, day.highlights, previous.hotel, day.hotel, routes,
+    visits.map((row) => [row.endLocation || row.startLocation, row.visitScope, (row.activity || '').match(/索道|缆车|游船|游轮|船票|竹筏|漂流|演出|观光车/g)]), references]);
   const usable = (value) => value && ((value.routeFacts || []).length || (value.visitWindows || []).length
-    || (value.sailingWindows || []).length || value.scenicRoute || value.notes || (value.warnings || []).length);
+    || (value.sailingWindows || []).length || (value.ticketProducts || []).length || value.scenicRoute || value.notes || (value.warnings || []).length);
   const addReferences = (result) => {
     result.visitWindows = (result.visitWindows || []).concat(references.flatMap((reference) =>
       (Array.isArray(reference.visitWindows) ? reference.visitWindows : []).map((fact) => Object.assign({}, fact, { sourceUrl: reference.sourceUrl }))));
@@ -1252,20 +1297,38 @@ async function collectOperatingEvidence(profile, day, previous, original, deadli
   const end = Math.min(deadline, Date.now() + 40000);
   if (end - Date.now() < 5000) return {};
   try {
+    const ticketRequest = original.some((row) => ['sight', 'ticket'].includes(row.category) || row.transportType === 'ship') ? llm.chatWithRetry([
+      { role: 'system', content: '联网核查旅行票务，只输出JSON，不编造链接，不制定时间线。优先运营方和政府公开资料。' },
+      { role: 'user', content: `日期${day.date}，区域${day.city}。实际游览：${JSON.stringify(original.filter((row) =>
+        ['sight', 'ticket'].includes(row.category) || row.transportType === 'ship').map((row) => ({ activity: row.activity, place: row.endLocation || row.startLocation, note: row.note })))}。
+逐个核对所有确定需要门票的实际景点（不按名称关键词猜收费），免费需预约也保留；免费无需预约不列。独立入园票、索道、观光车、游船、竹筏和演出按收费产品分别列出，包含在同一通票的项目不重复购票。仅途经/外观不提取。返回{"ticketProducts":[{"place":"实际景区名","product":"完整景区及单一票种名","ticketRequired":true,"reservationRequired":false,"sourceUrl":"真实运营/售票来源URL，不得用示例或编造域名","basisDate":"资料日期","note":"是否包含内部项目、有效期、免费预约等注意事项"}]}。不确定不要断言收费；未来政策待官方确认。必须逐一检查下列实际游览地点，不能只提取第一处；每个收费地点及独立收费产品均必须返回：${JSON.stringify([...new Set(visits.map((row) => row.endLocation || row.activity))])}。` },
+    ], { deadline: Math.min(end, Date.now() + 35000), enableSearch: true, temperature: 0.1 })
+      .then((text) => normalizeTicketProducts(llm.parseJSONFromText(text).ticketProducts)).catch(() => []) : Promise.resolve([]);
     const text = await llm.chatWithRetry([
       { role: 'system', content: '你只核查旅行运营知识，不制定时间线。联网查运营方、属地政府、运营公众号/小程序的公开发布；无正规官方渠道时可参考可信旅行平台及多份近期实地资料，但标注来源层级、日期、待确认，不能冒称官方。找不到就明确未知，不复制候选的地理假设。只输出JSON。' },
       { role: 'user', content: `核查日期${day.date}，昨晚在${previous.hotel || profile.origin}，今晚在${day.hotel || profile.origin}。景点${JSON.stringify(day.highlights)}。待核查路线${JSON.stringify(routes)}。
+实际游览条目（逐个核对票务，不只检查大纲）：${JSON.stringify(original.filter((row) => ['sight', 'ticket'].includes(row.category)).map((row) => ({ activity: row.activity, place: row.endLocation, note: row.note })))}。
+逐项核对景区入园、独立收费景点、索道、观光车、船筏、演出的门票/预约要求，不根据名字是否含景区/山/公园猜收费。返回ticketProducts数组，每个产品格式为{"place":"该产品实际景区/地点","product":"准确购票产品名，如入园票/前山门票/索道往返票","ticketRequired":true,"reservationRequired":false,"sourceUrl":"售票/运营证据URL","basisDate":"资料日期","note":"是否包含内部观光车/索道、有效期或免费预约说明"}。确定需要票的全部列出；免费但需预约的ticketRequired:false、reservationRequired:true；免费且无需预约的不列；未知不可伪称已确定。不同收费区域及门票/索道等独立产品分开，游览途中仅经过、不实际进入的不催购票。
 已有外部检索的运营资料（资料不是旅行路线答案；适用日期/季节与当前行程一致才使用）：${JSON.stringify(references)}
 补充核查：当地短途游览最合适的工具（租自行车/合规电动自行车、步行、公交等）、按天或按次租赁、续航/禁行/头盔/还车点及截止时间，纳入localMobility；不能把“禁止自驾汽车”等同禁止合法自行车，用户明确不会骑或拒绝骑行时提供替代。旅游专线和景区观光车可用运营公众号、小程序及近期网上资料交叉核对，写清sourceKind/operator/sourceUrl/basisDate/estimated，不保证未来班次。景区入口、游客中心和停车场可能在同一节点，核对同址aliases，禁止在同址间安排虚假长距离转场。深夜山路徒步要考虑照明、安全和末班索道，不把追日落之后夜行当默认可行。
 返回JSON还须包含localMobility:[{"area":"片区","mode":"bike|ebike|walk|bus|ride","rentalPeriod":"按天/按次","notes":"归还地点、续航、安全限制与资料层级","sourceUrl":"来源URL","basisDate":"资料日期","estimated":true}]及aliases:[{"place":"准确节点","names":["同址别名"],"sourceUrl":"同址证据URL"}]；visitWindows须包括minVisitMinutes（纯游览分钟），不得用一句游线描述代替时长字段。无证据的字段留空或数组为空，不冒称运营方已确认。
 游线用时也要核查：有来源支持的当前核心游线保守耗时可在visitWindows增加minVisitMinutes，统计纯游览（不含买票、行李、用餐）；规划估算明确estimated:true并说明依据，不冒称官方最低用时。没有可信依据时不填。不能用几分钟到门口或压缩路线名称冒充完成整段核心游览。
 水上游览包括竹筏/漂流：独立核对运营方公布的准确起终点，不能拼接不同线路，也不能把不在该河段的景点写成沿途经过。即使无需固定发船时刻，也在sailingWindows填写真实起终点、船型和sourceUrl，此时departures留空；一处起点允许多条真实航线时分别列出。路线改变后需核对下船接驳和行李取回路径。
 独立核对：各铁路段是否真实直达，若不能直达给区域铁路枢纽的换乘链；各交通段通常至少多少分钟；步行段是否过远；景区内部实际入口、观光车、索道上下站及核心游览顺序；游船等级对应的出发码头/方向及官方发船窗口；冬季开放窗口与末班交通，特别是停止入园和观光车下山的时间。优先查运营方和属地政府公告；未来日期尚未公告时，引用同季历史公告并标记estimated:true和basisDate，说明出行前确认，不能用夏季营业时间安排冬季。没有证据不要给班次号或未来售票时刻。公路省道长途/山区不能按高速最高速度算时间。小型城际站不能凭空开往远方城市，市内地铁站不可作为长途高铁枢纽。说明实际可执行的替代路径，但不要编时间线。输出简短JSON：{"routeFacts":[{"from":"候选起点","to":"候选终点","mode":"train|bus|ride|walk|ship","direct":true,"via":[],"minMinutes":0,"sourceUrl":"证据链接，无证据留空"}],"visitWindows":[{"place":"景区准确名称","openTime":"HH:mm","lastEntryTime":"HH:mm","closeTime":"HH:mm","exitMinutes":30,"sourceUrl":"公告链接，无证据不填本项","estimated":false,"basisDate":"公告日期"}],"sailingWindows":[{"from":"准确出发码头，与条目一致","to":"准确到达码头","grade":"准确船型等级","departures":["HH:mm"],"sourceUrl":"运营公告，无证据不填本项","estimated":true}],"scenicRoute":"核查后的游线和索道/步行/接驳连接，不确定项明确待确认","warnings":["事实矛盾或执行限制"],"sources":["运营方/交通官网链接"]}` },
-    ], { deadline: end, enableSearch: true, temperature: 0.1 });
+    ], { deadline: end, enableSearch: true, temperature: 0.1 }).catch((error) => {
+      // 运营检索超时不能连带丢弃并行返回的票务核查结果。
+      console.warn('[generatePlan.review] 运营检索暂不可用：%s', error.message);
+      return '';
+    });
     let parsed;
     try { parsed = llm.parseJSONFromText(text); } catch (_) { parsed = null; }
+    const ticketProducts = await ticketRequest;
+    if (ticketProducts.length) parsed = Object.assign({}, parsed && !Array.isArray(parsed) ? parsed : {},
+      { routeFacts: Array.isArray(parsed) ? parsed : parsed && parsed.routeFacts || [],
+        ticketProducts: [...ticketProducts, ...(parsed && parsed.ticketProducts || [])] });
     if (Array.isArray(parsed)) parsed = { routeFacts: parsed };
     else if (parsed && parsed.from && parsed.to) parsed = { routeFacts: [parsed] };
+    if (parsed && !Array.isArray(parsed.routeFacts) && Array.isArray(parsed.ticketProducts)) parsed.routeFacts = [];
     if (!parsed || !Array.isArray(parsed.routeFacts)) {
       // 检索报告有时不用约定字段或返回说明文；它仍可作为未核验的知识
       // 提示，但不能伪装成结构化事实，也不因此反复丢掉整轮检索成果。
@@ -1276,11 +1339,18 @@ async function collectOperatingEvidence(profile, day, previous, original, deadli
       return result;
     }
     if (!parsed.routeFacts.length && !parsed.scenicRoute && !(parsed.warnings || []).length
-        && !(parsed.visitWindows || []).length && !(parsed.sailingWindows || []).length && !references.length) {
+        && !(parsed.visitWindows || []).length && !(parsed.sailingWindows || []).length && !(parsed.ticketProducts || []).length && !references.length) {
       console.warn('[generatePlan.review] 运营知识返回空内容，不能视为已核查');
       return {};
     }
-    const result = { key, localMobility: Array.isArray(parsed.localMobility) ? parsed.localMobility.filter((fact) =>
+    // 后续换接驳导致重查运营资料时，不能抹掉已核查的收费产品。
+    // 最终按实际游览再筛，弃用景点不会留下提醒。
+    const ticketProductsByKey = new Map();
+    [...(day.ticketProducts || []), ...((day.executionEvidence || {}).ticketProducts || []), ...normalizeTicketProducts(parsed.ticketProducts)]
+      .forEach((fact) => ticketProductsByKey.set(`${fact.place}|${fact.product}`, fact));
+    day.ticketProducts = [...ticketProductsByKey.values()];
+    const result = { key, ticketProducts: day.ticketProducts,
+    localMobility: Array.isArray(parsed.localMobility) ? parsed.localMobility.filter((fact) =>
       fact && fact.area && /^https?:\/\//.test(fact.sourceUrl || '')).slice(0, 5) : [],
     aliases: Array.isArray(parsed.aliases) ? parsed.aliases.filter((fact) => fact && fact.place
       && Array.isArray(fact.names) && /^https?:\/\//.test(fact.sourceUrl || '')).slice(0, 10) : [],
@@ -1304,7 +1374,7 @@ async function collectOperatingEvidence(profile, day, previous, original, deadli
 function syncAcceptedMoves(day, rows) {
   if (!rows.length || !rows.every((row) => row.executionReview === REVIEW_VERSION)) return false;
   const previous = day.moves || [];
-  if (previous.filter((move) => move.schedSource === '12306').some((move) => !rows.some((row) =>
+  if (previous.filter((move) => ['12306', 'reference'].includes(move.schedSource)).some((move) => !rows.some((row) =>
     row.category === 'transport' && sameEndpoint(row.startLocation, move.from) && sameEndpoint(row.endLocation, move.to)
     && row.startTime === move.startTime && row.endTime === move.endTime && String(row.activity || '').includes(move.code)))) return false;
   day.moves = rows.filter((row) => (row.category === 'transport' || row.transportType === 'ship')
@@ -1352,6 +1422,13 @@ function finalizeWithWarnings(rows, dayIndex, day, issues, context = {}) {
   context = Object.assign({}, context, { solar: context.solar || rows.filter((row) => row.timingLocked) });
   const result = normalizeReviewRows(rows, dayIndex, context);
   if (!result.length) return result;
+  // 严格铁路模式不能靠“待确认”发布虚构列车或改坏的到发时刻。
+  const scheduleIssues = executionIssues(result, context).filter((issue) => /铁路缺少匹配|修改或遗漏了官方班次/.test(issue));
+  if (context.enforceRailSchedules && scheduleIssues.length) {
+    day.executionReviewIssues = [...new Set([...(issues || []), ...scheduleIssues])];
+    day.executionCandidate = result;
+    return [];
+  }
   const warnings = [...new Set([...(issues || []), ...executionIssues(result, context)]
     .map((message) => String(message).replace(/请调整.*$/, '请核实后调整')))].slice(0, 6);
   if (!warnings.length) warnings.push('此日运营资料暂未完成核验，请出行前确认交通、开放时间和接驳。');
@@ -1396,6 +1473,7 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
     }));
     const required = requiredPlacesForDay(profile, days, dayIndex);
     const context = {
+      enforceRailSchedules: true,
       isFirst: dayIndex === 0, isLast: dayIndex === days.length - 1,
       origin: profile.origin, goTime: profile.goTime, backTime: profile.backTime,
       noDrive: String(profile.transport || '').trim() !== '自驾出行', selfDriveAllowed: options.selfDriveAllowed,
@@ -1431,13 +1509,13 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
     // 首轮仅缓存独立知识，下一轮重排；未核查的日期不提前标成通过。
     const hadEvidence = !!day.executionEvidence && ((day.executionEvidence.routeFacts || []).length
       || (day.executionEvidence.visitWindows || []).length || (day.executionEvidence.sailingWindows || []).length
-      || day.executionEvidence.scenicRoute || day.executionEvidence.notes || (day.executionEvidence.warnings || []).length);
+      || (day.executionEvidence.ticketProducts || []).length || day.executionEvidence.scenicRoute || day.executionEvidence.notes || (day.executionEvidence.warnings || []).length);
     const accessProbe = context.accessConstraint ? [{ category: 'transport', transportType: 'ride',
       startLocation: previous.hotel || previous.overnight || previous.city,
       endLocation: context.accessConstraint.to }, { category: 'transport', transportType: 'ride',
       startLocation: previous.city, endLocation: context.accessConstraint.to }] : [];
     const [operating, freshPoints, topology] = await Promise.all([
-      collectOperatingEvidence(profile, day, previous, original, deadline),
+      collectOperatingEvidence(profile, day, previous, candidate, deadline),
       evidence.collectRoutePoints(accessProbe.concat(candidate), regions, Math.min(deadline - 20000, Date.now() + 5000)),
       evidence.collectRailTopology(candidate, Math.min(deadline, Date.now() + 12000)),
     ]);
@@ -1499,7 +1577,7 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
 代码检查（针对当前候选，不重复报告已修复的旧问题）：${JSON.stringify(executionIssues(candidate, context))}
 上一轮未通过的验收项：${JSON.stringify(day.executionReviewIssues || [])}
 独立运营核查（与候选冲突时，必须重新选真实路径，不只是删去车次）：${JSON.stringify(operating)}
-实际铁路候选：${JSON.stringify(day.executionScheduleChoices || [])}。已查得候选的铁路必须从对应真实班次中选，不能继续猜时间。若前段铁路无法赶上已选返程列车，提前安排合理道路接驳到返程上车站，或明确方案不可行；高铁优先不是强制每一段都坐火车，不得伪造直达班次。
+实际铁路候选：${JSON.stringify(day.executionScheduleChoices || [])}。已查得候选的铁路必须从对应真实班次中选，不能继续猜时间。查询已返回空候选的路线必须改用有导航耗时依据的道路接驳或真实铁路换乘，不得继续写估算列车/“C字头城际”；“待核实”不能让虚构列车验收通过。若前段铁路无法赶上已选返程列车，提前安排合理道路接驳到返程上车站，或明确方案不可行；高铁优先不是强制每一段都坐火车，不得伪造直达班次。
 当前12306运行网络核查（只证明连接及耗时下限，不是未来班次；无直达必须换实际区域枢纽）：${JSON.stringify(topology)}
 地图公路导航估算（不可缩短为高速直线距离；公交/班车另加候车、停靠及节假日余量）：${JSON.stringify(roads)}
 已核查市内公共交通（其他线路号/换乘站不可编造）：${JSON.stringify(transits)}
@@ -1509,7 +1587,7 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
 1. 首日必须在${profile.goTime || '用户指定时间'}从${profile.origin}启程；不是此时列车发车。返程日必须在${profile.backTime || '用户指定时间'}到${profile.origin}结束。市内去车站至少留交通耗时和40分钟安检缓冲。返家接驳至少${context.homeAccessMin || '实际交通所需'}分钟，不能为凑到家时间随意压缩通勤耗时。
 2. 补齐真实游览，抵达/买票不算游玩。先交通后游览。同日只办理一次退房；连续住同酒店时大件留房，晚上只是回房，不重复入住或放行李。换城时带走全部行李；当天实际寄存过才写取回行李。包括末日在内，景区游玩需要时可在游客中心寄存，但必须在原地点取回，预留办理时间，取回后才去下一城市；不能把行李留在不再返回的酒店。不能拖箱登山、坐竹筏、漂流或骑行，不把大件行李解释为轻便双肩包。每日餐饮更换当地特色主菜，参照全程餐饮分配：${JSON.stringify(days.map((entry) => ({ date: entry.date, meals: entry.meals })))}。晚餐前不要为了整理行李无必要折返酒店又出门；用户明确需要休息时保留。所有景区在开放且光线合理时段游玩，不能早上等待日落。
 3. 路线按实际距离和游览时长安排，禁止折返折叠和凭空换城。景区核心点可同日，但步行、接驳、排队和下山时间必须足够；放行李在游线开始前，游线中途不要再回住宿地，沿途用餐后继续前进，最后回住宿地收尾。删除非必要点，不得删用户必去点。不得将A景点贴到B条目上假装已经游览。末日最后一段交通直接以用户到家时间结束，不要提前到家再用整理行李填满时间。
-4. 铁路不能到汽车站/码头/游客中心，需实际可检索的铁路枢纽；没有直达应写真实换乘链，到发站只能选一个准确站名，不能“X站/Y站”二选一。小型城际站到远方城市先回区域高铁枢纽再换乘，不要把城际站伪装成长途高铁始发站。联网检索与候选安排冲突时，以运营方和交通官网为准重新选线。已提供近期参考运行图时保留具体车次和对应时刻，明确参考性质，不清空；没有任何班次证据才用估算窗口，写待核实。不要仅因尚未开售就放弃铁路；但已检索的前段候选无法赶上返程列车时，必须改用提前出发的合理道路接驳，锁住已选长途返程铁路，不能猜一班不存在的早班车。无铁路的景区段用旅游专线、大巴或司机接送。城市没有地铁时不能编造地铁线路；距离较远不能写成步行十分钟。只有明确选择自驾或点名具体段自驾才可安排本人驾驶。普通市内返家不得写景区接驳。不要在任何备注中编造后续日期车次。
+4. 铁路不能到汽车站/码头/游客中心，需实际可检索的铁路枢纽；没有直达应写真实换乘链，到发站只能选一个准确站名，不能“X站/Y站”二选一。小型城际站到远方城市先回区域高铁枢纽再换乘，不要把城际站伪装成长途高铁始发站。联网检索与候选安排冲突时，以运营方和交通官网为准重新选线。已提供近期参考运行图时保留具体车次和对应时刻，明确参考性质，不清空；没有任何班次证据不得发布估算列车，应查询真实换乘或改用合理道路接驳。不要仅因尚未开售就放弃铁路；但已检索的前段候选无法赶上返程列车时，必须改用提前出发的合理道路接驳，锁住已选长途返程铁路，不能猜一班不存在的早班车。无铁路的景区段用旅游专线、大巴或司机接送。城市没有地铁时不能编造地铁线路；距离较远不能写成步行十分钟。只有明确选择自驾或点名具体段自驾才可安排本人驾驶。普通市内返家不得写景区接驳。不要在任何备注中编造后续日期车次。
 6. 严格分开到景点的交通与景区内部游览两条，不把“乘车前往并游览”装在一个时段；内部路线和纯游览时长依运营资料与普遍推荐综合选择。停车场与同址游客中心只办理进出园，不发明二次到达或长途接驳。船本身完成城市转移，抵达后从实际下船码头接续，不重复执行起点码头到终点码头的汽车段。参考localMobility适合骑行的目的地优先按天租合规电动自行车，取车、续航、租用时段、归还同一地点都安排清楚；竹筏单向路线要考虑还车衔接。无特殊需要不在游线中途回酒店休整，早起可夜间提前返回休息。
 5. 旅游游船的等级、码头、方向须符合运营实际；下船后不要再走船上的景点。住宿只能用本日已有核验酒店的准确名称或明确的住宿片区，不要新造酒店/餐馆。不要改过夜城市。非末日最终回本晚住宿地休息。
 已安排的特色主菜：${JSON.stringify(days.map((entry) => ({ date: entry.date, dishes: entry.executionMealNames || [] })))}。今天换不同主菜，餐饮条目mealNames列出活动中实际推荐的主菜名称，不列米饭/青菜等配菜。

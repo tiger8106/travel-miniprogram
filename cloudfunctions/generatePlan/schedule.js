@@ -167,8 +167,8 @@ function canLookupSchedules() {
 }
 
 /**
- * 已开售铁路只读实际日期官方结果；未开售铁路查近期运行图，接口不可用时
- * 可用带来源和资料日期的联网参考。两者分开标注，空结果不恢复模型记忆车次。
+ * 铁路只读12306实际查询结果；未开售日期查询近期运行图并标为参考。
+ * 模型返回一个看似真实的URL并不能证明车次存在，不能拿它补官方空结果。
  */
 async function lookupSchedules(segments, deadlineMs, cache) {
   const found = new Map();
@@ -204,20 +204,8 @@ async function lookupSchedules(segments, deadlineMs, cache) {
     }
   }
 
-  // 官方接口对未开售日期查询近期同星期运行图；接口不可用时再检索公开时刻表。
-  // 搜索结果始终是参考证据，不提升成未来12306已核实结果。
-  if (canSearch()) await Promise.all(rail.map(async (seg) => {
-    const key = cacheKeyOf(seg);
-    if ((found.get(key) || []).length || !rail12306.queryDateFor(seg.date).reference) return;
-    try {
-      const list = await lookupOne(seg, Math.min(20000, budget / 2), true);
-      if (list.length) {
-        found.set(key, list);
-        found.routeMeta.set(key, { attempted: true, official: false, reference: true,
-          from: seg.from, to: seg.to, referenceDate: list[0].referenceDate, sourceUrl: list[0].sourceUrl });
-      }
-    } catch (e) { console.warn('[generatePlan.schedule] 参考运行图检索失败：%s', e.message); }
-  }));
+  // 无票/无直达/接口不可用均不能用模型生成的“时刻表”兜底。
+  // 执行复核会查询真实换乘段或重排为其它交通；不能平移、缩短或编造列车。
 
   if (!other.length) return found;
   if (!canSearch()) {

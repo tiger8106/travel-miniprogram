@@ -11,7 +11,20 @@ async function validateOutlineHotels(result, input, searchHotelPoi, searchHotels
     if (!poi || !Number.isFinite(Number(poi.lon)) || !Number.isFinite(Number(poi.lat))) return true;
     const city = String(poi.city || '').replace(/市$/, '');
     const bare = String(overnight || '').replace(/[（(].*$/, '').replace(/市区|市中心|中心城区|市/g, '').trim();
-    if (!city || bare !== city) return true;
+    if (!bare) return false;
+    if (bare !== city) {
+      if (city && bare.startsWith(city)) return true;
+      // 酒店名借用景区名称不等于地理位置正确；省市不匹配时用景区坐标独立核验。
+      const administrative = `${poi.district || ''}${poi.address || ''}`;
+      if (poi.areaSearch && poi.areaMatched && !administrative.includes(bare)) {
+        const scenicKey = `scenic|${bare}`;
+        if (!anchors.has(scenicKey)) anchors.set(scenicKey, geo.geocodeOne(bare, '', Date.now() + 2500));
+        const anchor = await anchors.get(scenicKey);
+        const distance = anchor && distanceKm(anchor, poi);
+        return distance !== null && distance !== undefined && distance <= 15;
+      }
+      return true;
+    }
     const area = ((String(overnight).match(/[（(]([^）)]+)[）)]/) || [])[1] || '')
       .split(/[\/、]/)[0].replace(/片区|附近|周边|住宿|酒店/g, '').trim();
     // 没有指定商圈时用行政区/县镇证据判断市区，不能把市政府当作旅游市中心。

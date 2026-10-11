@@ -22,6 +22,10 @@ const { cacheKeyOf: scheduleKeyOf, sameStation } = require('./schedule');
 const { reviewExecutionItems, executionIssues, invalidateRepeatedMeals, invalidateUnsafeAcceptedDays, syncAcceptedMoves, finalizeWithWarnings, REVIEW_VERSION } = require('./execution-review');
 const { finalizedDays } = require('./publication');
 const { solarEventMinute } = require('./solar-time');
+const { knownTicketProducts } = require('./ticket-products');
+
+// 近期运行图虽不是未来开行承诺，其车次到发时刻同样不能被时间线修补移动。
+const fixedSchedule = (item) => item && ['12306', 'reference'].includes(item.schedSource);
 
 const MAX_DAYS = 12;
 const DAY_MS = 86400000;
@@ -717,8 +721,8 @@ function alignOutlineMoveTimes(outline) {
       const earliestStart = previousEnd + transferBuffer;
       if (currentStart >= earliestStart) continue;
 
-      const previousOfficial = previous.schedSource === '12306';
-      const currentOfficial = current.schedSource === '12306';
+      const previousOfficial = fixedSchedule(previous);
+      const currentOfficial = fixedSchedule(current);
       const durationOf = (move) => {
         const start = toMin(move.startTime);
         const end = toMin(move.endTime);
@@ -1003,7 +1007,7 @@ function removeOutlineBacktracks(outline) {
           && !same(a.from, a.to) && !same(c.from, c.to);
         if (!immediateLoop) continue;
         // 有官方核验的真实铁路段不随意删除；无核验的修订占位/反向接驳才清。
-        if (a.schedSource === '12306' && b.schedSource === '12306') continue;
+        if (fixedSchedule(a) && fixedSchedule(b)) continue;
         moves.splice(i, 2);
         changed = true;
         console.warn('[generatePlan] 第%d天清理大纲即时折返：%s→%s→%s',
@@ -1110,7 +1114,7 @@ function removeOrphanTransportRows(items, outline) {
   const days = asArray(outline && outline.days);
   const drop = new Set();
   const isHardMove = (item) => item && (item.outlineMove === true
-    || item.schedSource === '12306'
+    || fixedSchedule(item)
     || /train|plane|ship|高铁|动车|火车|列车|飞机|航班|游船|轮渡/.test(
       `${item.transportType || ''} ${item.activity || ''}`));
   const isLodging = (value) => LODGING_WORD_RE.test(String(value || ''));
@@ -1923,7 +1927,7 @@ function reconcileTransportOrigins(items, outline) {
     const reachedWithinDay = firstMove && firstMoveIndex > 0
       && sorted.slice(0, firstMoveIndex).some((item) => item.endLocation
         && sameTravelArea(item.endLocation, firstMove.startLocation));
-    if (firstMove && firstMove.schedSource !== '12306'
+    if (firstMove && !fixedSchedule(firstMove)
         && !/train|plane|ship/.test(String(firstMove.transportType || ''))
         && LODGING_WORD_RE.test(String(firstMove.startLocation || ''))
         && firstMove.startLocation && !firstMoveStartsAtPreviousNight && !reachedWithinDay) {
@@ -1941,7 +1945,7 @@ function reconcileTransportOrigins(items, outline) {
     sorted.forEach((item) => {
       const outlineRoute = asArray(days[dayIndex] && days[dayIndex].moves).some((move) =>
         samePlace(move.from, item.startLocation) && samePlace(move.to, item.endLocation));
-      if (item.schedSource === '12306' || outlineRoute
+      if (fixedSchedule(item) || outlineRoute
           || /train|plane|ship/.test(String(item.transportType || ''))) { priorMoves.push(item); return; }
       const activity = String(item.activity || '');
       const movementRow = item.category === 'transport' || item.transportType
@@ -2021,7 +2025,7 @@ function removeAfterHomeArrival(items, p, outline) {
   if (!arrivals.length) return rows;
   const requested = toMin(p && p.backTime);
   const arrival = arrivals.find((row) => requested !== null && row.end === requested) || arrivals[arrivals.length - 1];
-  if (requested !== null && arrival.item.schedSource !== '12306' && arrival.end !== requested) {
+  if (requested !== null && !fixedSchedule(arrival.item) && arrival.end !== requested) {
     const start = toMin(arrival.item.startTime);
     if (start !== null && start >= requested) arrival.item.startTime = fmtMin(Math.max(0, requested - 30));
     arrival.item.endTime = fmtMin(requested);
@@ -2753,7 +2757,7 @@ function removeRedundantDirectTransports(items) {
     const dayAllRows = rows.filter((item) => Number(item && item.dayIndex || 0) === Number(list[0] && list[0].dayIndex || 0));
     const sorted = list.slice().sort((a, b) => (toMin(a.startTime) ?? 1440) - (toMin(b.startTime) ?? 1440));
     sorted.forEach((direct) => {
-      if (direct.schedSource === '12306') return;
+      if (fixedSchedule(direct)) return;
       // 大纲直达段也可能只是粗粒度骨架。如果详细结果已经给出“景区→
       // 原住宿地取行李→下一城市”的完整多跳链，保留两者会制造两条同时
       // 发生的路线；官方核验车次仍由上面的 12306 保护条件保留。
@@ -2856,7 +2860,7 @@ function enforceTransportChainOrder(items) {
   const sameArea = (a, b) => sameTravelArea(a, b) || samePlace(a, b);
   byDay.forEach((dayRows) => {
     const transports = dayRows.filter((row) => row && row.category === 'transport'
-      && row.startLocation && row.endLocation && row.schedSource !== '12306');
+      && row.startLocation && row.endLocation && !fixedSchedule(row));
     transports.forEach((direct) => {
       const directStart = toMin(direct.startTime);
       if (directStart === null) return;
@@ -2867,7 +2871,7 @@ function enforceTransportChainOrder(items) {
       if (!feeder) return;
       const anchor = dayRows.filter((row) => row !== direct && row !== feeder
         && row.category === 'transport' && row.endLocation
-        && (row.schedSource === '12306' || /train|plane|ship|列车|高铁|动车|飞机|航班|游船/.test(
+        && (fixedSchedule(row) || /train|plane|ship|列车|高铁|动车|飞机|航班|游船/.test(
           `${row.transportType || ''} ${row.activity || ''}`))
         && sameArea(row.endLocation, feeder.startLocation)
         && toMin(row.endTime) !== null && toMin(row.endTime) <= directStart)
@@ -3371,7 +3375,7 @@ function ensureOvernightHotelItems(items, outline, p) {
   const days = asArray(outline && outline.days);
   const dropInvalidHotels = new Set();
   const isHardTimedRow = (item) => item && (
-    item.schedSource === '12306'
+    fixedSchedule(item)
       || item.scheduleRequired === true
   );
   days.forEach((day, di) => {
@@ -4347,6 +4351,7 @@ function samePlace(a, b) {
 function explicitCarryLuggagePreference(p) {
   const text = String(p && p.extra || '').trim();
   if (!text) return false;
+  if (/无大件行李|只(?:带|携带).{0,10}(?:小包|小背包|背包)/.test(text)) return true;
   // 只有补充要求明确说“随身携带方便/不需要寄存”才跳过临时寄存建议；
   // “行李不方便随身带”不能被误判成例外。
   if (/不方便|不便|不能|不想|不希望|避免/.test(text) && /随身|携带|寄存/.test(text)) return false;
@@ -5572,7 +5577,7 @@ function enforceScenicRouteTiming(items) {
     if (duration && start !== null && end !== null && end - start < duration) {
       const barrier = asArray(items).filter((row) => row !== item
         && Number(row.dayIndex || 0) === Number(item.dayIndex || 0)
-        && (row.schedSource === '12306' || row.scheduleRequired)
+        && (fixedSchedule(row) || row.scheduleRequired)
         && toMin(row.startTime) >= start)
         .reduce((limit, row) => Math.min(limit, toMin(row.startTime)), 24 * 60);
       if (start + duration <= barrier && start + duration < 1440) item.endTime = fmtMin(start + duration);
@@ -6087,9 +6092,19 @@ function ensureFinalHomeArrival(items, p, outline) {
       && sameTravelArea(anchor.endLocation, move.to);
     return moveToHome && (!anchor || anchorRoute || (move.code && String(anchor.activity || '').includes(move.code)));
   });
-  const officialReturn = returnMove && (returnMove.schedSource === '12306'
+  if (anchor && fixedSchedule(returnMove)) {
+    enforceOfficialRailItems([anchor], outline);
+    anchorEnd = toMin(anchor.endTime);
+  }
+  const officialReturn = returnMove && (fixedSchedule(returnMove)
     || asArray(returnMove.sched).some((candidate) => String(candidate && candidate.source || '') === '12306'));
-  if (anchor && anchorEnd !== null && targetStart !== null && anchorEnd > targetStart && officialReturn) {
+  if (anchor && fixedSchedule(anchor) && anchorEnd > targetStart) {
+    const warning = `所选真实班次无法衔接${p.backTime}到家目标，需另选已有班次或调整到家时间；不改变列车运行时刻`;
+    anchor.note = [anchor.note, warning].filter(Boolean).join('；');
+    anchor.validationWarnings = [...new Set([...(anchor.validationWarnings || []), warning])];
+  }
+  if (anchor && anchorEnd !== null && targetStart !== null && anchorEnd > targetStart && officialReturn
+    && !fixedSchedule(anchor) && !fixedSchedule(returnMove)) {
     const returnFrom = String(returnMove.from || anchor.startLocation || '').trim();
     const returnTo = String(returnMove.to || anchor.endLocation || '').trim();
     const conflictNote = `未找到能在${fmtMin(targetStart)}前到站、并衔接${p.backTime}到家的官方班次；返程车次与时刻待核实`;
@@ -6132,7 +6147,7 @@ function ensureFinalHomeArrival(items, p, outline) {
       returnFrom, returnTo, p.backTime);
   }
   if (anchor && anchorEnd !== null && targetStart !== null && anchorEnd > targetStart
-      && anchor.schedSource !== '12306') {
+      && !fixedSchedule(anchor)) {
     const oldStart = toMin(anchor.startTime);
     const duration = oldStart !== null && anchorEnd > oldStart ? anchorEnd - oldStart : 90;
     const newStart = Math.max(0, targetStart - duration);
@@ -6259,7 +6274,7 @@ function fitFinalReturnWindow(items, p, outline) {
   if (anchor) {
     const anchorStart = toMin(anchor.startTime);
     const anchorEnd = toMin(anchor.endTime);
-    const official = anchor.schedSource === '12306'
+    const official = fixedSchedule(anchor)
       || String(anchor.scheduleSource || '').toLowerCase() === '12306';
     if (!official) {
       const duration = anchorStart !== null && anchorEnd !== null && anchorEnd > anchorStart
@@ -6389,7 +6404,7 @@ function removeScenicReentryBacktracks(items) {
     sorted.forEach((row) => {
       if (dropped.has(row)) return;
       const previous = kept[kept.length - 1];
-      const confirmedRail = row.schedSource === '12306'
+      const confirmedRail = fixedSchedule(row)
         || /train|rail|高铁|动车|列车|火车/.test(`${row.transportType || ''} ${row.activity || ''}`);
       if (row.category === 'transport' && row.startLocation && row.endLocation
           && !purposeful(row) && !confirmedRail && row.outlineMove !== true) {
@@ -6442,11 +6457,11 @@ function dedupeDirectedTransportRoutes(items) {
       (toMin(a.startTime) ?? 1440) - (toMin(b.startTime) ?? 1440));
     for (let i = 0; i < sorted.length; i++) {
       const first = sorted[i];
-      if (dropped.has(first) || first.schedSource === '12306' || first.outlineMove === true) continue;
+      if (dropped.has(first) || fixedSchedule(first) || first.outlineMove === true) continue;
       for (let j = i + 1; j < sorted.length; j++) {
         const second = sorted[j];
         if (dropped.has(second) || second.outlineMove === true || !sameRoute(first, second)) continue;
-        if (second.schedSource === '12306') { dropped.add(first); break; }
+        if (fixedSchedule(second)) { dropped.add(first); break; }
         const firstAuto = first.autoConnector === true || first.timingEstimated === true;
         const secondAuto = second.autoConnector === true || second.timingEstimated === true;
         if (!firstAuto && !secondAuto) continue;
@@ -8028,7 +8043,7 @@ function repairLongjiCoreTimeline(items, outline) {
         let cursor = goldenEnd + 10;
         dayRows.filter((item) => item && item !== golden && !drop.has(item)
           && (toMin(item.startTime) ?? 1440) >= goldenEnd
-          && item.schedSource !== '12306' && item.scheduleRequired !== true)
+          && !fixedSchedule(item) && item.scheduleRequired !== true)
           .sort((a, b) => (toMin(a.startTime) ?? 1440) - (toMin(b.startTime) ?? 1440))
           .forEach((item) => {
             const start = toMin(item.startTime);
@@ -8157,7 +8172,7 @@ function finalizeExecutionEdges(items, outline, p) {
       && item.category === 'transport'
       && sameStation(item.startLocation, move.from) && sameStation(item.endLocation, move.to));
     const item = matches[0];
-    if (!item || item.schedSource === '12306') return;
+    if (!item || fixedSchedule(item)) return;
     item.startTime = move.startTime;
     item.endTime = move.endTime;
     item.timingEstimated = true;
@@ -8375,9 +8390,11 @@ function prematureOriginDays(p, outline) {
     const day = days[i] || {};
     const returnLabel = /返程|回家|到家/.test(String(day.overnight || ''));
     const moves = asArray(day.moves);
-    const movesHome = moves.some((move) => matchesOriginCity(move && move.to, origin));
+    const movesHome = moves.some((move) => !samePlace(move && move.to, day.hotel)
+      && matchesOriginCity(move && move.to, origin));
     // 出发之后的中间日又从家附近坐车去别的城市，通常表示首末日/中途返程顺序被模型颠倒。
-    const leavesHomeAgain = moves.some((move) => matchesOriginCity(move && move.from, origin)
+    const leavesHomeAgain = moves.some((move) => !samePlace(move && move.from, day.hotel)
+      && matchesOriginCity(move && move.from, origin)
       && !matchesOriginCity(move && move.to, origin));
     if (returnLabel || movesHome || leavesHomeAgain
         || matchesOriginCity(day.city, origin) || matchesOriginCity(day.overnight, origin)) out.push(i);
@@ -8913,6 +8930,13 @@ function makeRuleAlarmPusher(list, tripStartTs, tripEndTs) {
   let overdueCount = 0; // 已经过了开票日的条数：错开提醒时间，别一堆闹钟挤在同一分钟
   const nowMs = () => Date.now();
   return function push(title, dateStr, timeStr, type, note, meta = {}) {
+    const ticketMeta = {};
+    ['ticketPlace', 'ticketProduct', 'sourceUrl'].forEach((key) => {
+      if (meta[key]) ticketMeta[key] = String(meta[key]).slice(0, key === 'sourceUrl' ? 500 : 100);
+    });
+    ['ticketRequired', 'reservationRequired'].forEach((key) => {
+      if (typeof meta[key] === 'boolean') ticketMeta[key] = meta[key];
+    });
     let ts = parseCnTime(`${dateStr}T${timeStr}:00`);
     if (!ts || isNaN(ts)) return;
     const finalTitle = String(title || '提醒');
@@ -8944,6 +8968,7 @@ function makeRuleAlarmPusher(list, tripStartTs, tripEndTs) {
       const action = type === 'ticket' ? '立即查看并预约' : '立即查看并购买';
       list.push({
         title: (action + '：' + finalTitle.replace(/^(?:开抢|抢|开始盯|关注|查询|预约)+/, '')).slice(0, 100),
+        ...ticketMeta,
         note: '原定提醒日 ' + dateStr + ' 已过，请现在打开官方售票/预约渠道核实是否已开售；若已放票请立即购买，不要等待下一次提醒。' + String(note || ''),
         fireAt: immediateAt,
         fireAtStr: tsToCnDateTimeStr(immediateAt),
@@ -8975,6 +9000,7 @@ function makeRuleAlarmPusher(list, tripStartTs, tripEndTs) {
     }
     list.push({
       title: title.slice(0, 100),
+      ...ticketMeta,
       note: finalNote,
       fireAt: ts,
       fireAtStr: tsToCnDateTimeStr(ts),
@@ -9443,6 +9469,21 @@ function backfillDetailAlarms(p, outline, items, existing) {
   const push = makeRuleAlarmPusher(list, tripStartTs, tripEndTs);
   const base = asArray(existing);
   const days = asArray(outline.days);
+  const paidProducts = knownTicketProducts(items, days.flatMap((day, dayIndex) =>
+    asArray(day.ticketProducts).concat(asArray(day.executionEvidence && day.executionEvidence.ticketProducts))
+      .map((fact) => ({ ...fact, dayIndex }))));
+  paidProducts.forEach((fact) => {
+    const date = days[fact.dayIndex] && days[fact.dayIndex].date || shiftDate(p.startDate, fact.dayIndex);
+    const normalizeProduct = (value) => String(value || '').replace(/[\s（）()]/g, '').replace(/景区|风景区|门票|预约|放票/g, '');
+    const old = base.concat(list).find((alarm) => alarm.type === 'ticket'
+      && bookingProductKind(alarm) === bookingProductKind({ type: 'ticket', ticketProduct: fact.product })
+      && normalizeProduct(alarm.bookingInfo || alarm.title).includes(normalizeProduct(fact.product)));
+    if (old) return;
+    push(`${fact.product}${fact.ticketRequired ? '预订' : '预约提醒'}`, shiftDate(date, -TICKET_PRESALE_DAYS), '09:00', 'ticket',
+      [fact.note, fact.sourceUrl ? `票务来源：${fact.sourceUrl}` : '', '关注时间非官方起售时刻，办理前确认规则'].filter(Boolean).join('；'),
+      { dayIndex: fact.dayIndex, bookingInfo: fact.product, linkedItemId: fact.item.itemId,
+        ticketPlace: fact.place, ticketProduct: fact.product, ticketRequired: fact.ticketRequired, sourceUrl: fact.sourceUrl });
+  });
   // 父景区入园与内部观景点是同一购票事项；真正的竹筏、演出等另行提醒。
   const scenicEntries = new Set();
   const normalize = (s) => String(s || '').replace(/[\s\u3000→（）()：:，,。；;]/g, '').toLowerCase();
@@ -9476,18 +9517,34 @@ function backfillDetailAlarms(p, outline, items, existing) {
     if (waitingOnly || baggageOnly) return;
     const day = days[Number(it.dayIndex || 0)] || {};
     const date = validDate(day.date) ? day.date : shiftDate(p.startDate, Number(it.dayIndex || 0));
+    if (it.category === 'transport' && /^(?:乘坐|搭乘|乘|坐).{0,16}(?:景区)?观光车/.test(action)
+      && !base.concat(list).some((alarm) => alarm.type === 'ticket' && bookingProductKind(alarm) === 'shuttle'
+        && alarm.linkedItemId === it.itemId)) {
+      const place = it.ticketPlace || it.visitScope || it.startLocation || it.endLocation;
+      const product = it.ticketProduct || `${place}观光车票`;
+      push(`核验${date} ${product}`, shiftDate(date, -TICKET_PRESALE_DAYS), '09:00', 'ticket',
+        '核对独立观光车票或通票包含范围；具体收费、办理和运营规则以运营方为准，不代表已确认另收费。',
+        { dayIndex: Number(it.dayIndex || 0), bookingInfo: product, linkedItemId: it.itemId,
+          ticketPlace: place, ticketProduct: product, reservationRequired: true });
+      return;
+    }
     const titleText = String(it.activity || it.endLocation || it.startLocation || '该项目').slice(0, 28);
+    const freeAdmission = /(?:无需|不用|不必)(?:购买|购|买)?门票|免门票|免费(?:开放|入园|参观)/.test(text);
+    if (freeAdmission && !/需(?:要)?(?:提前|实名)?预约|必须预约|索道|缆车|游船|竹筏|演出/.test(action)
+      && it.reservationRequired !== true) return;
     const statusType = it.category === 'transport' ? bookingKindOf(text) : it.category === 'ticket' ? 'ticket' : '';
     if (BOOKING_DONE_RE.test(text)
       || (statusType && bookingStatusMatches(p, `${titleText} ${text}`, statusType))) return;
-    const entryLocation = String(it.endLocation || '').replace(/(?:正门|大门|门口|出口|入口).*$/, '').trim();
+    const entryLocation = String(it.endLocation || it.startLocation || '').replace(/(?:正门|大门|门口|出口|入口).*$/, '').trim();
     const scoped = String(it.visitScope || '').trim();
     const scenicScope = scoped && `${action} ${it.startLocation || ''} ${it.endLocation || ''}`.includes(`${scoped}景区`)
       ? `${scoped}景区` : '';
     const parent = /景区|梯田|瀑布|山|公园|沟|田园|博物馆|祠|寺|宫/.test(scoped) ? scoped
       : scenicScope || (/景区|梯田|瀑布|公园|博物馆|祠$|寺$|宫$/.test(entryLocation) ? entryLocation.replace(/(?:游客|旅游|售票|服务)中心$/, '')
-        : /(?:^|[\s，,：:])(?:游览|参观)([^\s，,。；;（）()与及]{1,20}(?:祠|寺|宫))/.exec(action)?.[1] || '');
-    if (it.category === 'sight' && /景区|梯田|瀑布|山|公园|沟|田园|博物馆|祠|寺|宫/.test(parent)
+        : /(?:^|[\s，,：:])(?:游览|参观)([^\s，,。；;（）()与及]{1,20}(?:祠|寺|宫))/.exec(action)?.[1]
+          || (/^(?:游览|参观|游玩|进入)/.test(action) && entryLocation && entryLocation !== day.city
+            && !/附近|夜景|夜市|步行街|街区|街$|商圈|码头|酒店|餐厅|观景台|观景点|^观景台$/.test(entryLocation) ? entryLocation : ''));
+    if (it.category === 'sight' && parent
       && !scenicEntries.has(parent)) {
       scenicEntries.add(parent);
       const entryKey = (value) => normalize(value).replace(/风景区|景区|门票|预约|放票/g, '');
@@ -10091,7 +10148,7 @@ function enforceOfficialRailItems(items, outline) {
     if (!old.includes(text)) it.note = old ? `${old}；${text}` : text;
   };
   days.forEach((day, di) => {
-    const moves = asArray(day && day.moves).filter((m) => m && m.schedSource === '12306' && asArray(m.sched).length);
+    const moves = asArray(day && day.moves).filter((m) => fixedSchedule(m) && asArray(m.sched).length);
     if (!moves.length) return;
     out.forEach((it) => {
       if (Number(it.dayIndex || 0) !== di || String(it.category || '') !== 'transport' || !railish(it)) return;
@@ -10133,7 +10190,11 @@ function enforceOfficialRailItems(items, outline) {
       it.endTime = pick.e;
       it.startLocation = pick.from;
       it.endLocation = pick.to;
-      it.schedSource = '12306';
+      it.schedSource = move.schedSource;
+      if (move.schedSource === 'reference') {
+        it.referenceDate = move.referenceDate; it.sourceUrl = move.sourceUrl; it.timingEstimated = true;
+        append(it, `参考${move.referenceDate}运行图，开售后在12306确认；按该车次准确时刻安排接驳`);
+      }
     });
   });
   return out;
@@ -10144,7 +10205,7 @@ function dedupeOfficialRailItems(items, outline) {
   const out = asArray(items).slice();
   const drop = new Set();
   asArray(outline && outline.days).forEach((day, di) => {
-    asArray(day && day.moves).filter((m) => m && m.schedSource === '12306').forEach((move) => {
+    asArray(day && day.moves).filter(fixedSchedule).forEach((move) => {
       const bound = out.filter((it) => {
         if (Number(it.dayIndex || 0) !== di || String(it.category || '') !== 'transport') return false;
         if (!/train|高铁|动车|火车|列车/.test(`${it.transportType || ''}${it.activity || ''}`)) return false;
@@ -10316,7 +10377,7 @@ function fixDayTimeOverlaps(items) {
           parseDurationMin(`${current.note || ''} ${current.activity || ''}`) || 30));
         current.endTime = fmtMin(Math.min(curStart + duration, 23 * 60 + 59));
       }
-      if (currentEnd !== null && currentEnd <= curStart && current.schedSource !== '12306') {
+      if (currentEnd !== null && currentEnd <= curStart && !fixedSchedule(current)) {
         // 归一化到当天最后一分钟后已没有可执行时长；保留零时长条目会
         // 伪造一个“已完成”的景点/收尾，也会让下一段的地点链失真。
         dropped.add(current);
@@ -10340,8 +10401,8 @@ function fixDayTimeOverlaps(items) {
       // 官方班次的发到时刻是事实，任何时间线修复都不能改它。
       // 前一条若只是普通接驳/游览，可以提前收尾让路；两条已核对大交通
       // 真正冲突时保留两条官方时刻，交给用户重新选班次，不伪造第三个时刻。
-      if (list[i].schedSource === '12306') {
-        if (list[i - 1].schedSource !== '12306') list[i - 1].endTime = list[i].startTime;
+      if (fixedSchedule(list[i])) {
+        if (!fixedSchedule(list[i - 1])) list[i - 1].endTime = list[i].startTime;
         continue;
       }
       // 交通条目（尤其有真实班次的火车/飞机）**不许顺延**：把时刻一挪，
@@ -10565,6 +10626,10 @@ function normalizeBookingAlarmKinds(alarms, items, p) {
     const title = `${current.title || ''} ${current.bookingInfo || ''}`;
     const targetText = linked ? `${linked.activity || ''} ${linked.note || ''} ${linked.startLocation || ''} ${linked.endLocation || ''}` : '';
     const text = `${title} ${targetText}`;
+    if (current.type === 'ticket' && current.ticketProduct
+      && (current.ticketRequired === true || current.reservationRequired === true)) {
+      filtered.push(current); return; // 已核实独立票务产品不随其关联接驳误归车票。
+    }
     const textualMode = /(?:12306|火车票|车次|铁路|高铁|(?<!电)动车|列车)/i.test(text) ? 'train'
       : /(?:机票|航班|飞机票|航空)/i.test(text) ? 'plane'
         : /(?:汽车票|大巴票|客运票|旅游专线|直通车)/i.test(text) ? 'bus' : '';
@@ -10609,7 +10674,10 @@ function normalizeBookingAlarmKinds(alarms, items, p) {
       filtered.push(current);
       return;
     }
-    if (!experienceTicket.test(text) && !(scenicEntry.test(text) && /预约|购票|门票/.test(title))) return;
+    const explicitProduct = current.ticketRequired === true || current.reservationRequired === true;
+    const namedAdmission = linked && ['sight', 'ticket'].includes(linked.category) && /门票|入园票|成人票|预约/.test(title);
+    if (!explicitProduct && !namedAdmission && !experienceTicket.test(text)
+      && !(scenicEntry.test(text) && /预约|购票|门票/.test(title))) return;
     filtered.push(current);
   });
   // 按出行日核对常见预售窗口。窗口已过就提醒现在查售票平台，不保留模型编出的未来抢票时刻。
@@ -10624,6 +10692,7 @@ function normalizeBookingAlarmKinds(alarms, items, p) {
     const releaseDate = shiftDate(travelDate, -presaleDays);
     const isTicket = alarm.type === 'ticket';
     const cleanTitle = String(alarm.title || alarm.bookingInfo || (isTicket ? '景区门票/体验预约' : '车票'))
+      .replace(/^(?:(?:预计开放预约\/购票|预计开售|立即查看并预约|立即查看并购买)[：:]\s*)+/, '')
       .replace(/^(?:开抢|抢|开始盯|关注|查询|预约|购票|购买|立即查看并(?:预约|购买)[：:]?)+\s*/, '').trim();
     if (releaseDate <= today) {
       alarm.title = `${isTicket ? '立即查看并预约' : '立即查看并购买'}：${cleanTitle}`.slice(0, 100);
@@ -10645,7 +10714,7 @@ function normalizeBookingAlarmKinds(alarms, items, p) {
   const seen = new Set();
   return filtered.filter((alarm) => {
     const key = alarm.linkedItemId
-      ? `${alarm.type}|${alarm.linkedItemId}`
+      ? `${alarm.type}|${alarm.linkedItemId}|${bookingIdentityPart(alarm, filtered)}`
       : `${alarm.type}|${Number(alarm.dayIndex || 0)}|${String(alarm.bookingInfo || alarm.title || '').replace(/\s/g, '')}`;
     if (seen.has(key)) return false;
     seen.add(key);
@@ -10654,6 +10723,29 @@ function normalizeBookingAlarmKinds(alarms, items, p) {
 }
 
 /** 同一购票/预约事项只保留一条记录，提前量由统一提醒设置负责。 */
+function bookingProductKind(alarm) {
+  if (alarm.type !== 'ticket') return alarm.type;
+  const text = `${alarm.ticketProduct || ''} ${alarm.title || ''} ${alarm.bookingInfo || ''}`;
+  return /索道|缆车/.test(text) ? 'cable' : /竹筏|漂流/.test(text) ? 'raft'
+    : /游船|船票|轮渡/.test(text) ? 'cruise' : /演出|剧场/.test(text) ? 'show'
+      : /观光车|接驳车/.test(text) ? 'shuttle' : 'admission';
+}
+
+function bookingIdentityPart(alarm, alarms) {
+  const kind = bookingProductKind(alarm);
+  if (alarm.type !== 'ticket') return kind;
+  const nameOf = (entry) => {
+    const place = String(entry.ticketPlace || '').replace(/风景区|景区|游客中心/g, '');
+    const product = String(entry.ticketProduct || '').replace(/风景区|景区|游客中心|入园|成人|全价|门票|预约|票/g, '').replace(/\s/g, '');
+    return product.includes(place) ? product : place + product;
+  };
+  if (alarm.ticketProduct) return `${kind}:${nameOf(alarm)}`;
+  const candidates = [...new Set(asArray(alarms).filter((entry) => entry.ticketProduct
+    && entry.linkedItemId === alarm.linkedItemId && bookingProductKind(entry) === kind).map(nameOf))];
+  // 一个明确产品可归并旧泛称；同类多个产品不可凭同一个行程ID互相覆盖。
+  return candidates.length === 1 ? `${kind}:${candidates[0]}` : kind;
+}
+
 function dedupeBookingAlarmRecords(alarms) {
   const groups = new Map();
   const clean = (value) => String(value || '')
@@ -10663,7 +10755,7 @@ function dedupeBookingAlarmRecords(alarms) {
   asArray(alarms).forEach((alarm) => {
     const a = Object.assign({}, alarm);
     const identity = a.linkedItemId
-      ? `linked|${a.linkedItemId}`
+      ? `linked|${a.type}|${a.linkedItemId}|${bookingIdentityPart(a, alarms)}`
       : `text|${a.type}|${Number(a.dayIndex || 0)}|${clean(a.bookingInfo || a.title)}`;
     const old = groups.get(identity);
     if (!old) {
@@ -10754,6 +10846,7 @@ function warningContext(profile, outline, di) {
       startLocation: move.from, endLocation: move.to, startTime: move.startTime, endTime: move.endTime,
       code: move.code, referenceDate: move.referenceDate, sourceUrl: move.sourceUrl,
     })),
+    enforceRailSchedules: true,
     official: asArray(day.moves).filter((move) => move.schedSource === '12306').map((move) => ({
       startLocation: move.from, endLocation: move.to, startTime: move.startTime, endTime: move.endTime, code: move.code,
     })),
@@ -10819,12 +10912,13 @@ async function buildExecutionReview(rawInput, outlineData, opts) {
     const rows = day.executionCandidate || reviewed.filter((row) => Number(row.dayIndex || 0) === di);
     const done = finalizeWithWarnings(rows, di, day, day.executionReviewIssues, warningContext(p, outline, di));
     reviewed = reviewed.filter((row) => Number(row.dayIndex || 0) !== di).concat(done);
-    delete attempts[`review-${di}`]; delete attempts[`review-round-${di}`];
+    if (done.length) { delete attempts[`review-${di}`]; delete attempts[`review-round-${di}`]; }
   });
   accepted = finalizedDays(reviewed);
   const ready = days.map((_, di) => di).filter((di) => accepted.has(di)
     || (!mealChanged.has(di) && finalizedDays(all).has(di)));
-  const reviewError = '';
+  const unsafeRailDays = exhausted.filter((di) => !accepted.has(di));
+  const reviewError = unsafeRailDays.length ? `第${unsafeRailDays.map((di) => di + 1).join('、')}天铁路班次未核实，请续跑重新选路；已完成日期保留，不发布估算列车` : '';
   const items = ensureStableItemIds(annotateHotelItems(reviewed, outline));
   const complete = ready.length === days.length;
   const returnedDays = new Set(items.map((row) => Number(row.dayIndex || 0)));

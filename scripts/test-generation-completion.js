@@ -165,9 +165,9 @@ Module._load = originalLoad;
       attempts: { 'review-1': 3 }, preservePublishedDays: true });
     assert(!finalized.partial); assert(!finalized.reviewError); assert.equal(finalized.progress.done, 2);
     assert(finalized.items.some((it) => it.executionReviewStatus === 'needs_confirmation' && /待确认/.test(it.note)));
-    assert(calls <= 1);
+    assert(calls <= 2, '运营和票务独立检索有界，各最多一轮');
     const again = await P.buildPlan(input, { outline: detail }, { reviewItems: [row(0, true), ...finalized.items], preservePublishedDays: true });
-    assert(!again.partial); assert.equal(calls, 1, '已收尾日期不再反复请求模型');
+    assert(!again.partial); assert.equal(calls, 2, '已收尾日期不再反复请求模型');
   } finally { L.chatWithRetry = originalChat; }
   console.log('✓ 连续复核失败不终止整单，完成后不再重做');
 
@@ -185,7 +185,8 @@ Module._load = originalLoad;
   console.log('✓ 带警示收尾仍保留官方精确班次和太阳窗口，不冒充全部核验通过');
 
   const edges = copy(outline); edges.days = edges.days.slice(0, 2); edges.executionSuggestions = {};
-  edges.days[0].moves = [{ mode: 'train', from: '出发站', to: '甲城站', startTime: '19:00', endTime: '21:00' }];
+  edges.days[0].moves = [{ mode: 'train', from: '出发站', to: '甲城站', startTime: '19:00', endTime: '21:00',
+    code: 'D1001', schedSource: '12306', sched: [{ code: 'D1001', from: '出发站', to: '甲城站', s: '19:00', e: '21:00' }] }];
   edges.days[0].highlights = ['甲景点']; edges.days[1].hotel = ''; edges.days[1].overnight = '返程';
   const edgePlan = await P.buildPlan({ ...input, startTime: '17:00' }, { outline: edges }, { reviewItems: [],
     finalizePending: true, preservePublishedDays: true });

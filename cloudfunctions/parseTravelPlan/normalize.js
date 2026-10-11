@@ -238,6 +238,10 @@ function sanitizeItems(rawItems) {
         endLocation: end.slice(0, 60),
         transportType: it.transportType || '',
         bookingInfo: String(it.bookingInfo || '').slice(0, 160),
+        ...(typeof it.ticketRequired === 'boolean' ? { ticketRequired: it.ticketRequired } : {}),
+        ...(typeof it.reservationRequired === 'boolean' ? { reservationRequired: it.reservationRequired } : {}),
+        ...(it.ticketPlace ? { ticketPlace: String(it.ticketPlace).slice(0, 80) } : {}),
+        ...(it.ticketProduct ? { ticketProduct: String(it.ticketProduct).slice(0, 80) } : {}),
         note: stripMeta(it.note).slice(0, 300),
       };
     })
@@ -376,6 +380,10 @@ function sanitizeItems(rawItems) {
       // 有结束时间且不等于开始时间 → 只做重叠收敛，原样保留（含跨零点 23:30 → 00:30）
       if (et !== null && et !== st) {
         if (nextStart !== null && nextStart > st && et > nextStart) {
+          if (it.transportType === 'train') {
+            it.note = [it.note, '列车运行时间不缩短，请调整后续冲突安排'].filter(Boolean).join('；');
+            return;
+          }
           it.endTime = fmtMin(nextStart);
         }
         return;

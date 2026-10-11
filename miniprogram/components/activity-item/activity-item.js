@@ -10,8 +10,14 @@ const CATEGORY_ICONS = {
 function transportIcon(item) {
   const t = String((item && item.transportType) || '').toLowerCase();
   const act = String((item && item.activity) || '');
+  // 明确交通类型优先，不能因目的地叫“高铁站”或文字含“步行登船”换错图标。
+  if (t === 'ship') return '⛴️';
+  if (t === 'train') return '🚄';
+  if (t === 'plane') return '✈️';
+  if (t === 'bus') return '🚌';
   if (t === 'walk' || /步行|徒步/.test(act)) return '🚶';
-  if (t === 'train' || /高铁|动车|火车|列车|城际/.test(act)) return '🚄';
+  if (!t && /船|游船|渡轮|竹筏/.test(act)) return '⛴️';
+  if (!t && /高铁|(?<!电)动车|火车|列车|城际/.test(act)) return '🚄';
   if (t === 'plane' || /航班|飞机|航站楼/.test(act)) return '✈️';
   if (t === 'ride') {
     if (/公交|巴士|大巴/.test(act)) return '🚌';
@@ -32,6 +38,7 @@ const TRANSPORT_OPTIONS = [
   { value: 'train', label: '火车', icon: '🚄' },
   { value: 'plane', label: '飞机', icon: '✈️' },
   { value: 'bus', label: '大巴', icon: '🚌' },
+  { value: 'ship', label: '船/轮渡', icon: '⛴️' },
 ];
 
 const CATEGORY_OPTIONS = [

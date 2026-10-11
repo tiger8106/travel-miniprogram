@@ -24,7 +24,7 @@ const COL_TASK = 'parse_tasks';
 const GEOCODE_DEADLINE_MS = 35 * 1000;
 
 // 解析引擎版本：返回给前端展示，用于确认线上跑的是不是最新代码
-const PARSE_VERSION = 'v4.9-reservation-coverage';
+const PARSE_VERSION = 'v4.10-ticket-evidence-coverage';
 const DEFAULT_ALARM_LEAD_MINUTES = 5;
 
 function alarmType(type) {
@@ -419,6 +419,7 @@ exports.main = async (event, context) => {
           startDate,
           endDate,
           items,
+          days: buildDocMeta(rawText).days,
         });
         const have = new Set(alarms.map((a) => `${a.fireAt}|${a.title.replace(/\s+/g, '')}`));
         inferred.forEach((a) => {
@@ -698,6 +699,7 @@ async function handleStep(event, ctx) {
             startDate,
             endDate,
             items,
+            days: task.days,
           });
           const have = new Set(alarms.map((a) => `${a.fireAt}|${a.title.replace(/\s+/g, '')}`));
           inferred.forEach((a) => {
