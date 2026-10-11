@@ -84,7 +84,7 @@
                 <text class="now-status {{item.ongoing ? 'live' : ''}}">{{item.statusText}}</text>
                 <text class="now-day">{{item.typeLabel}}</text>
               </view>
-              <view class="now-title-text">{{item.title}}</view>
+              <view class="now-title-text">{{item.displayTitle}}</view>
               <view wx:if="{{item.displayInfo}}" class="now-usage">{{item.displayInfo}}</view>
               <view class="now-action-time">办理时间：{{item.actionFriendly}}</view>
               <view class="now-complete" data-idx="{{index}}" catchtap="onToggleComplete">✓ 标记已完成</view>
@@ -204,7 +204,7 @@
     <view class="confirm-card" catchtap="noop">
       <view class="confirm-icon">🗑</view>
       <view class="confirm-title">删除这个提醒？</view>
-      <view class="confirm-text">{{delItem.title}}</view>
+      <view class="confirm-text">{{delItem.displayTitle}}</view>
       <view class="confirm-hint">删除后将不再提醒</view>
       <view class="confirm-actions">
         <view class="btn-cancel" bindtap="onCancelDelete">取消</view>

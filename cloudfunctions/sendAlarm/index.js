@@ -3,13 +3,14 @@
 // 在云函数后台配置定时触发器，cron: "0 * * * * * *"（每分钟）
 
 const cloud = require('wx-server-sdk');
+const { alarmNotificationTitleOf } = require('./alarm-title');
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
 const COL = 'ticket_alarms';
 const DEFAULT_LEAD_MINUTES = 5;
 
 // 诊断标记：改一次升一次，用来确认线上跑的是不是最新代码
-const DEPLOY_TAG = 'v7-compact-single-reminder';
+const DEPLOY_TAG = 'v8-concise-ticket-titles';
 
 function leadOf(alarm) {
   const n = Number(alarm && alarm.leadMinutes);
@@ -97,7 +98,8 @@ async function diagnose({ templateId }) {
 // ---------- 立即推送（测试用） ----------
 // 模板 ID 取值优先级：前端 config.js 带过来 > 云函数环境变量
 // 字段布局优先级：event.layout > 环境变量 SUBSCRIBE_LAYOUT > 自动探测（47003 时逐个试）
-async function sendTestNow({ title, note, fireAt, templateId, layout, probe }) {
+async function sendTestNow(alarm) {
+  const { note, fireAt, templateId, layout, probe } = alarm;
   const wxContext = cloud.getWXContext();
   const tmplId = templateId || process.env.SUBSCRIBE_TEMPLATE_ID;
   if (!tmplId) {
@@ -105,7 +107,7 @@ async function sendTestNow({ title, note, fireAt, templateId, layout, probe }) {
   }
   const ts = Number(fireAt) || Date.now();
   const vals = {
-    title: String(title || '行程提醒').slice(0, 20),
+    title: alarmNotificationTitleOf(alarm),
     date: formatDate(ts),
     time: formatTime(ts),
     note: compactNote(note),
@@ -246,7 +248,7 @@ async function pollAndPush() {
         const actionAt = actionAtOf(alarm);
         const leadMinutes = leadOf(alarm);
         const vals = {
-          title: String(alarm.title || '行程提醒').slice(0, 20),
+          title: alarmNotificationTitleOf(alarm),
           date: formatDate(actionAt),
           time: formatTime(actionAt),
           note: compactNote(alarm),

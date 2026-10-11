@@ -5,6 +5,7 @@ const tripUtil = require('../../utils/trip');
 const homeCache = require('../../utils/homecache');
 const auth = require('../../utils/auth');
 const genrunner = require('../../utils/genrunner');
+const { userErrorMessage } = require('../../utils/user-error');
 
 const app = getApp();
 const CACHE_KEY = 'mytrips';
@@ -62,7 +63,7 @@ Page({
     genrunner.sync({ resumeFailed: true }).then((s) => {
       wx.hideLoading();
       const tip = s.status === 'done' ? '已生成完成'
-        : s.status === 'running' ? '正在后台生成…' : (s.error || '暂时没法继续');
+        : s.status === 'running' ? '正在后台生成…' : userErrorMessage(s.error, '暂时无法继续，请稍后重试。');
       wx.showToast({ title: tip, icon: 'none' });
       this.load();
     }).catch(() => {
@@ -77,7 +78,8 @@ Page({
       await genrunner.dismiss();
       wx.showToast({ title: '已清除提示', icon: 'none' });
     } catch (error) {
-      wx.showToast({ title: error.message || '清除失败', icon: 'none' });
+      console.error('[mytrips] dismiss failed:', error);
+      wx.showToast({ title: userErrorMessage(error, '暂时无法清除，请稍后重试。'), icon: 'none' });
     }
   },
 

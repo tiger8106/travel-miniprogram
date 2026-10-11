@@ -48,6 +48,8 @@ const jsFiles = [
   'utils/eta.js',
   'utils/cloud.js',
   'utils/request.js',
+  'utils/alarm-title.js',
+  'utils/user-error.js',
 ];
 jsFiles.forEach((rel) => {
   const err = syntaxOk(path.join(MP, rel));
@@ -65,7 +67,7 @@ fs.readdirSync(CF).forEach((dir) => {
 ['generatePlan/plan.js', 'generatePlan/schedule.js', 'generatePlan/rail12306.js', 'generatePlan/hotel-validation.js',
   'generatePlan/execution-review.js', 'generatePlan/publication.js', 'generatePlan/route-evidence.js', 'generatePlan/solar-time.js',
   'generatePlan/ticket-products.js', 'parseTravelPlan/ticket-products.js', 'parseTravelPlan/ticket-source.js',
-  'parseTravelPlan/alarm-infer.js', 'parseTravelPlan/llm.js'].forEach((rel) => {
+  'parseTravelPlan/alarm-infer.js', 'parseTravelPlan/llm.js', 'sendAlarm/alarm-title.js'].forEach((rel) => {
   const err = syntaxOk(path.join(CF, rel));
   ok(`JS 语法 cloudfunctions/${rel}`, !err, err || '');
 });
@@ -852,6 +854,9 @@ ok('局部重复失败带警示收尾，已发布日期保留、不终止整单'
 
 // ---------- ⑬ 管理后台：管理员身份 / 授权不限量 / 在线配置下发 ----------
 const cfgRel = ['generatePlan', 'parseTravelPlan', 'suggestions', 'admin'];
+ok('客户端/订阅消息标题展示规则副本一致',
+  fs.readFileSync(path.join(MP, 'utils/alarm-title.js'), 'utf8')
+    === fs.readFileSync(path.join(CF, 'sendAlarm/alarm-title.js'), 'utf8'));
 ok('生成/上传票务产品证据规则副本一致',
   fs.readFileSync(path.join(CF, 'generatePlan/ticket-products.js'), 'utf8')
     === fs.readFileSync(path.join(CF, 'parseTravelPlan/ticket-products.js'), 'utf8'));

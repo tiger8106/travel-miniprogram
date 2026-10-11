@@ -31,6 +31,7 @@ const api = {
   listItineraries: () => new Promise((resolve) => { finishTrips = resolve; }),
 };
 const alarm = { getAdvanceMin: () => 5, actionAtOf: (a) => a.actionAt,
+  alarmTitleOf: require('../miniprogram/utils/alarm-title').alarmTitleOf,
   alarmKeyInfoOf: () => '', syncAlarms: () => {} };
 const common = {
   console, Date, Promise, setTimeout, clearTimeout, getApp: () => app,

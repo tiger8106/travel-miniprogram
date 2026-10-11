@@ -31,7 +31,7 @@
       <text>⚠️</text>
       <view class="gen-main">
         <view class="gen-title">上次生成没跑完</view>
-        <view class="gen-sub">{{genState.error || '点这里可以继续生成'}}</view>
+        <view class="gen-sub">生成暂未完成，点这里可以继续生成</view>
       </view>
       <view class="gen-actions">
         <view class="gen-btn">继续生成</view>
@@ -50,7 +50,7 @@
           <text wx:if="{{trip.genFailed}}" class="tag tag-warning">生成未完成</text>
         </view>
         <view class="text-secondary trip-meta">{{trip.dateRange}} · {{trip.itemCount}} 项行程</view>
-        <view wx:if="{{trip.genFailed && trip.genError}}" class="trip-gen-error">{{trip.genError}}</view>
+        <view wx:if="{{trip.genFailed}}" class="trip-gen-error">生成暂未完成，可点击继续生成</view>
       </view>
       <view class="trip-ops">
         <view class="op-btn" data-id="{{trip._id}}" catchtap="onTapView">查看</view>

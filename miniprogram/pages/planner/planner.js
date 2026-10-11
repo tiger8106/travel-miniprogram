@@ -11,6 +11,7 @@ const eta = require('../../utils/eta');
 const quota = require('../../utils/quota');
 const genrunner = require('../../utils/genrunner');
 const alarm = require('../../utils/alarm');
+const { userErrorMessage } = require('../../utils/user-error');
 
 const app = getApp();
 
@@ -500,7 +501,7 @@ Page({
       if (/次数|额度|上限/.test(msg)) {
         wx.showToast({ title: msg.slice(0, 30), icon: 'none' });
       } else {
-        this.showDiag(err);
+        this.showGenerationError(err);
       }
     } finally {
       this._outlineDriving = false;
@@ -576,30 +577,12 @@ Page({
     });
   },
 
-  // 生成失败时顺手跑一次云函数体检，把"缺哪个环境变量 / 模型连不连得上"
-  // 直接弹给用户看 —— 省掉翻云开发日志、来回截图确认的功夫。
-  async showDiag(err) {
-    const msg = (err && err.message) || '生成失败';
-    let report = '';
-    try {
-      const d = await api.generateDiag();
-      const NEED = ['LLM_PROVIDER', 'LLM_MODEL', 'LLM_API_KEY'];
-      // LLM_BASE_URL 是可选项（配了 provider 就不用配），缺了不算问题
-      const miss = NEED.filter((k) => !(d.env || {})[k]);
-      report = [
-        `云函数版本：${d.version || '未知'}`,
-        `模型：${d.model || '未取到'}`,
-        `端点：${d.baseURL || '未取到'}`,
-        `连通性：${d.ping || '未探测'}`,
-        miss.length ? `❌ 缺少环境变量：${miss.join('、')}（AMAP_KEY 只影响导航，可后补）` : '✅ 必需环境变量已配齐',
-        d.cfgError ? `配置错误：${d.cfgError}` : '',
-      ].filter(Boolean).join('\n');
-    } catch (e) {
-      report = '（云函数体检也失败了，多半是这个云函数还没上传部署）';
-    }
+  // 用户仅看到可执行的提示；诊断保留在日志，不额外调用体检接口。
+  async showGenerationError(err) {
+    console.error('[planner] generation failed:', err);
     wx.showModal({
-      title: msg.slice(0, 20) || '生成失败',
-      content: `${msg}\n\n—— 体检报告 ——\n${report}`,
+      title: '暂未生成成功',
+      content: userErrorMessage(err, '暂时无法生成，请稍后重试。已保存的内容不会丢失。'),
       showCancel: false,
       confirmText: '知道了',
     });
@@ -755,7 +738,7 @@ Page({
         wx.showToast({ title: '已有行程在后台生成，请到首页查看', icon: 'none', duration: 2500 });
         return;
       }
-      this.showDiag(err);
+      this.showGenerationError(err);
     }
   },
 

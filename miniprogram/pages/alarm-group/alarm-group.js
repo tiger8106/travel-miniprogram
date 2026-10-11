@@ -221,7 +221,7 @@ Page({
     this.setData({
       editingId: item._id,
       editForm: {
-        title: item.title || '',
+        title: alarm.alarmTitleOf(item),
         note: item.note || '',
         bookingInfo: item.bookingInfo || '',
         fireAtDate: this.toDateStr(item.actionAt || item.fireAt),
@@ -364,7 +364,7 @@ Page({
   onDelete(e) {
     const item = (e.detail && e.detail.item) || e.currentTarget.dataset.item;
     if (!item) return;
-    this.setData({ delItem: item });
+    this.setData({ delItem: { ...item, displayTitle: alarm.alarmTitleOf(item) } });
   },
 
   onCancelDelete() {

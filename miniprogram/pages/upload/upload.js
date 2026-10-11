@@ -4,6 +4,7 @@ const auth = require('../../utils/auth');
 const homeCache = require('../../utils/homecache');
 const privacy = require('../../utils/privacy');
 const quota = require('../../utils/quota');
+const { userErrorMessage } = require('../../utils/user-error');
 
 const app = getApp();
 
@@ -54,9 +55,7 @@ Page({
         wx.showModal({
           title: notReady ? '隐私指引还没生效' : '还没完成授权',
           content: notReady
-            ? '小程序后台的《用户隐私保护指引》还没有生效（读到的指引名称是空的）。\n\n'
-              + '请到后台 → 设置 → 服务内容声明 → 用户隐私保护指引，'
-              + '勾选「读取聊天文件」这一类并提交，等微信审核通过（保存不等于生效）。'
+            ? '暂时无法完成文件授权，请稍后再试。'
             : '刚才没有完成授权，暂时不能选择文件。回到页面重新点一次，在弹窗里选「同意并继续」即可。',
           showCancel: false,
           confirmText: '知道了',
@@ -90,18 +89,14 @@ Page({
     if (/privacy|scope|author/i.test(msg)) {
       // 走到这儿说明"同意"了还是被拦 —— 十有八九是后台的《用户隐私保护指引》
       // 没声明「读取聊天文件」或还没审核通过（不是保存即生效）。
-      // 只提示一次，把排查路径讲清楚，不再弹授权窗、不再重试。
+      // 用户只看到授权提示；后台配置诊断留在日志，不再弹授权窗、不再重试。
       if (this._privacyWarned) return;
       this._privacyWarned = true;
       this.setData({ showPrivacy: false });
       privacy.diagnose('upload');
       wx.showModal({
         title: '隐私授权还没生效',
-        content: '微信提示仍需要《用户隐私保护指引》授权。\n\n'
-          + '请在小程序后台 → 设置 → 服务内容声明 → 用户隐私保护指引里：\n'
-          + '1）勾选「读取聊天文件」这一类；\n'
-          + '2）提交后等微信审核通过（不是保存即生效）。\n\n'
-          + '生效后重新进入本页即可选择文件。',
+        content: '暂时无法读取文件，请稍后重新进入页面完成隐私授权。',
         showCancel: false,
         confirmText: '知道了',
       });
@@ -109,7 +104,7 @@ Page({
     }
     wx.showModal({
       title: '选择文件失败',
-      content: `${msg || '未知原因'}\n\n可以换个文件再试，或先把文档发到「文件传输助手」再从这里选择。`,
+      content: '可以换个文件再试，或先把文档发到「文件传输助手」再从这里选择。',
       showCancel: false,
       confirmText: '知道了',
     });
@@ -197,7 +192,8 @@ Page({
       if (status.status === 'done') return this.finishParse(status.result, false);
       if (status.status === 'running') this.driveParse(taskId);
     } catch (e) {
-      this.setData({ errorMsg: e.message || '读取解析进度失败' });
+      console.error('[upload] status failed:', e);
+      this.setData({ errorMsg: userErrorMessage(e, '暂时无法读取解析进度，请稍后重试。') });
     }
   },
 
@@ -209,8 +205,9 @@ Page({
       stageText: status.status === 'running'
         ? `${phaseText[status.phase] || '解析中'}${status.phase === 'day' ? ` ${status.doneDays || 0}/${status.dayCount || 0}` : ''}`
         : '',
-      errorMsg: status.status === 'failed' ? (status.error || '解析失败，可重试') : '',
+      errorMsg: status.status === 'failed' ? userErrorMessage(status.error, '解析暂未完成，请点击重试。') : '',
     });
+    if (status.status === 'failed') console.error('[upload] task failed:', status.error);
   },
 
   finishParse(result, navigate) {
@@ -240,7 +237,8 @@ Page({
         if (status.leaseUntil > Date.now()) await new Promise((resolve) => setTimeout(resolve, 1500));
       }
     } catch (e) {
-      if (this._visible) this.setData({ errorMsg: e.message || '网络中断，云端仍会继续解析', parsing: true });
+      console.error('[upload] resume failed:', e);
+      if (this._visible) this.setData({ errorMsg: userErrorMessage(e, '暂时无法更新进度，请稍后返回查看后台解析结果。'), parsing: true });
     } finally { this._driving = false; }
   },
 
@@ -282,16 +280,13 @@ Page({
       console.error('[upload] err.errMsg:', err.errMsg);
       // 友好错误提示
       const rawMsg = err.errMsg || err.message || '解析失败';
-      const msg = rawMsg.includes('pako') || rawMsg.includes('inflate')
-        ? '当前为 mock 模式，docx 解析需要部署云函数才能使用。'
-        : rawMsg;
       // 次数用完/撞限额不是故障，给购买引导而不是丢一句红字
-      if (/次数|额度|上限/.test(msg)) {
+      if (/次数|额度|上限/.test(rawMsg)) {
         this.setData({ errorMsg: '' });
-        quota.guideToPay(msg);
+        quota.guideToPay(userErrorMessage(err));
         return;
       }
-      this.setData({ errorMsg: msg });
+      this.setData({ errorMsg: userErrorMessage(err, '暂时无法开始解析，请稍后重试。') });
     } finally { this.setData({ uploading: false }); }
   },
 
@@ -316,7 +311,7 @@ Page({
       this.setData({ uploading: true, progress: 12 });
       this.runParsePipeline({ fileID: this.data.fileID }).catch((err) => {
         console.error('[upload] retry error:', err);
-        this.setData({ errorMsg: err.errMsg || err.message || '解析失败' });
+        this.setData({ errorMsg: userErrorMessage(err, '解析暂未完成，请稍后重试。') });
         this.setData({ uploading: false, parsing: false, progress: 0, stageText: '' });
       });
       return;

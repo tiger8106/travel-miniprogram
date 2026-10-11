@@ -44,7 +44,7 @@
       </view>
       <view wx:elif="{{trip.genStatus === 'failed'}}" class="trip-generation trip-generation-fail">
         <view class="trip-generation-title">⚠️ 行程生成暂未完成</view>
-        <view class="trip-generation-sub">{{trip.genError || '可到「我的行程」继续生成'}}</view>
+        <view class="trip-generation-sub">生成暂未完成，可到「我的行程」继续生成</view>
       </view>
       <picker wx:if="{{homeTrips.length > 1}}"
               mode="selector"

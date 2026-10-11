@@ -293,7 +293,7 @@ Page({
         count: list.length,
         pending: list.filter((a) => !a.completed).length,
         completed: list.filter((a) => a.completed).length,
-        nextTitle: def.key === 'hotel' && upcoming ? '查看每日住宿与预订信息' : (upcoming ? upcoming.title : ''),
+        nextTitle: def.key === 'hotel' && upcoming ? '查看每日住宿与预订信息' : (upcoming ? alarm.alarmTitleOf(upcoming) : ''),
         nextTime: def.key === 'hotel' || !upcoming ? '' : `提醒 ${upcoming.remindFriendly}`,
       };
     }).filter((g) => g.count);
@@ -318,6 +318,7 @@ Page({
       return {
         ...a,
         ongoing,
+        displayTitle: alarm.alarmTitleOf(a),
         statusText,
         typeLabel: (GROUP_DEFS[groupRank(a.type)] || GROUP_DEFS[GROUP_DEFS.length - 1]).label,
       };
@@ -388,7 +389,7 @@ Page({
       sheetMode: 'edit',
       editingId: item._id,
       editForm: {
-        title: item.title || '',
+        title: alarm.alarmTitleOf(item),
         note: item.note || '',
         fireAtDate: this.toDateStr(item.actionAt || item.fireAt),
         fireAtTime: this.toTimeStr(item.actionAt || item.fireAt),
@@ -534,7 +535,7 @@ Page({
   onDelete(e) {
     const item = (e.detail && e.detail.item) || e.currentTarget.dataset.item;
     if (!item) return;
-    this.setData({ delItem: item });
+    this.setData({ delItem: { ...item, displayTitle: alarm.alarmTitleOf(item) } });
   },
 
   onCancelDelete() {
@@ -620,7 +621,12 @@ Page({
       step('调用云函数 sendAlarm', '发送中…');
       const t0 = Date.now();
       const res = await api.sendTestAlarm({
-        title: item.title || '行程提醒',
+        title: alarm.alarmTitleOf(item),
+        type: item.type,
+        bookingInfo: item.bookingInfo,
+        usageInfo: item.usageInfo,
+        visitDate: item.visitDate,
+        ticketProduct: item.ticketProduct,
         note: item.note || '点击查看详情',
         fireAt: item.actionAt || item.fireAt || Date.now(),
         leadMinutes: item.leadMinutes || this.data.advanceMin,

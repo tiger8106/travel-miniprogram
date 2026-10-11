@@ -1,5 +1,6 @@
 // components/ticket-alarm/ticket-alarm.js
 // 纯展示组件：闹钟卡片 + 操作按钮，编辑/删除弹层统一由 tickets 页面管理
+const { alarmTitleOf } = require('../../utils/alarm-title');
 Component({
   properties: {
     item: {
@@ -14,6 +15,7 @@ Component({
   },
 
   data: {
+    displayTitle: '',
     icon: '⏰',
     statusLabel: '未知',
   },
@@ -29,6 +31,7 @@ Component({
         || (item.bookingInfo ? `关联：${clean(item.bookingInfo, 80)}` : '')
         || clean(String(item.note || '').split(/[；;。\n]/)[0], 80);
       this.setData({
+        displayTitle: alarmTitleOf(item),
         icon: ({
           train: '🚄', plane: '✈️', ticket: '🎫',
           hotel: '🏨', bus: '🚌', other: '⏰',

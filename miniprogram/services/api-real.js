@@ -122,7 +122,7 @@ async function buildPlan(input, outlineData) {
   return callFn('generatePlan', Object.assign({ action: 'build' }, input, outlineData));
 }
 
-// 云函数体检：环境变量齐不齐、模型连不连得上（生成失败时前端自动调，帮用户自助排查）
+// 仅供显式开发排查；用户生成失败时不调用，也不展示诊断结果。
 async function generateDiag() {
   return callFn('generatePlan', { action: 'diag' });
 }

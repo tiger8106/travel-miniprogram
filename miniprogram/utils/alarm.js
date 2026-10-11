@@ -1,6 +1,7 @@
 // utils/alarm.js
 // 订票闹钟前台轮询 + 震动提醒
 const timeUtil = require('./time');
+const { alarmTitleOf } = require('./alarm-title');
 
 const STORAGE_KEY = '__alarms_cache__';
 const POLL_INTERVAL = 30 * 1000;     // 30 秒检查一次
@@ -90,7 +91,7 @@ function alarmPopupContent(alarm, phase) {
   const friendly = timeUtil.fmtFriendly(actionAt);
   const leadMinutes = leadOf(a);
   const lines = [
-    a.title || '该办事项了',
+    alarmTitleOf(a),
     phase === 'advance' ? `还有 ${leadMinutes} 分钟` : '现在办理',
     `办理时间：${friendly}`,
   ];
@@ -278,10 +279,10 @@ function addToCalendar(a) {
     if (!start) return reject(new Error('该闹钟没有有效时间'));
     if (start <= Date.now()) return reject(new Error('该闹钟已过期，无需写入日历'));
     wx.addPhoneCalendar({
-      title: '⏰ ' + (a.title || '抢票提醒'),
+      title: alarmTitleOf(a),
       startTime: Math.floor(start / 1000),                       // 秒
       endTime: Math.floor((start + 30 * 60 * 1000) / 1000),      // 秒，半小时后结束
-      description: alarmKeyInfoOf(a) || a.title || '',
+      description: alarmKeyInfoOf(a) || alarmTitleOf(a),
       alarm: true,
       alarmOffset: leadMinutes * 60, // 每条事项自己的提前量，单位秒
       success: resolve,
@@ -372,6 +373,7 @@ module.exports = {
   remindAtOf,
   normalizeAlarm,
   alarmKeyInfoOf,
+  alarmTitleOf,
   alarmPopupContent,
   fireAlarm,         // 暴露供测试
   addToCalendar,
