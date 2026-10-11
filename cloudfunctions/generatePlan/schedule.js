@@ -84,16 +84,18 @@ function normalizeList(parsed, segment) {
     // 高铁/动车的跨日结果没有日期上下文，且 e<=s 时很容易是模型把路线串错；
     // 这里只收同日正向时刻，避免把错误候选写进攻略。
     if (e <= s) return;
-    out.push({ code, from, to, s, e });
+    const sourceUrl = String(it.sourceUrl || '').trim();
+    const referenceDate = String(it.referenceDate || '').trim();
+    out.push(Object.assign({ code, from, to, s, e }, sourceUrl ? { sourceUrl, referenceDate } : {}));
   });
   // 按出发时间从早到晚
   out.sort((a, b) => a.s.localeCompare(b.s));
   return out.slice(0, 8);
 }
 
-function promptOf(seg) {
+function promptOf(seg, reference = false) {
   return [
-    `请联网检索下面这段行程在指定日期的**真实班次**，只允许输出检索结果里出现过的信息。`,
+    reference ? `出行尚未开售，请检索近期运行图中该路线实际存在的常态班次作为规划参考。不是预测未来当天开行，不返回临时加开车。每条须给可访问来源URL和资料适用日期referenceDate（YYYY-MM-DD），严禁把未来乘车日期填作资料日期。` : `请联网检索下面这段行程在指定日期的**真实班次**，只允许输出检索结果里出现过的信息。`,
     ``,
     `出发地：${seg.from}`,
     `目的地：${seg.to}`,
@@ -101,12 +103,14 @@ function promptOf(seg) {
     seg.modeHint ? `交通方式：${seg.modeHint}` : '',
     ``,
     `检索与核对步骤（缺一不可）：`,
-    `1. 先搜「${seg.from} 到 ${seg.to} ${seg.date || ''} 时刻表」这类带日期的查询；`,
-    `2. 优先采用标注了具体日期（${seg.date || '当天'}）的结果；只有常态时刻表时，只保留每天开行的车次，删掉你不确定当天是否开行的；`,
+    reference ? `1. 先搜「${seg.from} 到 ${seg.to} 近期 列车时刻表」，核对最近发布的运行图，不要求资料声明未来日期开行；`
+      : `1. 先搜「${seg.from} 到 ${seg.to} ${seg.date || ''} 时刻表」这类带日期的查询；`,
+    reference ? `2. 只采用能确认来源及适用日期的常态班次；保留准确车站和时刻，未来是否开行一律待12306开售确认；`
+      : `2. 优先采用标注了具体日期（${seg.date || '当天'}）的结果；只有常态时刻表时，只保留每天开行的车次，删掉你不确定当天是否开行的；`,
     `3. 每个候选都要核对：车次号、出发时刻、到达时刻必须能在检索结果里找到对应，对不上的直接丢弃。`,
     ``,
     `只输出 JSON，不要任何解释文字：`,
-    `{"list":[{"code":"车次号","from":"出发站","to":"到达站","s":"HH:mm","e":"HH:mm"}]}`,
+    `{"list":[{"code":"车次号","from":"出发站","to":"到达站","s":"HH:mm","e":"HH:mm","sourceUrl":"来源链接","referenceDate":"资料适用日期"}]}`,
     ``,
     `要求：`,
     `1. 最多 8 条，按出发时间从早到晚排序。`,
@@ -116,12 +120,14 @@ function promptOf(seg) {
 }
 
 /** 查一段：返回候选班次数组（查不到就是空数组，绝不抛错） */
-async function lookupOne(seg, timeoutMs) {
+async function lookupOne(seg, timeoutMs, reference = false) {
   const text = await chat(
-    [{ role: 'system', content: SYS }, { role: 'user', content: promptOf(seg) }],
+    [{ role: 'system', content: SYS }, { role: 'user', content: promptOf(seg, reference) }],
     { maxTokens: 1200, timeoutMs: Math.max(6000, Math.min(25000, timeoutMs)), enableSearch: true },
   );
-  const list = normalizeList(parseJSONFromText(text), seg);
+  const list = normalizeList(parseJSONFromText(text), seg).filter((entry) => !reference
+    || (/^https?:\/\//.test(entry.sourceUrl) && /^\d{4}-\d{2}-\d{2}$/.test(entry.referenceDate)
+      && Date.parse(entry.referenceDate) <= Date.now() && Date.now() - Date.parse(entry.referenceDate) <= 120 * 86400000));
   console.log('[generatePlan.schedule] 检索 %s→%s 得到 %d 个候选', seg.from, seg.to, list.length);
   return list;
 }
@@ -161,9 +167,8 @@ function canLookupSchedules() {
 }
 
 /**
- * 批量查班次：铁路直接读 12306 官方结果，只有航班等非铁路段才走模型联网搜索。
- * 铁路官方查询即使返回空数组也写入 Map，plan.js 会清除模型臆造的车次，不能静默
- * 回退到“看起来像真实”的旧结果。
+ * 已开售铁路只读实际日期官方结果；未开售铁路查近期运行图，接口不可用时
+ * 可用带来源和资料日期的联网参考。两者分开标注，空结果不恢复模型记忆车次。
  */
 async function lookupSchedules(segments, deadlineMs, cache) {
   const found = new Map();
@@ -182,7 +187,7 @@ async function lookupSchedules(segments, deadlineMs, cache) {
 
   if (rail.length && officialEnabled()) {
     try {
-      const official = await rail12306.lookupOfficial(rail, budget);
+      const official = await rail12306.lookupOfficial(rail, canSearch() ? Math.min(12000, budget / 2) : budget);
       rail.forEach((seg) => {
         const k = cacheKeyOf(seg);
         found.set(k, official.get(k) || []);
@@ -198,6 +203,21 @@ async function lookupSchedules(segments, deadlineMs, cache) {
       });
     }
   }
+
+  // 官方接口对未开售日期查询近期同星期运行图；接口不可用时再检索公开时刻表。
+  // 搜索结果始终是参考证据，不提升成未来12306已核实结果。
+  if (canSearch()) await Promise.all(rail.map(async (seg) => {
+    const key = cacheKeyOf(seg);
+    if ((found.get(key) || []).length || !rail12306.queryDateFor(seg.date).reference) return;
+    try {
+      const list = await lookupOne(seg, Math.min(20000, budget / 2), true);
+      if (list.length) {
+        found.set(key, list);
+        found.routeMeta.set(key, { attempted: true, official: false, reference: true,
+          from: seg.from, to: seg.to, referenceDate: list[0].referenceDate, sourceUrl: list[0].sourceUrl });
+      }
+    } catch (e) { console.warn('[generatePlan.schedule] 参考运行图检索失败：%s', e.message); }
+  }));
 
   if (!other.length) return found;
   if (!canSearch()) {

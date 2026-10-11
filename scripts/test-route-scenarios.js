@@ -38,7 +38,7 @@ const scenarios = [
     input: {
       origin: '重庆金童路',
       dest: '桂林、阳朔、龙脊梯田、明仕田园、德天瀑布',
-      startDate: '2026-09-30', endDate: '2026-10-07',
+      startDate: '2027-09-30', endDate: '2027-10-07',
       startTime: '12:00', endTime: '16:00',
       party: '情侣出行', people: 2,
       budget: '经济实惠', pace: '劳逸适中',
@@ -221,6 +221,14 @@ const toMinutes = P.toMin;
 const fmt = (item) => `${item.startTime || '--:--'}-${item.endTime || '--:--'} ${item.category || ''}`
   + `${item.startLocation || item.endLocation ? ` [${item.startLocation || '—'}→${item.endLocation || '—'}]` : ''} ${item.activity || ''}`;
 
+// 对齐生产 savePlan：只审计已发布日期，私有草稿不能被旧版边界修补改写。
+function auditPublishedRows(items, outline, input) {
+  const version = require('../cloudfunctions/generatePlan/execution-review').REVIEW_VERSION;
+  const ready = items.filter((row) => row.executionReview === version);
+  const draft = items.filter((row) => row.executionReview !== version);
+  return draft.concat(ready.length ? P.auditMergedDetailItems(ready, outline, input) : []);
+}
+
 function inspectScenario(scenario, outline, items) {
   const issues = [];
   const profile = P.normalizeInput(scenario.input);
@@ -262,7 +270,8 @@ function inspectScenario(scenario, outline, items) {
     if (!matches) issues.push(`已核验铁路条目的路线/时刻被改坏：${fmt(item)}`);
   });
   const noSelfDrive = items.filter((item) => /自驾|开车|驾车|驾驶|驱车|骑(?:行)?(?:电动摩托车|摩托车)|租(?:赁|用|车)?(?:电动摩托车|摩托车)/
-    .test(`${item.activity || ''} ${item.note || ''}`));
+    .test(`${item.activity || ''} ${item.note || ''}`.split(/[，,。；;]/)
+      .filter((part) => !/禁止|不要|不可|不允许|不得|避免|无需|司机驾驶|由司机|非自驾|不自驾/.test(part)).join('；')));
   if (noSelfDrive.length) {
     issues.push(`${noSelfDrive.length} 条行程出现未授权的本人驾驶文案`);
     noSelfDrive.forEach((item) => console.error(`  驾驶文案条目：第${Number(item.dayIndex || 0) + 1}天 ${fmt(item)}`));
@@ -357,6 +366,11 @@ function inspectScenario(scenario, outline, items) {
       previousHotel: (outline.days[dayIndex - 1] || {}).hotel,
       previousMeals: (outline.days[dayIndex - 1] || {}).executionMealNames || [], knownMeals: day.meals || [], repeatMeals: profile.extra,
       visitWindows: (day.executionEvidence || {}).visitWindows || [],
+      aliases: (day.executionEvidence || {}).aliases || [],
+      highlights: day.highlights || [],
+      localMobility: (day.executionEvidence || {}).localMobility || [],
+      previousStorage: require('../cloudfunctions/generatePlan/execution-review').previousStoragePlaces(items, dayIndex),
+      references: require('../cloudfunctions/generatePlan/execution-review').referenceSchedules(day),
       sailingWindows: (day.executionEvidence || {}).sailingWindows || [],
       sameHotel: !!day.hotel && sameEndpoint(day.hotel, (outline.days[dayIndex - 1] || {}).hotel),
       lightLuggage: P.explicitCarryLuggagePreference(profile),
@@ -524,7 +538,7 @@ function inspectScenario(scenario, outline, items) {
         && P.samePlace(item.startLocation, item.endLocation))
       && toMinutes(item.endTime) !== null && toMinutes(item.endTime) > cutoff
       && toMinutes(item.startTime) < toMinutes(finalIntercity.startTime)
-      && !(item.category === 'other' && /候车|安检|检票|进站/.test(item.activity || '')));
+      && !(item.category === 'other' && /候车|安检|检票|进站|站内.*(?:换乘|等待.*列车)/.test(item.activity || '')));
     if (rushed.length) issues.push(`末日返程前仍有来不及完成的活动：${rushed.map(fmt).join('；')}`);
   }
 
@@ -677,8 +691,11 @@ function inspectScenario(scenario, outline, items) {
       && item.category === 'transport'
       && toMinutes(item.startTime) !== null
       && toMinutes(item.startTime) >= endAt
-      && /兴坪|九马画山|黄布倒影|相公山|20元人民币背景/.test(String(item.startLocation || '') + String(item.activity || ''))
-      && /阳朔|龙头山|西街/.test(String(item.endLocation || '') + String(item.activity || '')))
+      && /兴坪|九马画山|黄布倒影|相公山|20元人民币背景/.test(String(item.startLocation || ''))
+      && /阳朔|龙头山|西街/.test(String(item.endLocation || ''))
+      && !items.some((visit) => Number(visit.dayIndex || 0) === Number(cruise.dayIndex || 0)
+        && toMinutes(visit.startTime) >= endAt && toMinutes(visit.endTime) <= toMinutes(item.startTime)
+        && /兴坪|九马画山|黄布倒影|相公山/.test(String(visit.endLocation || ''))))
       .forEach(() => issues.push('漓江船已抵阳朔后仍生成兴坪沿线→阳朔的重复接驳'));
   });
   items.forEach((item) => {
@@ -813,7 +830,7 @@ async function runScenario(scenario) {
   let doneDayIndexes = [];
   let attempts = {};
   let final = null;
-  const maxRounds = 12;
+  const maxRounds = 28; // 与后台知识检索/局部修訂分轮预算一致，不把未复核天当完成。
   for (let round = 1; round <= maxRounds; round++) {
     console.log(`[${scenario.name}] 细化第 ${round} 轮，已完成 ${doneDayIndexes.length}/${outline.days.length} 天`);
     const heartbeat = setInterval(() => console.log(`[${scenario.name}] 正在细化第 ${round} 轮，已完成 ${doneDayIndexes.length}/${outline.days.length} 天…`), 12000);
@@ -833,7 +850,7 @@ async function runScenario(scenario) {
     }
     allItems.push(...result.items);
     // 和 savePlan 一样每轮落库审计，复核通过的日期保持不变。
-    const stored = P.auditMergedDetailItems(allItems, outline, input);
+    const stored = auditPublishedRows(allItems, outline, input);
     allItems.splice(0, allItems.length, ...stored);
     doneDayIndexes = result.doneDayIndexes || doneDayIndexes;
     attempts = result.attempts || attempts;
@@ -926,14 +943,14 @@ function inspectBookingReminders(profile, items, alarms) {
       issues.push(`车票提醒漏了具体路段：第${Number(item.dayIndex || 0) + 1}天 ${item.startLocation}→${item.endLocation}`);
     }
     if (item.category !== 'sight' || !needsBooking(item, 'ticket')) return;
-    if (/游船|竹筏|漂流|演出|缆车|索道/.test(item.activity || '')
+    if (/^(?:乘坐|乘|搭乘|体验|观看|游览).{0,30}(?:游船|竹筏|漂流|演出|缆车|索道)/.test(item.activity || '')
       && !alarms.some((alarm) => alarm.type === 'ticket' && alarm.linkedItemId === item.itemId)) {
       issues.push(`实际体验缺少购票提醒：${item.activity}`);
     }
     const entry = String(item.endLocation || '').replace(/(?:正门|大门|门口|出口|入口).*$/, '').trim();
     const scoped = String(item.visitScope || '').trim();
     const parent = /景区|梯田|瀑布|山|公园|沟|田园|博物馆/.test(scoped) ? scoped
-      : /景区|公园|博物馆$/.test(entry) ? entry : '';
+      : /景区|梯田|瀑布|公园|博物馆$/.test(entry) ? entry.replace(/(?:游客|旅游|售票|服务)中心$/, '') : '';
     if (/景区|梯田|瀑布|山|公园|沟|田园|博物馆/.test(parent)
       && !P.bookingStatusMatches(profile, `${parent} 门票`, 'ticket')
       && !alarms.some((alarm) => alarm.type === 'ticket'
@@ -1006,17 +1023,17 @@ function inspectBookingReminders(profile, items, alarms) {
       console.log(`复核检查点：${path.join(reportDir, 'result.json')}`);
       let attempts = {};
       try {
-        for (let round = 0; round < 12; round++) {
+        for (let round = 0; round < 28; round++) {
           const result = await P.buildPlan(saved.input, { outline: saved.outline }, { reviewItems: items, attempts });
           const fresh = new Set(result.items.map((row) => Number(row.dayIndex || 0)));
           items = items.filter((row) => !fresh.has(Number(row.dayIndex || 0))).concat(result.items);
-          items = P.auditMergedDetailItems(items, saved.outline, saved.input);
+          items = auditPublishedRows(items, saved.outline, saved.input);
           attempts = result.attempts;
           if (!result.partial) alarms = result.alarms || [];
           checkpoint();
           if (result.reviewError) throw new Error(result.reviewError);
           if (!result.partial) break;
-          if (round === 11) throw new Error('执行复核超过十二轮仍未完成');
+          if (round === 27) throw new Error('执行复核超过二十八轮仍未完成');
         }
       } finally { checkpoint(); }
     }

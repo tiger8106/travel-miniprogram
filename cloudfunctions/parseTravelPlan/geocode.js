@@ -407,6 +407,8 @@ async function searchPoi(keywords, city, citylimit, size, timeoutMs) {
         lon: loc.lon,
         lat: loc.lat,
         name: String(p.name || ''),
+        poiType: String(p.type || ''),
+        typecode: String(p.typecode || ''),
         province: String(p.pname || ''),
         city: String(p.cityname || ''),
         district: String(p.adname || ''),
@@ -505,11 +507,21 @@ async function geocodeOne(address, city, deadlineAt) {
   // 基础证据：地址自带行政区词根时只认词根；没有词根才退回城市校验
   const baseOk = (r) => (self.length ? selfHit(r.hay) : cityHit(fullCity, r.hay)) && levelOk(r);
   // POI 步骤：基础证据 + 名称相关性（含类别尾缀锁）
-  const poiOk = (kw) => (r) => baseOk(r) && nameOk(r.name, kw);
+  const facilityQuery = /游客(?:服务)?中心|停车场|码头|索道|缆车/.test(bare)
+    && !LODGE_FOOD_WORD.test(normName(bare));
+  const lodgingQuery = /酒店|宾馆|客栈|民宿|饭店|度假(?:村|山庄)|公寓/.test(bare)
+    && !/停车|餐厅|自助餐|咖啡|接待处|礼宾部|宴会厅|大堂吧/.test(bare);
+  const facilityOk = (r) => (!facilityQuery || (!LODGE_FOOD_WORD.test(normName(r.name))
+    && !/^(?:05|10)/.test(r.typecode || '') && !/餐饮服务|住宿服务/.test(r.poiType || '')))
+    && (!lodgingQuery || (!/停车|餐厅|自助餐|咖啡|接待处|礼宾部|宴会厅|大堂吧/.test(r.name || r.hay || '')
+      && !/^05/.test(r.typecode || '') && !/餐饮服务/.test(r.poiType || '')));
+  const poiOk = (kw) => (r) => baseOk(r) && nameOk(r.name, kw)
+    // 缩短关键词只是检索策略，不能把游客中心/停车场附近的餐馆当成枢纽。
+    && facilityOk(r);
   // geo 步骤：基础证据 + 名称相关性（geo 模糊结果最容易张冠李戴）
   //   + 行政区级别防线（区划中心点不是具体地点）
   //   + 住宿餐饮类防线（编造的店名 geo 会落到镇域点，宁可不给）
-  const geoOk = (r) => geoNameOk(bare, r.hay)
+  const geoOk = (r) => facilityOk(r) && geoNameOk(bare, r.hay)
     && geoLevelOk(bare, r.hay, r.level)
     && geoClassOk(bare, r.hay);
   const soft = (r) => baseOk(r) && geoOk(r);
@@ -543,7 +555,7 @@ async function geocodeOne(address, city, deadlineAt) {
     && PROVINCE_NAMES.has(kNorm.slice(0, tailM0.index));
   const lastResortEligible = noTail || stemIsProvince;
   const strongName = (r) => {
-    if (!lastResortEligible) return false;
+    if (!lastResortEligible || !facilityOk(r)) return false;
     if (self.length && !selfHit(r.hay)) return false;  // 词根冲突照样拒
     const n = normName(r.name);
     if (!n || !kNorm) return false;
@@ -597,6 +609,7 @@ async function geocodeOne(address, city, deadlineAt) {
   // 全国一堆同名，绝不全国捞（桩测试钉死「宁可不给坐标」）。
   if (lastResortEligible && kNorm.length >= 4) {
     push('geo/last', () => geoRaw(raw, ''), (r) => {
+      if (!facilityOk(r)) return false;
       if (self.length && !selfHit(r.hay)) return false;
       return geoNameOk(bare, r.hay) && geoLevelOk(bare, r.hay, r.level) && geoClassOk(bare, r.hay);
     });
@@ -619,7 +632,8 @@ async function geocodeOne(address, city, deadlineAt) {
     const hit = (scored.find((x) => steps[i][2](x.r)) || {}).r;
     if (hit) {
       console.log('[geocode] 命中 %s → %s（%s）', raw, hit.name, tag);
-      return { lon: hit.lon, lat: hit.lat, matchedName: hit.name, city: cityTagOf(hit.hay) };
+      return { lon: hit.lon, lat: hit.lat, matchedName: hit.name, city: cityTagOf(hit.hay),
+        poiAddress: [hit.province, hit.city, hit.district, hit.address].filter(Boolean).join('') };
     }
     // 记下第一个"有结果但校验不过"的候选，便于排查是谁顶掉了正确结果
     if (!fallback && list.length) fallback = { name: list[0].name, tag };
@@ -635,7 +649,7 @@ async function geocodeOne(address, city, deadlineAt) {
 function isBookableHotelPoi(row, regions) {
   const name = String(row && row.name || '').trim();
   if (!name || /停车场|停车库|停车位|停车楼|泊车|地下车库|停车出入口|停车区域/.test(name)) return false;
-  if (/(?:大堂|前台|礼宾部|接待处|洗衣房|大堂吧|售楼处|餐厅|会议室|宴会厅|健身房|游泳池|出入口|卫生间|充电站)[)）]?$/u.test(name)) return false;
+  if (/(?:大堂|前台|礼宾部|接待处|洗衣房|大堂吧|售楼处|餐厅|自助餐|餐饮|咖啡|会议室|宴会厅|健身房|游泳池|出入口|卫生间|充电站)[)）]?$/u.test(name)) return false;
   if (!/酒店|宾馆|客栈|民宿|饭店|公寓|度假村|旅店|旅馆|招待所/.test(name)) return false;
   const compact = (value) => String(value || '').replace(/[\s\u3000,，、/()（）·-]/g, '');
   const locationTerms = [...new Set((regions || []).flatMap((value) =>

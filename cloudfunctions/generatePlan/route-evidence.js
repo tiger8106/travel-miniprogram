@@ -113,7 +113,7 @@ async function collectRailTopology(rows, deadline) {
   if (!process.env.LLM_API_KEY || process.env.RAIL12306_ENABLED === '0' || deadline - Date.now() < 3000) return [];
   // 未来未开售不能查询当日班次；仅查询当前运行网络是否支持这对车站，
   // 绝不把当前车次号/发车时刻写成未来出行的已核验班次。
-  const date = tsToDateStr(Date.now());
+  const date = tsToDateStr(Date.now() + 86400000);
   const segments = rows.filter((row) => row.category === 'transport' && row.transportType === 'train'
     && row.startLocation && row.endLocation).map((row) => ({
     from: row.startLocation, to: row.endLocation, mode: 'train', date,
@@ -125,6 +125,8 @@ async function collectRailTopology(rows, deadline) {
     const meta = found.routeMeta && found.routeMeta.get(key);
     if (!meta || !meta.querySucceeded || meta.repaired) return [];
     const list = found.get(key) || [];
+    // 余票空结果可能是停售、接口降级或暂未放票，不能证明物理线路没有直达。
+    if (!list.length) return [];
     const minutes = (value) => Number(value.slice(0, 2)) * 60 + Number(value.slice(3));
     return [{ from: segment.from, to: segment.to, mode: 'train', direct: !!list.length,
       minMinutes: list.length ? Math.min(...list.map((train) => (minutes(train.e) - minutes(train.s) + 1440) % 1440)) : 0,

@@ -20,6 +20,19 @@ const routeCache = new Map();
 
 function now() { return Date.now(); }
 
+// 未开售日期查询近期同星期的运行图，仅作为规划参考，不声称未来已开行。
+function queryDateFor(travelDate, at = now()) {
+  if (!DATE_RE.test(String(travelDate || ''))) return { date: travelDate, reference: false };
+  const today = new Date(at + 8 * 3600 * 1000).toISOString().slice(0, 10);
+  const base = Date.parse(`${today}T00:00:00Z`);
+  const target = Date.parse(`${travelDate}T00:00:00Z`);
+  const days = Math.round((target - base) / 86400000);
+  if (days >= 0 && days <= 14) return { date: travelDate, reference: false };
+  const weekdayOffset = ((target - base) / 86400000 % 7 + 7) % 7;
+  // 至少提前一周，减少查当天停售/已发车的干扰。
+  return { date: new Date(base + (weekdayOffset + 7) * 86400000).toISOString().slice(0, 10), reference: true };
+}
+
 function segmentKey(seg) {
   if (seg && seg.scheduleKey) return String(seg.scheduleKey);
   return `${String(seg && seg.from || '').trim().replace(/\s+/g, '')}→${String(seg && seg.to || '').trim().replace(/\s+/g, '')}@${String(seg && seg.date || '').trim() || '无日期'}`;
@@ -128,7 +141,10 @@ function resolveStationCandidates(label, stations, limit = 6) {
       return { s, score };
     }).filter((x) => x.score >= 0)
       .sort((a, b) => b.score - a.score || a.s.name.localeCompare(b.s.name));
-    scored.slice(0, limit).forEach(({ s }) => {
+    // 明确车站名命中后不能混查同城短名站，并因其班次数多擅自换到另一站。
+    const exact = scored.filter(({ s }) => stationKey(s.name) === key);
+    const explicitStation = /站$|[东西南北]$/.test(part);
+    (explicitStation && exact.length ? exact : scored).slice(0, limit).forEach(({ s }) => {
       if (!seen.has(s.code)) {
         seen.add(s.code);
         result.push(s);
@@ -335,7 +351,10 @@ async function lookupOfficial(segments, deadlineMs) {
 
   await Promise.all(rail.map(async (seg) => {
     const key = segmentKey(seg);
-    const meta = { attempted: true, official: true, from: '', to: '', repaired: false };
+    const query = queryDateFor(seg.date);
+    const meta = { attempted: true, official: !query.reference, reference: query.reference,
+      referenceDate: query.reference ? query.date : '', travelDate: seg.date,
+      sourceUrl: INIT_URL, from: '', to: '', repaired: false };
     found.routeMeta.set(key, meta);
     const pairs = routePairs(seg, stations);
     if (!pairs.length) {
@@ -349,9 +368,9 @@ async function lookupOfficial(segments, deadlineMs) {
       return;
     }
     const results = await Promise.allSettled(pairs.map((pair) =>
-      queryRoute(pair, seg.date, cookie, byCode, deadlineAt)));
+      queryRoute(pair, query.date, cookie, byCode, deadlineAt)));
     meta.querySucceeded = results.some((result) => result.status === 'fulfilled');
-    meta.queriedDate = seg.date;
+    meta.queriedDate = query.date;
     let best = null;
     results.forEach((r, i) => {
       if (r.status !== 'fulfilled' || !r.value.length) return;
@@ -370,7 +389,8 @@ async function lookupOfficial(segments, deadlineMs) {
     meta.repaired = !!best.pair.repaired;
     found.set(key, best.list);
     console.log('[generatePlan.12306] %s→%s %s 命中 %d 班（实际路线 %s→%s）',
-      seg.from, seg.to, seg.date, best.list.length, meta.from, meta.to);
+      seg.from, seg.to, query.reference ? `${query.date}运行图参考（出行${seg.date}）` : seg.date,
+      best.list.length, meta.from, meta.to);
   }));
   return found;
 }
@@ -381,6 +401,7 @@ function resetCaches() {
 }
 
 module.exports = {
+  queryDateFor,
   getStations,
   lookupOfficial,
   parseStations,

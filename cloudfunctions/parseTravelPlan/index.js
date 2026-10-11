@@ -11,7 +11,7 @@ const { geocodeBatch, geocodeOne } = require('./geocode');
 const { sanitizeItems } = require('./normalize');
 const { cleanHotelStays } = require('./hotel-stays');
 const { groupHotelReminders } = require('./hotel-reminders');
-const { inferAlarms, backfillRuleAlarms, INFER_THRESHOLD } = require('./alarm-infer');
+const { inferAlarms, completeReservationAlarms } = require('./alarm-infer');
 // 远程配置（管理后台在线改的 KEY）：见 generatePlan/cloudCfg.js 的说明。
 // 本文件那份与其内容一致，改一处要同步三处（check-bindings 有断言盯着）。
 const cloudCfg = require('./cloudCfg');
@@ -24,7 +24,7 @@ const COL_TASK = 'parse_tasks';
 const GEOCODE_DEADLINE_MS = 35 * 1000;
 
 // 解析引擎版本：返回给前端展示，用于确认线上跑的是不是最新代码
-const PARSE_VERSION = 'v4.8-hotel-stay-ranges';
+const PARSE_VERSION = 'v4.9-reservation-coverage';
 const DEFAULT_ALARM_LEAD_MINUTES = 5;
 
 function alarmType(type) {
@@ -366,7 +366,7 @@ exports.main = async (event, context) => {
       console.error('[parseTravelPlan] 地理编码失败（不影响主流程）:', e.message);
     }
 
-    const alarms = cleanAlarms(structured.alarms, openid, now, rawText);
+    let alarms = cleanAlarms(structured.alarms, openid, now, rawText);
     console.log('[parseTravelPlan] 清洗后 alarms 数量:', alarms.length);
 
     // 日期清洗：LLM 返回的脏值（"null"/乱格式）全部拦下，再逐级兜底
@@ -412,7 +412,7 @@ exports.main = async (event, context) => {
     // 5. 入库 - 闹钟
     //    文档里没写抢票时间（很常见：攻略只写"9月30日 G2249 出发"）→ 用行程反推一份
     //    「什么时候该抢票/预订/准备」的待办清单，别让闹钟页空着
-    if (alarms.length < INFER_THRESHOLD) {
+    if (items.length) {
       try {
         const inferred = await inferAlarms({
           title: tripData.title,
@@ -431,12 +431,7 @@ exports.main = async (event, context) => {
         console.error('[parseTravelPlan] 待办反推异常（不影响主流程）:', e.message);
       }
     }
-    const ruleBackfill = backfillRuleAlarms({ startDate, endDate, items }, alarms);
-    if (ruleBackfill.length) {
-      alarms.push(...ruleBackfill);
-      alarms.sort((a, b) => a.fireAt - b.fireAt);
-      console.log('[parseTravelPlan] 详细行程规则查漏补齐 %d 条待办', ruleBackfill.length);
-    }
+    alarms = completeReservationAlarms({ startDate, endDate, items, days: buildDocMeta(rawText).days }, alarms);
 
     const storedAlarms = prepareAlarmRecords(alarms, openid, tripId, now, event.leadMinutes, items, startDate,
       buildDocMeta(rawText).booking);
@@ -693,10 +688,10 @@ async function handleStep(event, ctx) {
         endDate = tsToDateStr(parseCnTime(startDate + 'T00:00:00') + maxDi * 86400000);
       }
 
-      const alarms = cleanAlarms(task.alarmsRaw, openid, now, (task.booking || []).join('\n'));
+      let alarms = cleanAlarms(task.alarmsRaw, openid, now, (task.booking || []).join('\n'));
 
       // 文档里没写抢票时间（很常见）→ 用行程反推一份待办清单，别让闹钟页空着
-      if (alarms.length < INFER_THRESHOLD) {
+      if (items.length) {
         try {
           const inferred = await inferAlarms({
             title: task.title,
@@ -715,12 +710,7 @@ async function handleStep(event, ctx) {
           console.error('[step/infer] 待办反推异常（不影响主流程）:', e.message);
         }
       }
-      const ruleBackfill = backfillRuleAlarms({ startDate, endDate, items }, alarms);
-      if (ruleBackfill.length) {
-        alarms.push(...ruleBackfill);
-        alarms.sort((a, b) => a.fireAt - b.fireAt);
-        console.log('[step/infer] 详细行程规则查漏补齐 %d 条待办', ruleBackfill.length);
-      }
+      alarms = completeReservationAlarms({ startDate, endDate, items, days: task.days }, alarms);
 
       // 汇总去重要编码的地址（geocode 步按这个清单分批跑）
       const addrSet = new Set();

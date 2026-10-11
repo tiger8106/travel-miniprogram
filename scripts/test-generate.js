@@ -2364,6 +2364,17 @@ llm.chatWithRetry = async (messages) => {
   ok(!wrongNearbyHotelResult.outline.days[0].hotelPoiVerified
     && /南宁.*经济型住宿片区/.test(wrongNearbyHotelResult.outline.days[0].hotel),
   '附近酒店搜索的行政区地址冲突时，不把邻市 POI 冒充当地酒店', wrongNearbyHotelResult.outline.days[0].hotel);
+  const misleadingScopedHotel = { outline: { days: [
+    { city: '甲瀑布', overnight: '乙城', hotel: '甲酒店' }, { overnight: '返程' },
+  ] } };
+  let lodgingSearchScope = '';
+  await validateOutlineHotels(misleadingScopedHotel, {}, async (name, scope) => {
+    lodgingSearchScope = scope;
+    return { matchedName: '甲酒店', city: '甲城市', district: '甲县', address: '边境村',
+      areaSearch: true, areaMatched: true, searchCity: '乙城' };
+  }, async () => null);
+  ok(!misleadingScopedHotel.outline.days[0].hotelPoiVerified && lodgingSearchScope === '乙城',
+    'POI 实际 city/district 冲突不能因搜索范围命中而接受，搜索也不带白天景区');
   const verifiedHotelWithWrongScope = P.normalizeOutlineLodging({ days: [
     { overnight: '南宁青秀区', hotel: '外地真实酒店', hotelPoiVerified: true,
       hotelPoiVerifiedName: '外地真实酒店', hotelPoiAddress: '广西壮族自治区崇左市天等县' },

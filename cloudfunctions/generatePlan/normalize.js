@@ -248,6 +248,11 @@ function sanitizeItems(rawItems) {
   // 从 activity 里确定性抽一个目的地当 endLocation；
   // startLocation 留给 Pass 2 按行程连续性继承（人上一站在哪就从哪出发）。
   items.forEach((it) => {
+    // 模型分类不能覆盖明确主动作；去码头/景区的接驳不按备注中的船/索道分类。
+    const boat = it.activity.match(/^(?:乘坐|搭乘|乘|体验)([^，。；]{0,24})(?:游船|竹筏|漂流)/);
+    if (boat && !/网约车|出租车|大巴|公交|直通车|前往|抵达|到达/.test(boat[1])) it.transportType = 'ship';
+    if (/^(?:租|骑|骑行|租用).{0,12}(?:电动车|电动自行车|自行车)/.test(it.activity)
+      && it.transportType === 'train') it.transportType = 'ride';
     if (it.startLocation || it.endLocation) return;
     const dest = inferDestination(it.activity);
     if (dest) it.endLocation = dest;

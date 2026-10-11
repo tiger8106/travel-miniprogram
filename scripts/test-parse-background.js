@@ -55,7 +55,7 @@ Module._load = function (request, parent, isMain) {
       asArray: (v) => v || [], extractDay: async () => [{ dayIndex: 0, activity: '游览象鼻山', category: 'sight' }],
       extractAlarms: async () => [], extractSuggestions: async () => ({}),
     };
-    if (request === './alarm-infer') return { inferAlarms: async () => [], backfillRuleAlarms: () => [], INFER_THRESHOLD: 0 };
+    if (request === './alarm-infer') return { inferAlarms: async () => [], completeReservationAlarms: () => [] };
     if (request === './geocode') return { geocodeBatch: async () => ({}), geocodeOne: async () => null, pickCity: () => '' };
   }
   return originalLoad.call(this, request, parent, isMain);

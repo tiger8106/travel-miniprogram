@@ -41,7 +41,7 @@ const COL_SCHED = 'schedule_cache';
 const SCHED_TTL_MS = 36 * 3600 * 1000;
 
 // 生成引擎版本（用于确认线上跑的是哪一版）
-const GEN_VERSION = 'v2.19-hotel-stay-ranges';
+const GEN_VERSION = 'v2.20-reference-schedules-execution';
 const { publicationState, collectGenerationRows } = require('./publication');
 
 async function generateOutlineWithHotelCheck(input, opts) {
@@ -143,12 +143,19 @@ async function geocodeItems(items, regionOf, opts, cityOf) {
         if (s) {
           it.startLon = s.lon; it.startLat = s.lat;
           if (s.matchedName && s.matchedName !== it.startLocation) {
+            ['activity', 'note', 'bookingInfo'].forEach((key) => {
+              if (typeof it[key] === 'string') it[key] = it[key].split(it.startLocation).join(s.matchedName);
+            });
             it.startLocation = s.matchedName;   // 回写高德真实 POI 名，用户搜索/导航不再落空
           }
         }
         if (e) {
           it.endLon = e.lon; it.endLat = e.lat;
+          if (e.poiAddress) it.endPoiAddress = e.poiAddress;
           if (e.matchedName && e.matchedName !== it.endLocation) {
+            ['activity', 'note', 'bookingInfo'].forEach((key) => {
+              if (typeof it[key] === 'string') it[key] = it[key].split(it.endLocation).join(e.matchedName);
+            });
             it.endLocation = e.matchedName;
           }
         }
@@ -352,6 +359,25 @@ async function savePlan(openid, plan, tripId, jobId, outline, input) {
   }
   plan.items = storedItems;
   await geocodeItems(plan.items, regionOf, { deadlineAt: Date.now() + geoBudgetMs }, cityOf);
+  // 地图纠正住宿名称后，预订信息也必须同步；不能正文唯美四季、提醒仍是异地分店。
+  if (outline) {
+    storedItems.filter((item) => item.category === 'hotel' && item.endLocation
+      && /入住|回房|返回|休息/.test(item.activity || '') && !/退房/.test(item.activity || '')).forEach((item) => {
+      const day = outline.days && outline.days[Number(item.dayIndex || 0)];
+      if (!day || !day.hotel || day.hotel === item.endLocation) return;
+      const old = day.hotel;
+      day.hotel = item.endLocation; day.hotelPoiVerifiedName = item.endLocation;
+      day.hotelPoiAddress = item.endPoiAddress || '';
+      day.hotelPoiVerified = !!day.hotelPoiAddress;
+      day.hotelSearchHint = [day.hotel, day.hotelPoiAddress].filter(Boolean).join('｜');
+      day.hotelRecommendationReason = ''; // 新物业不能继承旧物业的推荐/位置说明。
+      (plan.alarms || []).filter((alarm) => alarm.type === 'hotel').forEach((alarm) => {
+        ['title', 'note', 'bookingInfo', 'usageInfo'].forEach((key) => {
+          if (typeof alarm[key] === 'string') alarm[key] = alarm[key].split(old).join(day.hotel);
+        });
+      });
+    });
+  }
   let itemCount = storedItems.length;
 
   if (!finalTripId) {

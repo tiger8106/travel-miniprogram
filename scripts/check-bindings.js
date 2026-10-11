@@ -95,6 +95,30 @@ checkPair('pages/planner/planner.wxml', 'pages/planner/planner.js');
 checkPair('pages/mytrips/mytrips.wxml', 'pages/mytrips/mytrips.js');
 checkPair('pages/index/index.wxml', 'pages/index/index.js');
 
+// 和开发者工具质量扫描保持一致：声明不等于使用，遗留组件也会进入包。
+const usedComponents = new Set();
+function scanComponents(dir) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const file = path.join(dir, entry.name);
+    if (entry.isDirectory()) { scanComponents(file); continue; }
+    if (!file.endsWith('.json')) continue;
+    const config = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const wxml = file.slice(0, -5) + '.wxml';
+    const markup = fs.existsSync(wxml) ? fs.readFileSync(wxml, 'utf8') : '';
+    Object.entries(config.usingComponents || {}).forEach(([tag, target]) => {
+      const used = new RegExp(`<${tag}(?:\\s|/?>)`).test(markup);
+      ok(`组件声明实际使用 ${path.relative(MP, file)}:${tag}`, used);
+      if (used && target.startsWith('/')) usedComponents.add(path.join(MP, target + '.json'));
+    });
+  }
+}
+scanComponents(path.join(MP, 'pages'));
+scanComponents(path.join(MP, 'components'));
+for (const dir of fs.readdirSync(path.join(MP, 'components'))) {
+  const component = path.join(MP, 'components', dir, dir + '.json');
+  if (fs.existsSync(component)) ok(`无废弃组件 ${dir}`, usedComponents.has(component));
+}
+
 // ---------- ③ 残留 & 关键改动检查 ----------
 const actWxml = fs.readFileSync(path.join(MP, 'components/activity-item/activity-item.wxml'), 'utf8');
 const actWxss = fs.readFileSync(path.join(MP, 'components/activity-item/activity-item.wxss'), 'utf8');
