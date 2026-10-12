@@ -64,7 +64,7 @@ fs.readdirSync(CF).forEach((dir) => {
   const err = syntaxOk(abs);
   ok(`JS 语法 cloudfunctions/${dir}/index.js`, !err, err || '');
 });
-['generatePlan/plan.js', 'generatePlan/schedule.js', 'generatePlan/rail12306.js', 'generatePlan/hotel-validation.js',
+['generatePlan/plan.js', 'generatePlan/schedule.js', 'generatePlan/rail12306.js', 'generatePlan/hotel-validation.js', 'generatePlan/lodging-location.js',
   'generatePlan/execution-review.js', 'generatePlan/llm.js', 'generatePlan/publication.js', 'generatePlan/route-evidence.js', 'generatePlan/solar-time.js',
   'generatePlan/ticket-products.js', 'parseTravelPlan/ticket-products.js', 'ticketAlarm/ticket-products.js', 'parseTravelPlan/ticket-source.js',
   'parseTravelPlan/alarm-infer.js', 'parseTravelPlan/llm.js', 'sendAlarm/alarm-title.js', 'sendAlarm/ticket-products.js'].forEach((rel) => {

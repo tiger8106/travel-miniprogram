@@ -1,13 +1,20 @@
 // 独立云函数各带一份。确定需要门票/预约的产品按证据查漏，不按景点名字猜收费。
 const key = (value) => String(value || '').replace(/[\s（）()·]/g, '').replace(/风景区|景区|门票|预约|游客中心/g, '');
 const array = (value) => Array.isArray(value) ? value : [];
+// 含入园票的基础通/套票不是单独的观光车体验；独立二销项目仍逐项核对。
+const productText = (value) => String(value || '').split(/[，,；;（）()]/)
+  .filter((part) => !/不含|不包含|不包括|另购/.test(part)).join(' ');
+const includedAdmission = (value) => /门票|入园票/.test(productText(value))
+  && /套票|通票|(?:门票|入园票)[+＋]|(?:含|包含).{0,12}观光车/.test(productText(value));
+const experienceProduct = (value) => !includedAdmission(value)
+  && /竹筏|漂流|游船|游轮|船票|轮渡|索道|缆车|演出|观光车|魔毯|滑道/.test(productText(value));
 
 function actualTicketExperience(row, product = '') {
   const action = String(row && row.activity || '');
-  const kind = String(product || action).match(/竹筏|漂流|游船|游轮|船票|轮渡|索道|缆车|演出|观光车/);
+  const kind = String(product || action).match(/竹筏|漂流|游船|游轮|船票|轮渡|索道|缆车|演出|观光车|魔毯|滑道/);
   if (!kind || /^(?:不|无需|不必|取消)(?:再)?(?:乘坐|搭乘|体验|观看|游览)/.test(action)) return false;
   if (/^(?:前往|到达|抵达|返回|步行|骑行|骑电|打车|接驳|出发)/.test(action)
-    && !/(?:并|随后|后|[，,；;])\s*(?:乘坐|搭乘|乘|坐|体验|观看)(?:景区)?[^。；]{0,20}(?:竹筏|漂流|游船|游轮|轮渡|索道|缆车|演出|观光车)/.test(action)) return false;
+    && !/(?:并|随后|后|[，,；;])\s*(?:乘坐|搭乘|乘|坐|体验|观看)(?:景区)?[^。；]{0,20}(?:竹筏|漂流|游船|游轮|轮渡|索道|缆车|演出|观光车|魔毯|滑道)/.test(action)) return false;
   const words = /竹筏|漂流/.test(kind[0]) ? '竹筏|漂流' : /游船|游轮|船票|轮渡/.test(kind[0]) ? '游船|游轮|乘船|坐船|轮渡' : kind[0];
   return !/^(?:准备|计划|明日|次日)/.test(action)
     && new RegExp(`(?:乘坐|搭乘|乘|坐|体验|观看|参加|游览|漂游|漂流)?[^。；]{0,60}(?:${words})(?!码头|入口|起点|终点)`).test(action)
@@ -65,7 +72,7 @@ function filterTicketAlarms(alarms, items, policies = []) {
     if (!linked && visits.length) candidates = visits;
     if (!candidates.length) return true;
     if (candidates.every(ticketAccessOnly)) return false;
-    const experience = /竹筏|漂流|游船|游轮|船票|轮渡|索道|缆车|演出|观光车/.test(alarm.ticketProduct || alarm.title || '');
+    const experience = experienceProduct(alarm.ticketProduct || alarm.title || '');
     if (experience) return candidates.some((row) => actualTicketExperience(row, alarm.ticketProduct || alarm.title)
       || row.category === 'ticket' && !ticketAccessOnly(row));
     const unknown = /未.*(?:核实|确认)|核验|不代表.*确认|不确定/.test(`${alarm.note || ''} ${alarm.ticketProduct || ''}`);
@@ -102,7 +109,7 @@ function normalizeTicketProducts(values, requireSource = true) {
 
 function knownTicketProducts(items, facts = []) {
   const visits = array(items).filter((row) => (['sight', 'ticket'].includes(row.category)
-    || row.ticketRequired === true && /观光车|索道|缆车|游船|船票|竹筏|演出/.test(row.ticketProduct || row.activity))
+    || row.ticketRequired === true && /观光车|索道|缆车|游船|船票|竹筏|演出|魔毯|滑道/.test(row.ticketProduct || row.activity))
     && !/公交车票|长途.*车票|高铁票|火车票|机票/.test(row.ticketProduct || '')
     && (row.ticketRequired === true && row.ticketProduct
       || !/^(?:前往|抵达|到达|途经|路过|步行去|乘车去)/.test(row.activity || '')) && !ticketAccessOnly(row));
@@ -118,7 +125,7 @@ function knownTicketProducts(items, facts = []) {
     const row = visits.find((entry) => Number(entry.dayIndex || 0) === fact.dayIndex
       && [entry.activity, entry.endLocation, entry.startLocation, entry.visitScope, entry.bookingInfo].some((text) => key(text).includes(key(fact.place)))
       && !/仅途经|只在外部|不入园|不进入|外观|远眺|附近$/.test(`${entry.activity || ''} ${entry.endLocation || ''}`.trim())
-      && (!/游船|游轮|船票|轮渡|索道|缆车|竹筏|漂流|演出|观光车/.test(fact.product) || actualTicketExperience(entry, fact.product)));
+      && (!experienceProduct(fact.product) || actualTicketExperience(entry, fact.product)));
     if (row) add(fact, row); // 舍弃的可选景点不留下购票提醒。
   });
   visits.forEach((row) => {
@@ -136,5 +143,5 @@ function knownTicketProducts(items, facts = []) {
   return out;
 }
 
-module.exports = { normalizeTicketProducts, normalizeTicketPolicies, actualTicketExperience, ticketAccessOnly,
+module.exports = { normalizeTicketProducts, normalizeTicketPolicies, actualTicketExperience, ticketAccessOnly, includedAdmission,
   explicitAdmission, openLeisureVisit, freeAdmissionFor, filterTicketAlarms, knownTicketProducts, ticketKey: key, evidenceUrl };

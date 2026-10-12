@@ -11,7 +11,7 @@ const COL = 'ticket_alarms';
 const DEFAULT_LEAD_MINUTES = 5;
 
 // 诊断标记：改一次升一次，用来确认线上跑的是不是最新代码
-const DEPLOY_TAG = 'v9-ticket-intent-filter';
+const DEPLOY_TAG = 'v10-admission-bundle-scope';
 
 function leadOf(alarm) {
   const n = Number(alarm && alarm.leadMinutes);

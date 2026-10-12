@@ -4,6 +4,7 @@
  * instead of showing a made-up property name.
  */
 async function validateOutlineHotels(result, input, searchHotelPoi, searchHotelsNearby) {
+  const { fallbackHotelLabel, prepareFallbackLodging } = require('./lodging-location');
   const geo = require('./geocode');
   const { distanceKm } = require('./route-evidence');
   const anchors = new Map();
@@ -91,7 +92,7 @@ async function validateOutlineHotels(result, input, searchHotelPoi, searchHotels
   await Promise.all(days.map(async (day, index) => {
     if (index === days.length - 1 || !day) return;
     const overnight = String(day.overnight || day.city || '').trim();
-    if (!day.hotel && overnight) day.hotel = `${overnight} ${grade}住宿片区`;
+    if (!day.hotel && overnight) day.hotel = fallbackHotelLabel(overnight, grade);
     if (!day.hotel) return;
     // 班次校正后会再次进入这里；如果原 POI 的地址仍覆盖新的 overnight，
     // 直接复用核验结果，避免重复打地图请求。住宿范围发生变化时继续走
@@ -151,6 +152,7 @@ async function validateOutlineHotels(result, input, searchHotelPoi, searchHotels
       day.hotelPoiOvernight = '';
       day.hotelSearchHint = day.hotel;
       day.hotelRecommendationReason = `暂未核验到具体物业，先提供${place || '当晚住宿地'}的${grade}住宿片区；请在主流平台搜索片区和档次后选择真实酒店，不要把这段片区描述当作酒店名称。`;
+      prepareFallbackLodging(day);
       console.warn('[generatePlan] 第%d天住宿名称未能核验，改为片区+档次：%s', index + 1, day.hotel);
     }
   }));

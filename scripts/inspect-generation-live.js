@@ -22,7 +22,9 @@ const appid = require(path.resolve(__dirname, '../project.config.json')).appid;
         const status = await wx.cloud.callFunction({ name: 'generatePlan', data: { action: 'jobStatus' } });
         const job = status.result?.data?.job;
         return { appid: wx.getAccountInfoSync().miniProgram.appId, version: diagnostic.result?.data?.version,
-          activeJob: job ? { status: job.status, round: job.round, progress: job.progress, error: job.error } : null };
+          mapConfigured: !!diagnostic.result?.data?.env?.AMAP_KEY,
+          activeJob: job ? { jobId: job.jobId, tripId: job.tripId, status: job.status,
+            round: job.round, progress: job.progress, error: job.error } : null };
       }
       const result = await wx.cloud.callFunction({ name: 'generatePlan', data: { action: 'inspectJobs' } });
       if (!result.result || result.result.code !== 0) throw new Error(result.result?.msg || '请先部署支持只读摘要的 generatePlan');

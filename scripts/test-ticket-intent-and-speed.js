@@ -34,6 +34,47 @@ test('已核查票务不能把含竹筏字样的接驳当作收费体验', () =>
   assert.equal(T.knownTicketProducts([pier], facts).length, 0);
   assert.equal(T.knownTicketProducts([pier, raft], facts)[0].item.itemId, 'raft');
 });
+test('入园基础套票不因包含观光车而漏掉；未安排魔毯/滑道不补票', () => {
+  const visit = { ...row('游览甲瀑布', 'sight', '10:00', '12:00', '甲瀑布景区游客中心', '甲瀑布观景台'), itemId: 'waterfall' };
+  const facts = ['成人基础套票（含门票+往返观光车）', '飞天魔毯+滑道联票'].map((product) => ({
+    dayIndex: 0, place: '甲瀑布景区', product, ticketRequired: true, sourceUrl: 'https://www.gxzf.gov.cn/' }));
+  for (const dir of ['generatePlan', 'parseTravelPlan', 'ticketAlarm', 'sendAlarm']) {
+    const helper = require(`../cloudfunctions/${dir}/ticket-products`);
+    const products = helper.knownTicketProducts([visit], facts);
+    assert.equal(products.length, 1); assert(products[0].product.includes('基础套票'));
+    assert.equal(helper.filterTicketAlarms(facts.map((f) => ({ ...f, type: 'ticket', linkedItemId: 'waterfall', ticketProduct: f.product })), [visit]).length, 1);
+    assert(helper.actualTicketExperience({ ...visit, activity: '体验飞天魔毯上行及滑道下山' }, facts[1].product));
+    assert(!helper.includedAdmission('魔毯套票（不含景区门票）'), '不含门票不能冒充入园套票');
+    const withoutBus = { ...facts[0], product: '甲瀑布景区门票（不含观光车）' };
+    assert.equal(helper.knownTicketProducts([visit], [withoutBus]).length, 1, '不含观光车的入园票仍保留');
+  }
+  const generated = P.backfillDetailAlarms(profile, { days: [{ date: profile.startDate, ticketProducts: facts }] }, [visit], []);
+  const retained = P.normalizeBookingAlarmKinds(P.linkBookingAlarms(generated, [visit]), [visit], profile);
+  assert(retained.some((a) => /基础套票/.test(a.ticketProduct))); assert(!retained.some((a) => /魔毯/.test(a.title)));
+});
+test('泛称码头线路票按实际漂流归并；入园与多个独立产品仍分开', () => {
+  const generic = { type: 'ticket', linkedItemId: 'raft', dayIndex: 0,
+    title: '水厄底码头→综合码头票', bookingInfo: '水厄底码头→综合码头', fireAt: 10 };
+  const precise = { ...generic, title: '人工竹筏漂流票', ticketPlace: '甲河景区',
+    ticketProduct: '甲河人工竹筏漂流票（水厄底码头至综合码头段）',
+    sourceUrl: 'https://www.ysylh.cn/', fireAt: 20 };
+  const admission = { ...generic, title: '甲河景区入园门票', ticketProduct: '甲河景区门票' };
+  const merged = P.dedupeBookingAlarmRecords([generic, precise, admission], [raft]);
+  assert.equal(merged.length, 2);
+  assert(merged.some((a) => a.ticketProduct === precise.ticketProduct && a.sourceUrl === precise.sourceUrl));
+  assert(merged.some((a) => a.ticketProduct === admission.ticketProduct));
+  const normalized = P.normalizeBookingAlarmKinds([generic, precise, admission], [raft], profile);
+  assert.equal(normalized.length, 2);
+  assert(normalized.some((a) => a.ticketProduct === precise.ticketProduct && a.sourceUrl === precise.sourceUrl),
+    '分类阶段不能先保留泛称而丢掉产品来源，后续去重已来不及恢复');
+  const reversed = P.dedupeBookingAlarmRecords([precise, { ...generic, fireAt: 30 }], [raft]);
+  assert.equal(reversed[0].fireAt, 30, '仍保留较晚实际办理时间');
+  assert.equal(reversed[0].title, precise.title, '较晚泛称不能覆盖具名票务标题');
+  assert.equal(reversed[0].ticketProduct, precise.ticketProduct);
+  const otherProduct = { ...precise, ticketProduct: '甲河人工竹筏漂流夜间场票' };
+  assert.equal(P.dedupeBookingAlarmRecords([generic, precise, otherProduct], [raft]).length, 3,
+    '同类有多个独立产品时不能猜泛称属于哪张票');
+});
 test('精确20点筏票不被码头错误提名抢占，同产品只剩真实漂流提醒', () => {
   const precise = { type: 'ticket', title: '2027-10-04 遇龙河竹筏', source: 'parsed',
     linkedItemId: 'raft', dayIndex: 0, fireAt: Date.parse('2027-10-03T20:00:00+08:00'),

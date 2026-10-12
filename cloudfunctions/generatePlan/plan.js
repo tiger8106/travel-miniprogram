@@ -23,8 +23,9 @@ const { reviewExecutionItems, executionIssues, previousStoragePlaces, collectMea
   invalidateRepeatedMeals, invalidateUnsafeAcceptedDays, syncAcceptedMoves, finalizeWithWarnings,
   sameEndpoint: exactExecutionEndpoint, REVIEW_VERSION } = require('./execution-review');
 const { finalizedDays } = require('./publication');
+const { fallbackHotelLabel, prepareFallbackLodging } = require('./lodging-location');
 const { solarEventMinute } = require('./solar-time');
-const { knownTicketProducts, ticketAccessOnly, actualTicketExperience, freeAdmissionFor, openLeisureVisit, filterTicketAlarms } = require('./ticket-products');
+const { knownTicketProducts, ticketAccessOnly, actualTicketExperience, freeAdmissionFor, openLeisureVisit, filterTicketAlarms, includedAdmission } = require('./ticket-products');
 
 // 近期运行图虽不是未来开行承诺，其车次到发时刻同样不能被时间线修补移动。
 const fixedSchedule = (item) => item && ['12306', 'reference'].includes(item.schedSource);
@@ -665,10 +666,11 @@ function ensureOutlineHotelFallbacks(outline, p) {
   const budget = String(p && (p.budget || p.budgetLevel) || '');
   const grade = /经济/.test(budget) ? '经济型' : /品质/.test(budget) ? '品质型' : '舒适型';
   asArray(outline && outline.days).forEach((day, index, days) => {
+    if (day) prepareFallbackLodging(day);
     if (index === days.length - 1 || !day || String(day.hotel || '').trim()) return;
     const place = String(day.overnight || day.city || '').trim();
     if (!place) return;
-    day.hotel = `${place} ${grade}住宿片区`;
+    day.hotel = fallbackHotelLabel(place, grade);
     day.hotelPoiVerified = false;
     day.hotelPoiVerifiedName = '';
     day.hotelPoiAddress = '';
@@ -10718,28 +10720,29 @@ function normalizeBookingAlarmKinds(alarms, items, p, policies = []) {
     alarm.title = `${isTicket ? '预计开放预约/购票' : '预计开售'}：${cleanTitle}`.slice(0, 100);
     alarm.note = `按常见预售规则估算 ${releaseDate} 开放；请在该日查看官方 App/景区渠道，具体时间以官方公告为准。${String(alarm.note || '')}`.slice(0, 200);
   });
-  const seen = new Set();
-  return filtered.filter((alarm) => {
-    const key = alarm.linkedItemId
-      ? `${alarm.type}|${alarm.linkedItemId}|${bookingIdentityPart(alarm, filtered, items)}`
-      : `${alarm.type}|${Number(alarm.dayIndex || 0)}|${String(alarm.bookingInfo || alarm.title || '').replace(/\s/g, '')}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  // 归并必须保留具名产品和来源，不先留下泛称就丢掉后续证据。
+  return dedupeBookingAlarmRecords(filtered, items);
 }
 
 /** 同一购票/预约事项只保留一条记录，提前量由统一提醒设置负责。 */
-function bookingProductKind(alarm) {
+function bookingProductKind(alarm, items = []) {
   if (alarm.type !== 'ticket') return alarm.type;
-  const text = `${alarm.ticketProduct || ''} ${alarm.title || ''} ${alarm.bookingInfo || ''}`;
+  let text = `${alarm.ticketProduct || ''} ${alarm.title || ''} ${alarm.bookingInfo || ''}`;
+  if (includedAdmission(alarm.ticketProduct || alarm.bookingInfo || alarm.title)) return 'admission';
+  // 泛称“A码头→B码头票”不含体验名，用准确关联的实际动作归类，
+  // 才能与该船筏产品归并；明确入园票和独立产品不能据此改类。
+  if (!alarm.ticketProduct && !/门票|入园|索道|缆车|竹筏|漂流|游船|船票|轮渡|演出|剧场|观光车|接驳车|魔毯|滑道/.test(text)) {
+    const linked = items.find((row) => alarm.linkedItemId
+      && String(row.itemId || row._id || '') === String(alarm.linkedItemId));
+    if (linked && actualTicketExperience(linked)) text += ` ${linked.activity || ''}`;
+  }
   return /索道|缆车/.test(text) ? 'cable' : /竹筏|漂流/.test(text) ? 'raft'
     : /游船|船票|轮渡/.test(text) ? 'cruise' : /演出|剧场/.test(text) ? 'show'
-      : /观光车|接驳车/.test(text) ? 'shuttle' : 'admission';
+      : /观光车|接驳车/.test(text) ? 'shuttle' : /魔毯|滑道/.test(text) ? 'scenic-extra' : 'admission';
 }
 
 function bookingIdentityPart(alarm, alarms, items = []) {
-  const kind = bookingProductKind(alarm);
+  const kind = bookingProductKind(alarm, items);
   if (alarm.type !== 'ticket') return kind;
   const nameOf = (entry) => {
     const linked = items.find((row) => String(row.itemId || row._id || '') === String(entry.linkedItemId || ''));
@@ -10754,7 +10757,7 @@ function bookingIdentityPart(alarm, alarms, items = []) {
   };
   if (alarm.ticketProduct) return `${kind}:${nameOf(alarm)}`;
   const candidates = [...new Set(asArray(alarms).filter((entry) => entry.ticketProduct
-    && entry.linkedItemId === alarm.linkedItemId && bookingProductKind(entry) === kind).map(nameOf))];
+    && entry.linkedItemId === alarm.linkedItemId && bookingProductKind(entry, items) === kind).map(nameOf))];
   // 一个明确产品可归并旧泛称；同类多个产品不可凭同一个行程ID互相覆盖。
   return candidates.length === 1 ? `${kind}:${candidates[0]}` : kind;
 }
@@ -10779,6 +10782,12 @@ function dedupeBookingAlarmRecords(alarms, items = []) {
     // 前端/系统日历只会按 leadMinutes 生成一个提前提醒。
     const winner = Number(a.fireAt || 0) >= Number(old.fireAt || 0) ? a : old;
     const loser = winner === a ? old : a;
+    if (!winner.ticketProduct && loser.ticketProduct) {
+      // 保留实际办理时刻，同时展示具名产品，不让后来的泛称覆盖证据摘要。
+      winner.title = loser.title || winner.title;
+      winner.bookingInfo = loser.bookingInfo || loser.ticketProduct;
+      winner.ticketProduct = loser.ticketProduct;
+    }
     winner.note = [winner.note, loser.note].filter(Boolean).filter((value, index, list) => list.indexOf(value) === index).join('；').slice(0, 500);
     winner.bookingInfo = winner.bookingInfo || loser.bookingInfo || '';
     winner.linkedItemId = winner.linkedItemId || loser.linkedItemId || '';
@@ -10847,6 +10856,8 @@ function warningContext(profile, outline, di, items = []) {
   return { isFirst: di === 0, isLast: di === outline.days.length - 1,
     origin: profile.origin, goTime: profile.goTime, backTime: profile.backTime, date: day.date, city: day.city,
     hotel: day.hotel, overnight: day.overnight, previousHotel: previous.hotel,
+    hotelLocationAliases: day.hotelLocationAliases || [], hotelPoiVerified: day.hotelPoiVerified,
+    previousHotelLocationAliases: previous.hotelLocationAliases || [],
     previousStorage: previousStoragePlaces(items, di),
     required: requiredPlacesForDay(profile, outline.days, di),
     knownMeals: day.meals || [], previousMeals: previous.executionMealNames || [],
@@ -10901,6 +10912,8 @@ async function buildExecutionReview(rawInput, outlineData, opts) {
   const outline = (outlineData && outlineData.outline) || outlineData || {};
   const days = asArray(outline.days);
   const all = asArray(opts.reviewItems);
+  const published = finalizedDays(all);
+  days.forEach((day, di) => { if (!published.has(di)) prepareFallbackLodging(day); });
   const pending = days.map((_, di) => di).filter((di) => {
     const rows = all.filter((row) => Number(row.dayIndex || 0) === di);
     return rows.length && rows.some((row) => row.executionReview !== REVIEW_VERSION);
@@ -11041,7 +11054,12 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
     }
     const generated = new Set(opts.reviewItems.map((row) => Number(row.dayIndex || 0)));
     opts = Object.assign({}, opts, { doneDayIndexes: [...new Set([...(opts.doneDayIndexes || []), ...generated])] });
-    if (generated.size >= days.length || opts.reviewItems.some((row) => row.executionReview !== REVIEW_VERSION)) {
+    const waiting = [...generated].filter((di) => opts.reviewItems.some((row) => Number(row.dayIndex || 0) === di
+      && row.executionReview !== REVIEW_VERSION));
+    const firstReview = waiting.length && waiting.every((di) => !days[di].executionReviewPhase);
+    // 新批次允许先复核一次以尽快发布；进入查询/修订后先补未起草日期，
+    // 不能让难修候选长期占住入口。新草稿仍只存私有区，完整复核后才发布。
+    if (generated.size >= days.length || firstReview) {
       return buildExecutionReview(rawInput, outlineData, opts);
     }
   }
@@ -11050,7 +11068,9 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
   const acceptedSnapshots = new Map();
   asArray(opts.reviewItems).forEach((row) => {
     const di = Number(row.dayIndex || 0);
-    if (row.executionReview === REVIEW_VERSION && !acceptedSnapshots.has(di) && asArray(normalizedOutline.days)[di]) {
+    // 仅起草缺少的日期；已起草日期（含私有修订候选）的原大纲、选路
+    // 状态和证据也保留，不被另一天的全局初稿兜底顺带改写。
+    if (!acceptedSnapshots.has(di) && asArray(normalizedOutline.days)[di]) {
       acceptedSnapshots.set(di, JSON.parse(JSON.stringify(normalizedOutline.days[di])));
     }
   });

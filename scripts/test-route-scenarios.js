@@ -8,8 +8,11 @@ const path = require('path');
 const envPath = path.resolve(__dirname, '..', '.env.local');
 const replayPath = process.argv.includes('--replay')
   ? process.argv[process.argv.indexOf('--replay') + 1] : '';
+// 只读导出的真实任务快照；恢复测试仅在本地调用模型，不写微信数据库。
+const incidentPath = process.argv.includes('--incident')
+  ? process.argv[process.argv.indexOf('--incident') + 1] : '';
 const liveReview = process.argv.includes('--live-review');
-const offline = process.argv.includes('--offline') || (!!replayPath && !liveReview);
+const offline = process.argv.includes('--offline') || (!!(replayPath || incidentPath) && !liveReview);
 if (!offline && !fs.existsSync(envPath)) {
   console.error('缺少 .env.local（需配置 LLM_PROVIDER / LLM_API_KEY / LLM_MODEL；AMAP_KEY 用于酒店名称核验）');
   process.exit(1);
@@ -25,7 +28,6 @@ if (!offline && fs.existsSync(envPath)) fs.readFileSync(envPath, 'utf8').split(/
   }
   process.env[match[1]] = parsed;
 });
-
 const P = require('../cloudfunctions/generatePlan/plan');
 const { searchHotelPoi, searchHotelsNearby } = require('../cloudfunctions/generatePlan/geocode');
 const { validateOutlineHotels } = require('../cloudfunctions/generatePlan/hotel-validation');
@@ -304,7 +306,8 @@ function inspectScenario(scenario, outline, items) {
   });
   const noSelfDrive = items.filter((item) => /自驾|开车|驾车|驾驶|驱车|骑(?:行)?(?:电动摩托车|摩托车)|租(?:赁|用|车)?(?:电动摩托车|摩托车)/
     .test(`${item.activity || ''} ${item.note || ''}`.split(/[，,。；;]/)
-      .filter((part) => !/禁止|不要|不可|不允许|不得|避免|无需|司机驾驶|由司机|非自驾|不自驾/.test(part)).join('；')));
+      .filter((part) => !/禁止|不要|不可|不允许|不得|避免|无需|司机驾驶|由司机|非自驾|不自驾/.test(part))
+      .join('；').replace(/(?:离开|离开了)车站/g, '离站')));
   if (noSelfDrive.length) {
     issues.push(`${noSelfDrive.length} 条行程出现未授权的本人驾驶文案`);
     noSelfDrive.forEach((item) => console.error(`  驾驶文案条目：第${Number(item.dayIndex || 0) + 1}天 ${fmt(item)}`));
@@ -376,6 +379,8 @@ function inspectScenario(scenario, outline, items) {
       noDrive: true,
       preferRail: /高铁|动车/.test(profile.transport), date: day.date, points: day.executionPoints || {},
       city: day.city, hotel: day.hotel, overnight: day.overnight,
+      hotelLocationAliases: day.hotelLocationAliases || [], hotelPoiVerified: day.hotelPoiVerified,
+      previousHotelLocationAliases: (outline.days[dayIndex - 1] || {}).hotelLocationAliases || [],
       required: require('../cloudfunctions/generatePlan/execution-review').requiredPlacesForDay(profile, outline.days, dayIndex),
       previousHotel: (outline.days[dayIndex - 1] || {}).hotel,
       previousMeals: (outline.days[dayIndex - 1] || {}).executionMealNames || [], knownMeals: day.meals || [], repeatMeals: profile.extra,
@@ -911,7 +916,7 @@ async function runScenario(scenario) {
   let alarms = originalAlarms.concat(P.backfillDetailAlarms(profile, outline, finalItems, originalAlarms));
   alarms = P.linkBookingAlarms(alarms, finalItems);
   alarms = P.normalizeBookingAlarmKinds(alarms, finalItems, profile);
-  alarms = P.dedupeBookingAlarmRecords(alarms);
+  alarms = P.dedupeBookingAlarmRecords(alarms, finalItems);
   alarms = P.annotateAlarmUsage(alarms, finalItems, outline);
   const bookingAlarms = alarms.filter((alarm) => ['train', 'plane', 'bus', 'ticket', 'hotel'].includes(alarm.type));
   issues.push(...inspectBookingReminders(profile, finalItems, alarms));
@@ -962,6 +967,8 @@ async function runScenario(scenario) {
 
 function inspectBookingReminders(profile, items, alarms) {
   const issues = [];
+  if (P.dedupeBookingAlarmRecords(alarms, items).length !== alarms.length)
+    issues.push('同一实际票务/住宿事项仍存在可归并的重复提醒');
   const needsBooking = (item, type) => !P.bookingStatusMatches(profile,
     `${item.activity || ''} ${item.startLocation || ''} ${item.endLocation || ''}`, type)
     && !/(?:已购票|已购买|已预约|无需再购票)/.test(item.note || '');
@@ -982,7 +989,9 @@ function inspectBookingReminders(profile, items, alarms) {
     if (/景区|梯田|瀑布|山|公园|沟|田园|博物馆/.test(parent)
       && !P.bookingStatusMatches(profile, `${parent} 门票`, 'ticket')
       && !alarms.some((alarm) => alarm.type === 'ticket'
-        && `${alarm.title || ''} ${alarm.bookingInfo || ''}`.includes(parent))) {
+        && (`${alarm.title || ''} ${alarm.bookingInfo || ''}`.includes(parent)
+          || alarm.linkedItemId === item.itemId
+            && require('../cloudfunctions/generatePlan/ticket-products').includedAdmission(alarm.ticketProduct)))) {
       issues.push(`最终景区缺少预约核验提醒：${parent}`);
     }
   });
@@ -1000,9 +1009,24 @@ function inspectBookingReminders(profile, items, alarms) {
 }
 
 (async () => {
-  if (replayPath) {
-    const saved = JSON.parse(fs.readFileSync(path.resolve(replayPath), 'utf8'));
-    const scenario = scenarios.concat(ticketScenarios).find((entry) => entry.input.dest === saved.input.dest);
+  if (replayPath || incidentPath) {
+    const record = JSON.parse(fs.readFileSync(path.resolve(replayPath || incidentPath), 'utf8'));
+    const publication = require('../cloudfunctions/generatePlan/publication');
+    if (incidentPath && !(record.job && record.job.input && record.job.input.outline && record.trip))
+      throw new Error('事故重放需要只读导出的job.input.outline和trip快照');
+    const saved = incidentPath ? { input: record.input || record.job.input, outline: record.job.input.outline,
+      items: publication.collectGenerationRows((record.trip.items || []).concat(record.trip.genDraftItems || []), record.job.input.outline) } : record;
+    const originalPublished = incidentPath ? (record.trip.items || []).filter((row) =>
+      publication.finalizedDays(record.trip.items || []).has(Number(row.dayIndex || 0))) : [];
+    const publishedSnapshots = new Map([...publication.finalizedDays(originalPublished)].map((di) =>
+      [di, JSON.stringify(originalPublished.filter((row) => Number(row.dayIndex || 0) === di))]));
+    const assertPublishedUnchanged = (rows) => publishedSnapshots.forEach((snapshot, di) => {
+      if (JSON.stringify(rows.filter((row) => Number(row.dayIndex || 0) === di)) !== snapshot)
+        throw new Error(`恢复测试意外改写已发布的第${di + 1}天`);
+    });
+    const scenario = incidentPath ? { name: record.trip.title || '真实任务恢复', input: saved.input,
+      inspectLongji: /龙脊梯田/.test(saved.input.dest || '') }
+      : scenarios.concat(ticketScenarios).find((entry) => entry.input.dest === saved.input.dest);
     if (!scenario) throw new Error('重放文件不属于指定测试路线');
     // 验收必须使用实际生成时的输入，不能丢掉行李/时刻等补充要求。
     scenario.input = saved.input;
@@ -1015,7 +1039,7 @@ function inspectBookingReminders(profile, items, alarms) {
     }
     let items = liveReview ? saved.items : P.auditMergedDetailItems(saved.items, saved.outline, saved.input);
     let alarms = saved.alarms || [];
-    if (liveReview) {
+    if (liveReview && !incidentPath) {
       const hotels = saved.outline.days.map((day) => day.hotel);
       await validateOutlineHotels({ outline: saved.outline }, saved.input, searchHotelPoi, searchHotelsNearby);
       const changed = new Set();
@@ -1041,6 +1065,8 @@ function inspectBookingReminders(profile, items, alarms) {
         const out = Object.assign({}, row); delete out.executionReview; return out;
       });
       requested.forEach((di) => {
+        // 显式重查历史日时仅放开对应快照；其余历史发布日期仍逐字保留。
+        publishedSnapshots.delete(di);
         const day = saved.outline.days[di];
         day.ticketProducts = day.ticketProducts || (day.executionEvidence || {}).ticketProducts || [];
         delete day.executionEvidence;
@@ -1066,8 +1092,15 @@ function inspectBookingReminders(profile, items, alarms) {
             reviewItems: items, attempts, preservePublishedDays: true,
           });
           const fresh = new Set(result.items.map((row) => Number(row.dayIndex || 0)));
-          items = items.filter((row) => !fresh.has(Number(row.dayIndex || 0))).concat(result.items);
-          items = auditPublishedRows(items, saved.outline, saved.input);
+          if (incidentPath) {
+            const state = publication.publicationState({ items, genDraftItems: [] }, result, saved.outline);
+            items = state.published.concat(state.pending);
+            assertPublishedUnchanged(items);
+            console.log(`恢复第${round + 1}轮：已发布${state.progress.done}/${state.progress.total}天；本轮日期${[...fresh].map((di) => di + 1).join('、')}；阶段${saved.outline.days.filter((day) => day.executionReviewPhase).map((day) => `${day.date}:${day.executionReviewPhase}`).join('，')}`);
+          } else {
+            items = items.filter((row) => !fresh.has(Number(row.dayIndex || 0))).concat(result.items);
+            items = auditPublishedRows(items, saved.outline, saved.input);
+          }
           attempts = result.attempts;
           if (!result.partial) alarms = result.alarms || [];
           checkpoint();

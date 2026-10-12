@@ -6,7 +6,7 @@ cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
 const COL = 'ticket_alarms';
 const COL_TRIP = 'trips';
-const ALARM_VERSION = 'v1.7-ticket-intent-filter';
+const ALARM_VERSION = 'v1.8-admission-bundle-scope';
 const { filterTicketAlarms } = require('./ticket-products');
 const { synchronizeTrip, usageInfoForItem } = require('./booking-sync');
 const {

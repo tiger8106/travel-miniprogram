@@ -7,6 +7,7 @@ const P = require('../cloudfunctions/generatePlan/plan');
 const R = require('../cloudfunctions/generatePlan/execution-review');
 const Pub = require('../cloudfunctions/generatePlan/publication');
 const L = require('../cloudfunctions/generatePlan/llm');
+const geo = require('../cloudfunctions/generatePlan/geocode');
 const copy = (value) => JSON.parse(JSON.stringify(value));
 const row = (di, finalized = false) => Object.assign({ dayIndex: di, startTime: '20:00', endTime: '21:00',
   category: 'hotel', activity: '回房休息', endLocation: '甲城晨光酒店', note: '' }, finalized ? { executionReview: R.REVIEW_VERSION } : {});
@@ -53,6 +54,7 @@ const db = { command: { lt: (value) => ({ lt: value }) }, collection(name) {
 let buildCalls = 0;
 let outlineCalls = 0;
 let consumes = 0;
+let differentMapPoi = true;
 const fakeCloud = { init() {}, DYNAMIC_CURRENT_ENV: 'test', getWXContext: () => ({ OPENID: 'user' }),
   database: () => db, callFunction: async (call) => {
     if (call.data.action === 'consume') consumes++;
@@ -61,6 +63,10 @@ const fakeCloud = { init() {}, DYNAMIC_CURRENT_ENV: 'test', getWXContext: () => 
 const originalLoad = Module._load;
 Module._load = function (request, parent, isMain) {
   if (request === 'wx-server-sdk') return fakeCloud;
+  if (parent && /generatePlan\/index\.js$/.test(parent.filename) && request === './geocode') return Object.assign({}, geo, {
+    geocodeBatch: async (names) => new Map(names.map((name) => [name, { lon: 110, lat: 25, city: '甲城',
+      matchedName: differentMapPoi ? `${name}（停车场）` : name, poiAddress: '甲城真实地址' }])),
+  });
   if (parent && /generatePlan\/index\.js$/.test(parent.filename) && request === './plan') return Object.assign({}, P, {
     generateOutline: async (profile, options) => {
       outlineCalls++;
@@ -101,6 +107,7 @@ Module._load = originalLoad;
   busy = await generate.main({ action: 'resume', jobId: 'job', expectRound: 4, runnerId: 'worker' });
   assert(busy.data.busy); assert.equal(buildCalls, 0);
   Object.assign(job, { leaseUntil: 0, leaseOwner: '' });
+  let initialPublished = JSON.stringify(trip.items);
   let result = await generate.main({ action: 'resume', jobId: 'job', expectRound: 4, runnerId: 'test' });
   assert.equal(result.code, 0); assert.equal(job.hotelDone, true);
   assert.equal(job.leaseUntil, 0, '已落库轮次须立即释放租约，后台不等待70秒');
@@ -111,12 +118,20 @@ Module._load = originalLoad;
   assert.equal(job.leaseUntil, 0); assert.equal(job.leaseOwner, '');
   assert.equal(consumes, 0, '半成品/未验收日期不能扣额度或计成功次数');
   assert.equal(trip.genDraftItems.length, 1); assert.equal(trip.genDraftItems[0].dayIndex, 4);
+  // 首轮会给旧夹具补稳定ID；真实已发布条目已具有该身份，后续不得改写。
+  initialPublished = JSON.stringify(trip.items);
   const publicGet = await itinerary.main({ action: 'get', tripId: 'trip' });
   assert(!('genDraftItems' in publicGet.data)); assert(!('genDraftOutline' in publicGet.data));
   const publicList = await itinerary.main({ action: 'list', compact: true, fullTripId: 'trip' });
   assert(!('genDraftItems' in publicList.data[0]));
   result = await generate.main({ action: 'resume', jobId: 'job', expectRound: job.round, runnerId: 'test' });
   assert.equal(result.code, 0); assert.equal(trip.genProgress.done, 5); assert.equal(trip.items.length, 5);
+  assert.equal(JSON.stringify(trip.items.filter((it) => it.dayIndex < 4)), initialPublished,
+    '续跑地图写回不能修改此前已发布日期');
+  assert.equal(trip.items.find((it) => it.dayIndex === 4).endLocation, '甲城晨光酒店');
+  assert(!trip.items.find((it) => it.dayIndex === 4).endLon, '停车场等不同POI不能冒充已审计酒店坐标');
+  assert.equal(job.input.outline.days[4].hotel, '甲城晨光酒店', '发布定位不能替换已审计酒店身份');
+  differentMapPoi = false;
   const accepted = JSON.stringify(trip.items);
   // 未知接送服务可以警示；该候选本身须已具备可执行的返家闭环。
   job.input.outline.days[5].executionCandidate = [{ ...row(5), category: 'transport',
@@ -130,9 +145,11 @@ Module._load = originalLoad;
   assert.equal(JSON.stringify(trip.items.filter((it) => it.dayIndex < 5)), accepted, '已发布的五天不能被兜底修改');
   assert(trip.items.some((it) => it.dayIndex === 5 && /待确认/.test(it.note)));
   assert.equal(trip.genWarningCount, 1);
+  assert.equal(trip.items.find((it) => it.dayIndex === 5).endLon, 110, '同址地图命中仍可补坐标');
   assert.equal(consumes, 1, '全部验收并成功入库后才调用一次幂等扣费');
   console.log('✓ 实际云函数续跑：候选隐藏、4→5→6进度不回退、限时收尾完整且备注待确认');
   console.log('✓ 执行中租约防同端/跨端重入，持久化成功即释放，下一轮不等70秒');
+  console.log('✓ 发布只定位新增日期；不同POI不改名/串坐标，真实同址仍补定位');
   job.input.generationRequestId = 'this-start';
   assert.equal((await generate.main({ action: 'jobStatus' })).data.job, null, '普通轮询不重现历史完成任务');
   assert.equal((await generate.main({ action: 'jobStatus', includeCompleted: true,
@@ -146,6 +163,9 @@ Module._load = originalLoad;
   const readOnly = await generate.main({ action: 'inspectJobs' });
   assert.equal(readOnly.code, 0); assert(!readOnly.data.jobs.some((j) => j.jobId === 'not-owned'));
   assert(!('input' in readOnly.data.jobs[0])); assert(!('_openid' in readOnly.data.jobs[0]));
+  collections.users[0].role = 'super';
+  assert.equal((await generate.main({ action: 'inspectJobs' })).code, 0,
+    '超级管理员与普通管理员使用同一诊断权限，仍只读本人任务');
   const loggedContext = fakeCloud.getWXContext;
   fakeCloud.getWXContext = () => ({});
   assert.equal((await generate.main({ action: 'inspectJobs', openid: 'user' })).code, -1,

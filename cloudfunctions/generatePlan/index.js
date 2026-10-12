@@ -26,6 +26,7 @@ const {
 } = require('./plan');
 const { geocodeBatch, cityTokens, searchHotelPoi, searchHotelsNearby } = require('./geocode');
 const { validateOutlineHotels } = require('./hotel-validation');
+const { REVIEW_VERSION, sameEndpoint } = require('./execution-review');
 const { lookupSchedules, canLookupSchedules, canSearch } = require('./schedule');
 // 远程配置（管理后台在线改的 KEY）：在每次调用开始时把覆盖值写进 process.env，
 // 下游模块读环境变量的方式一行都不用改。读不到就静默沿用环境变量，不影响生成。
@@ -41,7 +42,7 @@ const COL_SCHED = 'schedule_cache';
 const SCHED_TTL_MS = 36 * 3600 * 1000;
 
 // 生成引擎版本（用于确认线上跑的是哪一版）
-const GEN_VERSION = 'v2.23-review-recovery-handoff';
+const GEN_VERSION = 'v2.24-lodging-stage-recovery';
 const { publicationState, collectGenerationRows } = require('./publication');
 
 async function generateOutlineWithHotelCheck(input, opts) {
@@ -138,11 +139,15 @@ async function geocodeItems(items, regionOf, opts, cityOf) {
       items.forEach((it) => {
         const startName = String(it.startLocation || '').trim();
         const endName = String(it.endLocation || '').trim();
-        const s = coordMap.get(startName);
-        const e = coordMap.get(endName);
+        // 已审计的地点名称属于执行身份，地图的相似命中不能在发布时
+        // 将车站、住宿片区或景点偷偷换成另一个 POI/行政地址。
+        const compatible = (point, name) => point && (it.executionReview !== REVIEW_VERSION
+          || !point.matchedName || sameEndpoint(point.matchedName, name));
+        const s = compatible(coordMap.get(startName), startName) ? coordMap.get(startName) : null;
+        const e = compatible(coordMap.get(endName), endName) ? coordMap.get(endName) : null;
         if (s) {
           it.startLon = s.lon; it.startLat = s.lat;
-          if (s.matchedName && s.matchedName !== it.startLocation) {
+          if (it.executionReview !== REVIEW_VERSION && s.matchedName && s.matchedName !== it.startLocation) {
             ['activity', 'note', 'bookingInfo'].forEach((key) => {
               if (typeof it[key] === 'string') it[key] = it[key].split(it.startLocation).join(s.matchedName);
             });
@@ -152,7 +157,7 @@ async function geocodeItems(items, regionOf, opts, cityOf) {
         if (e) {
           it.endLon = e.lon; it.endLat = e.lat;
           if (e.poiAddress) it.endPoiAddress = e.poiAddress;
-          if (e.matchedName && e.matchedName !== it.endLocation) {
+          if (it.executionReview !== REVIEW_VERSION && e.matchedName && e.matchedName !== it.endLocation) {
             ['activity', 'note', 'bookingInfo'].forEach((key) => {
               if (typeof it[key] === 'string') it[key] = it[key].split(it.endLocation).join(e.matchedName);
             });
@@ -311,6 +316,8 @@ async function savePlan(openid, plan, tripId, jobId, outline, input) {
   }
 
   const publication = publicationState(oldData, plan, outline);
+  const freshPublishedDays = new Set((plan.items || []).filter((row) => row.executionReview === REVIEW_VERSION)
+    .map((row) => Number(row.dayIndex || 0)));
   storedItems = publication.published.sort((a, b) => (a.dayIndex || 0) - (b.dayIndex || 0));
   // 完成状态也以实际落库的整天为准，不能相信候选生成器提前报完。
   if (!plan.partial && publication.progress.done < publication.progress.total) {
@@ -359,7 +366,9 @@ async function savePlan(openid, plan, tripId, jobId, outline, input) {
     }
   }
   plan.items = storedItems;
-  await geocodeItems(plan.items, regionOf, { deadlineAt: Date.now() + geoBudgetMs }, cityOf);
+  // 只补本轮新发布日期的坐标；旧日期不反复查询、改名或覆盖已存信息。
+  await geocodeItems(plan.items.filter((row) => freshPublishedDays.has(Number(row.dayIndex || 0))),
+    regionOf, { deadlineAt: Date.now() + geoBudgetMs }, cityOf);
   // 地图纠正住宿名称后，预订信息也必须同步；不能正文唯美四季、提醒仍是异地分店。
   if (outline) {
     storedItems.filter((item) => item.category === 'hotel' && item.endLocation
@@ -1112,7 +1121,7 @@ exports.main = async (event, context) => {
     if (!ctxOpenid) return { code: -1, msg: '无权限' };
     const db = cloud.database();
     const users = await db.collection('users').where({ _openid: openid }).limit(1).get();
-    if (!users.data || !users.data[0] || users.data[0].role !== 'admin') return { code: -1, msg: '无权限' };
+    if (!users.data || !users.data[0] || !['admin', 'super'].includes(users.data[0].role)) return { code: -1, msg: '无权限' };
     const recent = await db.collection(COL_JOB).where({ _openid: openid }).orderBy('updatedAt', 'desc').limit(5).get();
     return { code: 0, data: { version: GEN_VERSION, jobs: (recent.data || []).map((job) => ({
       jobId: job._id, kind: job.kind || 'detail', title: job.title, status: job.status, round: job.round,

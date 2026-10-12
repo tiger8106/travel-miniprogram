@@ -5,6 +5,7 @@ const evidence = require('./route-evidence');
 const schedules = require('./schedule');
 const { normalizeTicketProducts, normalizeTicketPolicies, ticketAccessOnly, ticketKey: ticketPlaceKey } = require('./ticket-products');
 const { solarEventMinute } = require('./solar-time');
+const { canonicalLodgingLocation, lodgingAreaOf, insideLodging } = require('./lodging-location');
 const REVIEW_VERSION = 'v7';
 // 完整审计通常输出整天时间线；检索后只剩二十余秒容易截在请求中途。
 // 先存证据让下一轮取得完整预算，不缩输出或减少验收换速度。
@@ -307,6 +308,7 @@ function sameWaterEndpoint(a, b) {
 
 function sameLodging(a, b) {
   if (sameEndpoint(a, b)) return true;
+  if (sameEndpoint(a, lodgingAreaOf(b))) return true;
   const area = /^(.*?)\s*(?:经济型|舒适型|品质型)住宿片区$/.exec(String(b || ''));
   return !!(area && area[1] && /片区|区域|市中心|附近|周边/.test(a || '')
     && !/酒店|民宿|宾馆|客栈|饭店/.test(a || '') && String(a).includes(area[1].replace(/市$/, '').trim()));
@@ -605,6 +607,10 @@ function normalizeReviewRows(raw, dayIndex, context = {}) {
   raw = (raw || []).map((entry) => {
     if (!entry) return entry;
     const row = Object.assign({}, entry);
+    ['startLocation', 'endLocation'].forEach((field) => {
+      row[field] = canonicalLodgingLocation(row[field], context.hotel, context.hotelLocationAliases, context.hotelPoiVerified);
+      row[field] = canonicalLodgingLocation(row[field], context.previousHotel, context.previousHotelLocationAliases);
+    });
     const range = String(row.time || row.timeRange || row.time_range || '')
       .match(/^(\d{1,2}:\d{2})\s*[-–—~～至]\s*(\d{1,2}:\d{2})$/);
     row.startTime = row.startTime || row.start_time || (minute(row.start) !== null ? row.start : '') || (range && range[1]) || '';
@@ -985,7 +991,14 @@ function normalizeReviewRows(raw, dayIndex, context = {}) {
 
 function executionIssues(rows, context) {
   const issues = [];
-  const sorted = rows.slice().sort((a, b) => (minute(a.startTime) ?? 1440) - (minute(b.startTime) ?? 1440));
+  const sorted = rows.map((row) => {
+    const result = Object.assign({}, row);
+    ['startLocation', 'endLocation'].forEach((field) => {
+      result[field] = canonicalLodgingLocation(result[field], context.hotel, context.hotelLocationAliases, context.hotelPoiVerified);
+      result[field] = canonicalLodgingLocation(result[field], context.previousHotel, context.previousHotelLocationAliases);
+    });
+    return result;
+  }).sort((a, b) => (minute(a.startTime) ?? 1440) - (minute(b.startTime) ?? 1440));
   if (!sorted.length) return ['没有行程条目'];
   sorted.forEach((row, i) => {
     const start = minute(row.startTime), end = minute(row.endTime);
@@ -1204,8 +1217,12 @@ function executionIssues(rows, context) {
     const departures = [...new Set(arrivals.flatMap((fact) => Array.isArray(fact.departures) ? fact.departures : []))];
     if (departures.length && !departures.includes(row.startTime)) issues.push(`游船索引${index}发船${row.startTime}不在已检索运营窗口${departures.join('、')}内，请调整前序接驳或选择可赶上的真实船型/码头`);
   });
-  const firstSight = sorted.findIndex((row) => row.category === 'sight' && !/日出/.test(row.activity));
-  const lastSight = sorted.reduce((index, row, i) => row.category === 'sight' ? i : index, -1);
+  // 外部游线结束后在准确住宿的露台观景，不等于还在景区游线中途。
+  // “酒店附近”仍是独立外部地点，不能借内部设施例外绕过折返校验。
+  const outsideSight = (row) => row.category === 'sight'
+    && !insideLodging(row.endLocation || row.startLocation, context.hotel, context.hotelLocationAliases);
+  const firstSight = sorted.findIndex((row) => outsideSight(row) && !/日出/.test(row.activity));
+  const lastSight = sorted.reduce((index, row, i) => outsideSight(row) ? i : index, -1);
   let checkins = 0;
   let checkouts = 0;
   let checkedInAt = -1;
@@ -1268,8 +1285,7 @@ function executionIssues(rows, context) {
     if (row.category === 'hotel' && /入住/.test(action) && sorted.slice(0, i).some((entry) =>
       sameEndpoint(entry.endLocation, context.hotel) && /入住.*(?:放下|寄存|放置)/.test(positiveInstructions(entry.activity))
       && minute(row.startTime) - minute(entry.endTime) > 30)) issues.push('到达时已入住并放下行李，晚间应回房而非再次入住');
-    if (actualCheckin && ((row.category === 'hotel' && ++checkins > 1)
-      || (row.category === 'transport' && checkins > 0))) {
+    if (actualCheckin && ++checkins > 1) {
       issues.push('同一天重复办理入住或重复放下大件行李');
     }
     if (context.sameHotel && /办理入住|重新入住|放下(?:大件)?行李/.test(text)) issues.push('连住期间重复入住或放下大件行李');
@@ -1607,6 +1623,8 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
       preferRail: /高铁|动车|铁路/.test(profile.transport || '')
         && !/飞机|航班|航空|接受飞行/.test(positiveInstructions(profile.extra)),
       required, highlights: day.highlights || [], scopeCandidates: profile.mustVisit || [], official, references: referenceSchedules(day), city: day.city, date: day.date, hotel: day.hotel, overnight: day.overnight,
+      hotelLocationAliases: day.hotelLocationAliases || [], hotelPoiVerified: day.hotelPoiVerified,
+      previousHotelLocationAliases: previous.hotelLocationAliases || [],
       previousStorage: previousStoragePlaces(options.allItems || items, dayIndex),
       scheduleChoices: day.executionScheduleChoices || [],
       sameHotel: !!day.hotel && sameEndpoint(day.hotel, (days[dayIndex - 1] || {}).hotel),
@@ -1632,7 +1650,17 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
       startLocation: row.startLocation, endLocation: row.endLocation, note: row.note,
     }));
     context.solar = facts;
-    const candidate = Array.isArray(day.executionCandidate) ? day.executionCandidate : original;
+    const storedCandidate = Array.isArray(day.executionCandidate) ? day.executionCandidate : original;
+    const candidate = storedCandidate.map((row) => {
+      const result = Object.assign({}, row);
+      ['startLocation', 'endLocation'].forEach((field) => {
+        result[field] = canonicalLodgingLocation(result[field], context.hotel, context.hotelLocationAliases, context.hotelPoiVerified);
+        result[field] = canonicalLodgingLocation(result[field], context.previousHotel, context.previousHotelLocationAliases);
+      });
+      return result;
+    });
+    const lodgingLocationsChanged = candidate.some((row, i) =>
+      row.startLocation !== storedCandidate[i].startLocation || row.endLocation !== storedCandidate[i].endLocation);
     // 此轮只补查班次并持久化，下轮再请求重排，避免长查询挤占云函数预算。
     day.executionReviewPhase = 'schedules';
     if (await collectExecutionSchedules(day, candidate, context, deadline)) return original;
@@ -1691,6 +1719,17 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
     context.sailingWindows = operating.sailingWindows || [];
     context.aliases = operating.aliases || [];
     context.localMobility = operating.localMobility || [];
+    const currentCandidateIssues = executionIssues(candidate, context);
+    // 旧任务可能因片区展示标签误判而进入整天重排。只在本轮确实统一了
+    // 住宿地点、原候选已审计且现存错误仅为餐饮重复时，恢复局部修订。
+    // 仍要求模型完整审计；真实动线/行李/时刻错误不走此路径，不重置预算。
+    if (lodgingLocationsChanged && day.executionForceReroute && !day.executionCandidateUnaudited
+      && currentCandidateIssues.length && currentCandidateIssues.every((issue) => /重复推荐主菜/.test(issue))
+      && (day.executionReviewIssues || []).some((issue) => /收尾住宿地错误|没有有效寄存/.test(issue))) {
+      day.executionForceReroute = false;
+      day.executionRepairFailures = 0;
+      day.executionReviewIssues = currentCandidateIssues;
+    }
     if (!facts.length) facts.push(...deriveSolarWindows(candidate, context));
     const requirements = {};
     ['origin', 'dest', 'startDate', 'endDate', 'goTime', 'backTime', 'party', 'people', 'budget', 'pace',
@@ -1755,14 +1794,14 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
       // 已证实接续不可行时不用重复喂入那组错误列车时间线，防止模型锚定旧方案。
       const infeasibleDay = needsWholeDayRebuild(day, candidate, context);
       if (infeasibleDay) day.executionForceReroute = true;
-      const requestPrompt = infeasibleDay ? `从零重排这一天，只输出完整JSON。旧估算窗口与已查班次或交通下限冲突，不能复用旧时间线、只修最后一项或压缩路程。尤其用户选择高铁/动车优先，应优先从实际铁路车站经真实枢纽转场，景区段用司机接送。
-用户需求：${JSON.stringify(requirements)}。日期${day.date}，昨晚住${previous.hotel || previous.overnight}，今晚必须回${day.hotel || day.overnight}。用户本日必须覆盖：${JSON.stringify(required)}。大纲景点候选：${JSON.stringify(day.highlights || [])}；按真实剩余时间择取，不能把模型自动候选全当用户必去点、为了塞满候选而编造接驳或省略整天后半段。已核验的本日核心游线与用户明确要求优先，可选点来不及则注明舍弃/改日建议。
-本日已定位的独立核心候选：${JSON.stringify(locatedCorePlaces(context))}；用户明确必去的不可遗漏，自动候选时间不足可不安排；凡宣称游览了就须分别有sight条目并填实际地点，不能只在别处标题里提及。昨日前一天已推荐主菜：${JSON.stringify(context.previousMeals)}，今日换其他当地菜。最后必须有返回今晚住宿休息的hotel条目，endLocation完整填写“${day.hotel || day.overnight}”，不能用不带城市的“经济型片区”等泛称替代，也不能停在晚餐结束。
+      let requestPrompt = infeasibleDay ? `从零重排这一天，只输出完整JSON。旧估算窗口与已查班次或交通下限冲突，不能复用旧时间线、只修最后一项或压缩路程。尤其用户选择高铁/动车优先，应优先从实际铁路车站经真实枢纽转场，景区段用司机接送。
+用户需求：${JSON.stringify(requirements)}。日期${day.date}，昨晚住${previous.hotel || previous.overnight}，${context.isLast ? `最终在${profile.backTime}回到${profile.origin}，不虚构当晚住宿` : `今晚必须回${day.hotel || day.overnight}`}。用户本日必须覆盖：${JSON.stringify(required)}。大纲景点候选：${JSON.stringify(day.highlights || [])}；按真实剩余时间择取，不能把模型自动候选全当用户必去点、为了塞满候选而编造接驳或省略整天后半段。已核验的本日核心游线与用户明确要求优先，可选点来不及则注明舍弃/改日建议。
+本日已定位的独立核心候选：${JSON.stringify(locatedCorePlaces(context))}；用户明确必去的不可遗漏，自动候选时间不足可不安排；凡宣称游览了就须分别有sight条目并填实际地点，不能只在别处标题里提及。${context.isLast ? `最后必须是返回${profile.origin}的真实接驳，按${profile.backTime}到家，不安排返程日晚住宿或回房` : `最后必须有返回今晚住宿休息的hotel条目，endLocation完整填写“${day.hotel || day.overnight}”，不能用不带城市的“经济型片区”等泛称替代，也不能停在晚餐结束`}。
 大纲游线说明（保持明确的游览顺序）：${day.note || '按实际节点顺路游览，避免折返'}。
 交通下限证据：${JSON.stringify(context.routeFacts)}；景区开放/纯游览窗口：${JSON.stringify(context.visitWindows)}；船舶起终点：${JSON.stringify(context.sailingWindows)}；同址别名：${JSON.stringify(context.aliases)}；骑行资料：${JSON.stringify(context.localMobility)}。
 已选具体铁路及其不可挪动时刻：${JSON.stringify(context.official.concat(context.references))}；其他新选铁路暂不填车次号，代码将补查近期运行图并进一步排接续，不准编造列车号。不要因为未开售就放弃铁路。
 太阳固定观景窗口：${JSON.stringify(facts)}；不要将上山接驳和实际观景同时锁成重叠。每个具名核心观景点分成独立游览条目，地点填实际观景点，点间步行/接驳分条，不能把几个名字塞进一个标题而不实际经过。原位置的未取回寄存不能延续到另一个基地；若当天换住处又要上山游览，可从入口安排司机接送/住宿搬运协助把大件送到本晚住宿，再轻装开始游线，说明服务仍需联系核实，不编造已预约或已送达。
-先从列车发车时刻倒推：进站安检至少40分钟、再留真实路程、取回行李和还车办理时间，之前才是游览可用窗口。新选铁路已锁定，不能继续使用旧估算的接驳时间。早餐、退房带走行李、到景点交通与内部游览分条；需要寄存须同地点取回，全部竹筏/骑行结束后才取回大件，取回后直接转场。骑行明确按天租车、取车和原地点还车，不得只写骑行而不交代车的去向。没有必要不回旧酒店。上午提前出发安排必要游览与沿途简餐，缩短可选等待而非游览下限。必须安排晚餐并在午夜前入住回房，所有startTime/endTime为HH:mm且结束大于开始，不允许24:00或00:00收尾。
+先从列车发车时刻倒推：进站安检至少40分钟、再留真实路程、取回行李和还车办理时间，之前才是游览可用窗口。新选铁路已锁定，不能继续使用旧估算的接驳时间。早餐、退房带走行李、到景点交通与内部游览分条；需要寄存须同地点取回，全部竹筏/骑行结束后才取回大件，取回后直接转场。骑行明确按天租车、取车和原地点还车，不得只写骑行而不交代车的去向。没有必要不回旧酒店。上午提前出发安排必要游览与沿途简餐，缩短可选等待而非游览下限。${context.isLast ? '按实际返家时间安排用餐，禁止为凑晚餐拖延到家' : '必须安排晚餐并在午夜前入住回房'}，所有startTime/endTime为HH:mm且结束大于开始，不允许24:00或00:00收尾。
 上轮问题：${JSON.stringify(previousIssues)}。输出 {"items":[{"startTime":"HH:mm","endTime":"HH:mm","category":"transport|hotel|food|sight|other","activity":"活动","startLocation":"一个准确起点","endLocation":"一个准确终点","transportType":"train|bus|ride|ship|walk或空","note":"简短执行要点","mealNames":[]}]}。删除旧大巴链重选实际路线，保留必须游览和正确酒店，不能复制旧方案。输出完整当天至回房，备注每条最多60字，不输出推理、冲突风险长文或截断的半日。`
         : context.accessConstraint ? `重新制作纯交通返程日的完整时间线，仅输出JSON。不要复用旧铁路接驳：${JSON.stringify(context.accessConstraint)}
 用户需求：${JSON.stringify(requirements)}；日期：${day.date}；昨晚住宿：${previous.hotel || previous.overnight}。
@@ -1773,6 +1812,7 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
 上轮问题：${JSON.stringify(previousIssues)}。
 输出 {"items":[{"startTime":"HH:mm","endTime":"HH:mm","category":"transport|hotel|food|other","activity":"活动","startLocation":"起点","endLocation":"终点","transportType":"train|ride|walk或空","note":"执行要点","mealNames":[]}]}，包含完整当天，不能只返回修改片段。`
         : repairing ? `${prompt}\n本轮改为局部修订，禁止复制整天！以上输出格式由本条覆盖：返回 {"replacements":[{"startIndex":0,"endIndex":0,"items":[修改后的完整条目]}]}。索引是当前条目数组的0起始下标，闭区间；可替换连续几段，但不要改没有问题的段。代码会自动保留其他条目并验收整天。寄存问题要在游览前安排明确地点寄存并在同一地点取回，可从该游览窗口中留出办理时间；不能只补泛泛备注。修订重点：${JSON.stringify(day.executionReviewIssues)}` : prompt;
+      requestPrompt += `\n相邻日期已验收的主菜（只有用户明确要求重复时才可重复）：前一天${JSON.stringify(context.previousMeals)}；后一天${JSON.stringify(context.followingMeals)}。今天推荐不同的当地主菜，不只改mealNames而保留正文旧菜；避开的菜不列入mealNames，去用餐地点的交通不算用餐。\n${context.isFirst ? `首条接驳必须在${profile.goTime || '用户指定时间'}从${profile.origin}启程，不移动这一边界。` : ''}${context.isLast ? `最终接驳在${profile.backTime || '用户指定时间'}回到${profile.origin}，不新增酒店收尾。` : ''}\n住宿与行李执行口径：昨晚住处为${previous.hotel || previous.overnight || '用户出发地'}，${context.isLast ? '本日返家，无当晚酒店' : `本晚住处为${day.hotel || day.overnight}`}，使用给定的实际名称；所有起终点和交通方式只选一个，不用斜杠或“专车或步行”等多选方案。换住宿时退房带齐全部行李，不把大件留在不再返回的旧酒店。前往山上住宿的路段明确选司机/住宿接送或搬运协助，不拖箱走登山步道；服务需联系核实，不虚构已预约。到达后的入住安放或办理寄存必须是单独的实际动作，不能只写“确认已寄存”“轻装准备”或在接驳备注里承诺以后送到。用餐及回房发生在本晚住宿时写准确住宿地点；寄存必须同地点取回，不新增无必要折返。\n独立运营游线与风险提示：${JSON.stringify({ scenicRoute: operating.scenicRoute, warnings: operating.warnings })}。审计这些内容，不因代码检查为空就忽略夜间安全、末班接驳等语义风险。`;
       day.executionReviewPhase = 'audit';
       const auditStarted = Date.now();
       let text = await llm.chatWithRetry([
