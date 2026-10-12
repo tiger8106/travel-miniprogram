@@ -125,10 +125,19 @@ function splitStationLabel(label) {
     .filter(Boolean);
 }
 
+function isUrbanRailPlace(label) {
+  const parts = splitStationLabel(label);
+  return parts.length > 0 && parts.every((part) => /地铁|轻轨|轨道交通/.test(
+    part.replace(/[（(][^）)]*[）)]/g, ''),
+  ));
+}
+
 function resolveStationCandidates(label, stations, limit = 6) {
   const result = [];
   const seen = new Set();
   splitStationLabel(label).forEach((part) => {
+    // 城市名不能让商场地铁站命中同城火车站；括号接驳说明不改身份。
+    if (isUrbanRailPlace(part)) return;
     const key = stationKey(part);
     if (key.length < 2) return;
     const scored = stations.map((s) => {
@@ -189,6 +198,8 @@ function sameCity(a, b) {
  * 已识别的铁路站修复方向。规则只看站点字典和输入结构，不写具体城市特例。
  */
 function routePairs(segment, stations) {
+  // 过滤地铁站后也不能通过城市/出发地兜底补回铁路站。
+  if (isUrbanRailPlace(segment.from) || isUrbanRailPlace(segment.to)) return [];
   let from = resolveStationCandidates(segment.from, stations);
   let to = resolveStationCandidates(segment.to, stations);
   let repaired = false;
@@ -220,7 +231,9 @@ function routePairs(segment, stations) {
   }
   if (!from.length && dayCity && segment.origin) {
     const originCity = cityFromLabel(segment.origin, stations);
-    if (originCity) from = stationsInCity(originCity, stations);
+    // 行程总出发地不是每一段铁路的始发地。仅该段文字本身明确属于
+    // 总出发城市时才补枢纽，不能将外地汽车站自动修成从家出发的列车。
+    if (originCity && cityFromLabel(segment.from, stations) === originCity) from = stationsInCity(originCity, stations);
   }
   if (!to.length && segment.destinationCity) {
     to = stationsInCity(segment.destinationCity, stations);
@@ -406,6 +419,7 @@ module.exports = {
   lookupOfficial,
   parseStations,
   resolveStationCandidates,
+  isUrbanRailPlace,
   routePairs,
   resetCaches,
 };

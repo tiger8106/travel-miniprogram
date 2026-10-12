@@ -40,9 +40,11 @@ function prepareFallbackLodging(day) {
 }
 
 function canonicalLodgingLocation(value, hotel, aliases = [], verified = false) {
-  const base = lodgingAreaOf(hotel);
-  if (!base || verified || !value) return value;
-  const names = [hotel, base, ...aliases].filter(Boolean);
+  if (!hotel || !value) return value;
+  // 准确物业后的客房仍是该酒店，不因已有POI核验而拒绝。
+  // 只有降级片区允许原标签别名；具名物业不合并片区、附近或旧物业。
+  const base = !verified && lodgingAreaOf(hotel);
+  const names = base ? [hotel, base, ...aliases].filter(Boolean) : [hotel];
   if (names.some((name) => key(value) === key(name))) return hotel;
   // 明确住宿名后的客房不是另一个导航地点；泛称“房间”仍不能确定酒店。
   const room = String(value).match(/(?:客房内|房间内|客房|房间)$/);

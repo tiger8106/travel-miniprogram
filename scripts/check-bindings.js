@@ -65,6 +65,7 @@ fs.readdirSync(CF).forEach((dir) => {
   ok(`JS 语法 cloudfunctions/${dir}/index.js`, !err, err || '');
 });
 ['generatePlan/plan.js', 'generatePlan/schedule.js', 'generatePlan/rail12306.js', 'generatePlan/hotel-validation.js', 'generatePlan/lodging-location.js',
+  'generatePlan/luggage-plan.js', 'generatePlan/solar-view.js',
   'generatePlan/execution-review.js', 'generatePlan/llm.js', 'generatePlan/publication.js', 'generatePlan/route-evidence.js', 'generatePlan/solar-time.js',
   'generatePlan/ticket-products.js', 'parseTravelPlan/ticket-products.js', 'ticketAlarm/ticket-products.js', 'parseTravelPlan/ticket-source.js',
   'parseTravelPlan/alarm-infer.js', 'parseTravelPlan/llm.js', 'sendAlarm/alarm-title.js', 'sendAlarm/ticket-products.js'].forEach((rel) => {
@@ -385,8 +386,10 @@ ok('跨天同类体验差异化写入两段 prompt（大纲 7.4 + 细化规则 1
 ok('早餐兜底只在上午补，中午后补午餐而不是早餐',
   /fs <= 11 \* 60 \+ 30/.test(planJs) && /补午餐而不是早餐/.test(planJs));
 ok('细化 prompt 不安排无必要午休折返，保留用户明确休息及实际办理例外',
-  /无用户明确午休要求时白天不回酒店睡觉/.test(planJs)
-    && /15:00 前不安排/.test(planJs) && /必要原地取件或用户明确休息需求除外/.test(planJs));
+  /无用户明确休息要求时不在游线中途回酒店/.test(planJs)
+    && /首次新住宿实际入住放行李、必要原地取大件或用户明确休息需求除外/.test(planJs)
+    && /劳逸适中、大纲自动写的休整不是用户要求午休/.test(planJs)
+    && /不能只删休息而保留去酒店的接驳/.test(planJs));
 ok('大纲 prompt：相邻两天核心片区相距超 1 小时必须换基地',
   /必须换基地/.test(planJs) && /来回通勤 4 小时/.test(planJs));
 ok('大纲 prompt：ml 三餐都要点名（店名或片区+招牌菜）',

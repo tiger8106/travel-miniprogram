@@ -11,6 +11,13 @@ const replayPath = process.argv.includes('--replay')
 // 只读导出的真实任务快照；恢复测试仅在本地调用模型，不写微信数据库。
 const incidentPath = process.argv.includes('--incident')
   ? process.argv[process.argv.indexOf('--incident') + 1] : '';
+// 从原始需求重新生成大纲及所有详细日期，与恢复候选测试明确区分。
+const inputPath = process.argv.includes('--input-file')
+  ? process.argv[process.argv.indexOf('--input-file') + 1] : '';
+if (process.argv.includes('--input-file') && (!inputPath || inputPath.startsWith('--') || replayPath || incidentPath
+  || ['--offline', '--light-luggage', '--route', '--ticket-suite'].some((flag) => process.argv.includes(flag)))) {
+  throw new Error('--input-file 需要原始需求JSON路径，仅用于原始需求全量实测，不能与回放、恢复、离线或改需求选项混用');
+}
 const liveReview = process.argv.includes('--live-review');
 const offline = process.argv.includes('--offline') || (!!(replayPath || incidentPath) && !liveReview);
 if (!offline && !fs.existsSync(envPath)) {
@@ -1143,7 +1150,13 @@ function inspectBookingReminders(profile, items, alarms) {
   const requested = process.argv.includes('--route')
     ? Number(process.argv[process.argv.indexOf('--route') + 1]) : 0;
   const pool = process.argv.includes('--ticket-suite') ? ticketScenarios : scenarios;
-  const selected = requested ? [pool[requested - 1]] : pool;
+  const originalInput = inputPath ? JSON.parse(fs.readFileSync(inputPath, 'utf8')) : null;
+  if (inputPath && (!originalInput || typeof originalInput !== 'object' || Array.isArray(originalInput)
+    || !['origin', 'dest', 'startDate', 'endDate'].every((key) => typeof originalInput[key] === 'string' && originalInput[key].trim()))) {
+    throw new Error('--input-file 应提供包含 origin、dest、startDate、endDate 的原始旅行需求对象');
+  }
+  const selected = originalInput ? [{ name: originalInput.title || '原始旅行需求从头生成', input: originalInput,
+    inspectLongji: /龙脊/.test(originalInput.dest || '') }] : requested ? [pool[requested - 1]] : pool;
   if (process.argv.includes('--light-luggage')) selected.forEach((scenario) => {
     scenario.input.extra += '；只带随身小背包，无大件行李；不增加其它可选景点。';
   });
@@ -1156,5 +1169,6 @@ function inspectBookingReminders(profile, items, alarms) {
   process.exitCode = failed ? 1 : 0;
 })().catch((error) => {
   console.error('路线实测失败：', error.message);
+  if (process.argv.includes('--verbose') && error.stack) console.error(error.stack);
   process.exit(1);
 });

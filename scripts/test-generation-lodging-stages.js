@@ -7,6 +7,11 @@ const E = require('../cloudfunctions/generatePlan/route-evidence');
 const H = require('../cloudfunctions/generatePlan/lodging-location');
 const { validateOutlineHotels } = require('../cloudfunctions/generatePlan/hotel-validation');
 const clone = (value) => JSON.parse(JSON.stringify(value));
+assert(R.needsWholeDayRebuild({ executionForceReroute: true }, [], { isFirst: true }),
+  '首日多次失败后仍须切换完整重排，不能因用户启程边界永远复制旧时间线');
+assert(R.needsWholeDayRebuild({ executionForceReroute: true }, [], { isLast: true }),
+  '返程日完整重排标记也必须生效，返家边界交相同硬验收');
+assert(!R.needsWholeDayRebuild({}, [], { isFirst: true }), '首日无真实冲突时不额外触发整天重排');
 
 (async () => {
   const hotel = '甲山田头寨（观景台附近民宿） 经济型住宿片区';
@@ -69,6 +74,8 @@ const clone = (value) => JSON.parse(JSON.stringify(value));
     L.chatWithRetry = async (messages, opts) => {
       assert(!opts.phase && !opts.enableSearch, '缺少末日草稿时须先起草，而非再次占用整轮修早期日期');
       drafts++; assert(messages[1].content.includes('dayIndex 全部填 2'));
+      assert.equal(opts.temperature, 0.2, '依赖型初稿降低随机漂移，不减少任何验收或证据');
+      assert(messages[1].content.includes('寄存不会自动跨码头转运'), '初稿也必须使用单向转场行李规则');
       return JSON.stringify([{ dayIndex: 2, startTime: '19:00', endTime: '20:00', category: 'transport', activity: '打车返回用户家',
         startLocation: '甲酒店', endLocation: '用户家', transportType: 'ride' }]);
     };
@@ -84,7 +91,7 @@ const clone = (value) => JSON.parse(JSON.stringify(value));
 
     const reviewing = clone(outline);
     reviewing.days[1].executionForceReroute = true;
-    reviewing.days[1].executionReviewIssues = ['重复推荐主菜'];
+    reviewing.days[1].executionReviewIssues = ['重复推荐主菜', '游览中途非必要折返住宿地'];
     const food = { ...pending, category: 'food', activity: '午餐：招牌烧鸭', startTime: '12:00', endTime: '13:00', mealNames: ['招牌烧鸭'] };
     const following = { ...food, dayIndex: 2, executionReview: R.REVIEW_VERSION };
     L.chatWithRetry = async (messages, opts) => {
@@ -92,6 +99,13 @@ const clone = (value) => JSON.parse(JSON.stringify(value));
       audits++;
       assert(messages[1].content.includes('后一天["招牌烧鸭"]'), '完整重排也要明确避开倒序已验收日期的主菜');
       assert(messages[1].content.includes('末班接驳须确认'), '完整重排不丢独立运营风险提示');
+      assert(messages[1].content.includes('实际地图公路导航下限'), '完整重排也不能丢真实道路下限');
+      assert(messages[1].content.includes('寄存不会自动跨码头转运'), '完整重排使用与初稿一致的行李规则');
+      assert(messages[1].content.includes('先安排人和全部行李一起乘司机/住宿接送到本晚准确住宿'),
+        '山地接送必须先实际到住宿办理安放，不能用未来代送冒充状态');
+      assert(messages[1].content.includes('不要求每天乘列车'), '铁路偏好不强制已到住宿城市后再新增占位铁路');
+      assert(!messages[1].content.includes('可从入口安排司机接送/住宿搬运协助把大件送到'), '不得保留与实际行李状态冲突的旧代送建议');
+      assert(messages[1].content.includes('不能只删休息条目而保留去酒店的交通'), '午休折返修复须重排接驳依赖，不能只改分类');
       return JSON.stringify({ items: [{ ...food, activity: '午餐：清蒸鱼', mealNames: ['清蒸鱼'] },
         { ...pending, category: 'sight', activity: '甲城街区游览', startTime: '14:00', endTime: '15:00' }, pending] });
     };
@@ -130,6 +144,7 @@ const clone = (value) => JSON.parse(JSON.stringify(value));
     L.chatWithRetry = async (messages, opts) => {
       if (opts.enableSearch) return '{"routeFacts":[],"warnings":["返程接驳预留真实路程和进站缓冲"]}';
       const prompt = messages[1].content;
+      assert(prompt.startsWith('从零重排这一天'), '末日真实强制状态进入完整重排分支，不只是普通审计前缀');
       assert(prompt.includes('最终接驳在20:00回到用户家'), '末日完整重排仍按实际返家边界收尾');
       assert(!prompt.includes('最后必须有返回今晚住宿休息的hotel条目'), '末日不套用普通日的酒店闭环');
       return JSON.stringify({ items: [returned] });
@@ -141,6 +156,52 @@ const clone = (value) => JSON.parse(JSON.stringify(value));
     assert(!returningResult.partial); assert(!returningResult.reviewError);
     assert(returningResult.items.every((row) => row.category !== 'hotel'));
     console.log('✓ 末日完整重排遵守返家时间与地点，不新增当晚入住或凑晚餐');
+    const firstRebuild = clone(outline);
+    Object.assign(firstRebuild.days[0], { executionForceReroute: true, executionCandidateUnaudited: true,
+      executionReviewIssues: ['日间景区被排到深夜'] });
+    const firstRows = [{ ...returned, dayIndex: 0, startTime: '08:00', endTime: '09:00',
+      activity: '从用户家出发前往甲酒店', startLocation: '用户家', endLocation: '甲酒店' },
+    { ...accepted, startTime: '09:00', endTime: '09:15', activity: '办理入住并放下大件行李', executionReview: undefined },
+    { ...returned, dayIndex: 0, startTime: '09:15', endTime: '09:30', activity: '步行前往甲城广场',
+      startLocation: '甲酒店', endLocation: '甲城广场', transportType: 'walk' },
+    { dayIndex: 0, startTime: '09:30', endTime: '10:00', category: 'sight', activity: '游览甲城广场', endLocation: '甲城广场' },
+    { ...returned, dayIndex: 0, startTime: '19:40', endTime: '20:00', activity: '步行返回住宿',
+      startLocation: '甲城广场', endLocation: '甲酒店', transportType: 'walk' }, accepted];
+    firstRebuild.days[0].executionCandidate = firstRows;
+    L.chatWithRetry = async (messages, opts) => {
+      if (opts.enableSearch) return '{"routeFacts":[],"warnings":["晚间景区须核查开放时间"]}';
+      const prompt = messages[1].content;
+      assert(prompt.startsWith('从零重排这一天'));
+      assert(prompt.includes('从用户家在08:00启程，首日无需酒店退房'));
+      assert(prompt.includes('首条接驳必须在08:00从用户家启程'));
+      assert(prompt.includes('今晚必须回甲酒店'));
+      return JSON.stringify({ items: firstRows });
+    };
+    const firstResult = await R.reviewExecutionItems(P.normalizeInput(profile), firstRebuild, firstRows, Date.now() + 32000);
+    assert(firstResult.every((r) => r.executionReview === R.REVIEW_VERSION));
+    const wrongBoundary = R.executionIssues(firstResult.map((r, i) => i === 0 ? { ...r, startTime: '07:00' } : r),
+      { isFirst: true, origin: '用户家', goTime: '08:00', hotel: '甲酒店' });
+    assert(wrongBoundary.some((s) => /首日|启程|出发/.test(s)), '整天重排也不能提前用户启程时间');
+    console.log('✓ 首日完整重排实际分支生效，仍检查启程与住宿闭环');
+    const blockedAccess = clone(outline);
+    Object.assign(blockedAccess.days[2], { executionForceReroute: true, executionReviewPhase: 'audit',
+      executionAccessConstraint: { to: '乙城站', trainCode: 'G2002', arriveBefore: '13:20',
+        replacedRoutes: [{ from: '甲城南站', to: '乙城站' }] },
+      moves: [{ mode: 'train', from: '乙城站', to: '丙城站', code: 'G2002', startTime: '14:00', endTime: '18:00',
+        schedSource: 'reference', referenceDate: '2026-10-12', sourceUrl: 'https://rail.example/timetable' }] });
+    let accessAudits = 0;
+    L.chatWithRetry = async (messages, opts) => {
+      if (opts.enableSearch) return '{"routeFacts":[],"warnings":["接驳需预约核实"]}';
+      accessAudits++;
+      assert(messages[1].content.includes('重新制作纯交通返程日的完整时间线'),
+        '已有前段铁路不可衔接约束优先于泛泛整天重排，不能反复补回已查不可行的铁路');
+      assert(messages[1].content.includes('删除这些前段铁路及对应候车'));
+      assert(messages[1].content.includes('不晚于13:20'));
+      return JSON.stringify({ items: [returned] });
+    };
+    await R.reviewExecutionItems(P.normalizeInput(profile), blockedAccess, [returned], Date.now() + 32000);
+    assert(accessAudits > 0, '前段替代接驳仍经完整模型审计，不凭选路事实直接发布');
+    console.log('✓ 前段铁路不能衔接时，完整重排明确道路到站约束，不被泛化重排提示覆盖');
   } finally {
     L.chatWithRetry = saved.chat; E.collectRoutePoints = saved.points; E.collectRoadTravelFacts = saved.roads;
     E.collectUrbanTransitFacts = saved.transits; E.collectRailTopology = saved.topology;

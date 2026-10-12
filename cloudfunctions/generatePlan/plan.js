@@ -24,6 +24,8 @@ const { reviewExecutionItems, executionIssues, previousStoragePlaces, collectMea
   sameEndpoint: exactExecutionEndpoint, REVIEW_VERSION } = require('./execution-review');
 const { finalizedDays } = require('./publication');
 const { fallbackHotelLabel, prepareFallbackLodging } = require('./lodging-location');
+const { TRANSFER_LUGGAGE_RULE } = require('./luggage-plan');
+const { solarViewingAction } = require('./solar-view');
 const { solarEventMinute } = require('./solar-time');
 const { knownTicketProducts, ticketAccessOnly, actualTicketExperience, freeAdmissionFor, openLeisureVisit, filterTicketAlarms, includedAdmission } = require('./ticket-products');
 
@@ -514,7 +516,7 @@ function ensureSelfDriveParking(items, p) {
 
 const LODGING_WORD_RE = /酒店|民宿|客栈|宾馆|青旅|住宿|度假村|招待所/;
 const ADMIN_SUFFIX_RE = /(省|自治区|自治州|地区|盟|市|自治县|县|区|旗|镇|乡)$/;
-const HOTEL_PLACEHOLDER_RE = /^(?:同上|同前|上一家(?:酒店)?|原酒店|酒店|住宿地)$/;
+const HOTEL_PLACEHOLDER_RE = /^(?:同上|同前|上一家(?:酒店)?|原酒店|酒店|住宿地)(?:[（(](?:连住|续住|同一家|同一酒店)[）)])?$/;
 
 /** 从地址里提取带行政后缀的词根，例如「石家庄市」「桥西区」。 */
 function adminRootsOf(value) {
@@ -630,9 +632,16 @@ function safeHotelOf(day) {
 }
 
 function normalizeOutlineLodging(outline) {
-  asArray(outline && outline.days).forEach((day, di) => {
+  asArray(outline && outline.days).forEach((day, di, days) => {
     const hotel = String((day && day.hotel) || '').trim();
     if (hotel && HOTEL_PLACEHOLDER_RE.test(hotel)) {
+      const previous = days[di - 1];
+      if (/^(?:同上|同前|上一家|原酒店)/.test(hotel) && previous && safeHotelOf(previous)
+        && dayScope(day) && dayScope(day).replace(/\s/g, '') === dayScope(previous).replace(/\s/g, '')) {
+        day.hotel = previous.hotel;
+        Object.keys(previous).filter((key) => /^hotel[A-Z]/.test(key)).forEach((key) => { day[key] = previous[key]; });
+        return;
+      }
       console.warn('[generatePlan] 第%d天住宿使用占位词，改用可搜索住宿片区：%s', di + 1, hotel);
       day.hotel = '';
       day.hotelPoiVerified = false;
@@ -1665,7 +1674,7 @@ ds 必须包含连续全部 ${p.days} 天；每一天最多 2 个 hl，ml 为空
   const text = await llm.chatWithRetry([
     { role: 'system', content: SYS_PROMPT },
     { role: 'user', content: requestPrompt },
-  ], { deadline: outlineDeadline });
+  ], { deadline: outlineDeadline, temperature: 0.2 });
 
   // 去程开始 / 返程到达时刻由代码兜底对齐（LLM 自己常常不照办）
   const outline = normalizeOutlineLodging(
@@ -3023,7 +3032,10 @@ function dedupeDuplicateHotelItems(items) {
         const exactDuplicate = sameText && aStart !== null && aEnd !== null
           && aStart === bStart && aEnd === bEnd;
         const untimedDuplicate = sameText && (aStart === null || bStart === null);
-        if ((sameText && samePlace) || sameWindow || exactDuplicate || untimedDuplicate) drop.add(candidate);
+        const repeatedCheckin = sameText && samePlace && /入住|放下(?:大件)?行李/.test(kept.activity || '');
+        // 不重叠的回房窗口不是复制记录。非必要午休交执行审计重排，
+        // 不能删掉其晚间收尾来掩盖问题并破坏回房闭环。
+        if (repeatedCheckin || sameWindow || exactDuplicate || untimedDuplicate) drop.add(candidate);
       }
     }
   });
@@ -5882,7 +5894,7 @@ function ensureLongjiSunriseDetail(items, outline) {
     const nextRows = rows.filter((item) => Number(item && item.dayIndex || 0) === index + 1);
     const sunriseRows = nextRows
       .filter((item) => /西山韶乐/.test(String(item.activity || ''))
-        && /日出/.test(String(item.activity || '')))
+        && solarViewingAction(item, '日出'))
       .sort((a, b) => (toMin(a.startTime) ?? 1440) - (toMin(b.startTime) ?? 1440));
     if (sunriseRows.length) {
       // 详细阶段和续跑审计都可能各自尝试补齐同一条日出。按天只保留
@@ -8496,6 +8508,11 @@ function deferPrematureReturn(p, outline, indexes) {
 
   const last = days[days.length - 1];
   const base = areaBefore(days.length - 1) || returnBase;
+  const existingMoves = asArray(last.moves);
+  const existingReturn = existingMoves.filter((move) => move.mode === 'train').pop();
+  const keepVerifiedReturn = existingReturn && /^(?:12306|reference)$/.test(existingReturn.schedSource || '')
+    && existingReturn.code && existingReturn.startTime && existingReturn.endTime
+    && sameTravelArea(existingReturn.from, base) && matchesOriginCity(existingReturn.to, p.origin);
   const transport = String(p.transport || '');
   const mode = drivingAllowed(p) ? 'car'
     : /高铁|动车|铁路|火车/.test(transport) ? 'train'
@@ -8508,7 +8525,9 @@ function deferPrematureReturn(p, outline, indexes) {
   last.meals = [];
   last.overnight = '返程';
   last.hotel = '';
-  last.moves = [{
+  // 修中途错误不能覆盖末日已查询的合法枢纽/车次，或将起点退化成酒店。
+  // 保留的是真实选路证据；用户到家边界及接续仍交详细复核，不提前发布。
+  last.moves = keepVerifiedReturn ? existingMoves : [{
     from: base,
     to: returnTo,
     mode,
@@ -8617,7 +8636,7 @@ ${JSON.stringify(outlineToShortJson(outline))}
 // ============================================================
 
 const ITEM_SCHEMA =
-  '{"dayIndex":0,"startTime":"HH:mm","endTime":"HH:mm","activity":"行程描述","category":"sight/food/hotel/transport/ticket/other","startLocation":"","endLocation":"","transportType":"car/walk/ride/train/plane","note":""}';
+  '{"dayIndex":0,"startTime":"HH:mm","endTime":"HH:mm","activity":"行程描述","category":"sight/food/hotel/transport/ticket/other","startLocation":"","endLocation":"","transportType":"car/walk/ride/train/plane/bus/ship","note":""}';
 
 function dayDetailPrompt(p, day, idx, outline) {
   const prev = idx > 0 ? outline.days[idx - 1] : null;
@@ -8733,8 +8752,9 @@ ${drivingAllowed(p) ? '12. 用户已选「自驾出行」：今天所有交通�
       : `**今晚不回昨晚那家酒店，行李必须随身走**：\n    - 早上写一条"退房，携带全部行李出发"；**禁止写"把大件行李寄存在${lastNight || '酒店'}前台"**——今晚不回来取，寄存等于逼游客折返取件。\n    - ${isLast
         ? '返程日取箱退房后带走全部行李；游览需要轻装时可用沿途车站或游客中心的具体寄存处，游览后原地取回再乘车。'
         : `抵达「${tonight}」后**先到当晚酒店放行李**（写一条"到酒店放行李、轻装出门"，category=hotel），再出去游玩。`}`
-    }\n    - 取昨晚客房里的箱子直接办理退房，无需虚构当天寄存。需要轻装游览时单列实际寄存办理处，再单列原地取回行李；前往寄存处的接驳只写前往，不重复写成第二次取件。取件后直接转场；继续长时散步、登山、船筏、骑行须先落实新的存放处。不能只在 note 声称已取回，更不能把大件解释成随身小包。
-17. **无用户明确午休要求时白天不回酒店睡觉**：15:00 前不安排"回酒店休息/午休/回房间"（首次入住放行李、必要原地取件或用户明确休息需求除外）。优先就近休息，早起时晚上提前收尾，不无故折返住宿地。
+    }\n    - 取昨晚客房里的箱子直接办理退房，无需虚构当天寄存。需要轻装游览时单列实际寄存办理处，再单列原地取回行李；前往寄存处的接驳只写前往，不重复写成第二次取件。取件后直接转场；继续长时散步、登山、竹筏、骑行须先落实新的存放处。不能只在 note 声称已取回，更不能把大件解释成随身小包。
+    - ${TRANSFER_LUGGAGE_RULE}
+17. **无用户明确休息要求时不在游线中途回酒店**：不安排"回酒店休息/午休/回房间"后再外出游玩（首次新住宿实际入住放行李、必要原地取大件或用户明确休息需求除外）。劳逸适中、大纲自动写的休整不是用户要求午休。离场后直接接下一游览或沿途用餐，就近休息，早起时晚上提前收尾，不能只删休息而保留去酒店的接驳。
 18. **市内/短途交通按用户预算「${p.budget}」选型（用户预算和偏好优先于个人习惯）**：
     - ${/^经济/.test(p.budget) ? '经济实惠：3km 内步行；更远优先地铁/公交/景区接驳。公共交通没有或明显不便时才打车/包车。' : /^品质/.test(p.budget) ? '品质优选：可用打车/包车提升舒适度，仍须尊重用户是否选择自驾出行。' : '舒适适中：地铁/公交/景区接驳优先；赶时间、携带行李或公共交通不便时可打车/包车。'}
     - ${accessInstruction}
@@ -8769,6 +8789,7 @@ ${drivingAllowed(p) ? '12. 用户已选「自驾出行」：今天所有交通�
  *                        deadline: 本次调用的截止时间戳 }
  */
 const MAX_DAY_RETRY = 3;
+const MIN_DAY_DRAFT_BUDGET_MS = 20000;
 
 async function genDayItems(p, outline, opts = {}) {
   const days = outline.days;
@@ -8779,31 +8800,25 @@ async function genDayItems(p, outline, opts = {}) {
     .filter((i) => !done.has(i) && (attempts[i] || 0) < MAX_DAY_RETRY);
   const deadline = opts.deadline || (Date.now() + 40 * 1000);
   // 一批最多 4 天（并行，耗时 ≈ 最慢那一天而不是 4 天相加，实测 ~25-35s）；
-  // 剩余时间不够时自动缩批 —— 固定大批次时预算只剩 20s 就整批放弃，
-  // 实测返程日因此整天空掉，兜底只剩"17:40 高铁 + 17:00 吃早餐"。
+  // 剩余时间够完成整天输出时缩批；不足则保留未起草日期交下一轮，不能
+  // 用几秒启动整天请求并消耗重试次数，更不能因此丢掉后续日期。
   const WAVE = 4;
-  const FIRST_PER_DAY_ESTIMATE = 8500;   // 首轮按单天 ~8.5s 估
 
   const items = [];
   const finished = [];
   const failed = [];
   let lastCost = 0;
-  let prevWave = WAVE;
 
   for (let k = 0; k < pending.length;) {
     // 批大小自适应：剩余预算 >30s 开满 4 天，>19s 缩到 2 天，再紧就 1 天
-    // （细化预算默认 38s：首轮 rem≈38s → 4 天；跑完一批剩几秒 → 收尾 1 天）
+    // （细化预算默认38s；剩余不足整天输出预算时保存接力，不强发请求）
     const rem = deadline - Date.now();
     const wave = Math.max(1, Math.min(WAVE, pending.length - k,
       rem > 30 * 1000 ? 4 : rem > 19 * 1000 ? 2 : 1));
     const batch = pending.slice(k, k + wave);
-    // 单天耗时估算：首轮用默认值，之后按上一批均摊 ×1.2（单天封顶 15s）
-    const perDay = lastCost
-      ? Math.min(Math.ceil((lastCost / prevWave) * 1.2), 15 * 1000)
-      : FIRST_PER_DAY_ESTIMATE;
-    // batch 内请求是 Promise.all 并发，估算应接近最慢的一天；按天数相加会让
-    // 4 天首批在剩余 38 秒时被误判为 34 秒甚至更高，提前少跑一波。
-    const estimate = perDay + 1000;
+    // Promise.all的墙钟接近最慢一天，不可除以批大小来当单天耗时。
+    // 也不按天数相加；首批保留整天输出下限，之后用实测墙钟加余量。
+    const estimate = Math.max(MIN_DAY_DRAFT_BUDGET_MS, Math.ceil(lastCost * 1.2)) + 1000;
     if (Date.now() + estimate > deadline) {
       console.log('[generatePlan] 时间预算不足，停止在已完成部分（续跑）: 已完成=%d 剩余=%d',
         finished.length, pending.length - finished.length - failed.length);
@@ -8814,13 +8829,13 @@ async function genDayItems(p, outline, opts = {}) {
       // 把本轮 deadline 传进去：单次超时会按剩余时间收敛，重试也会先问时间够不够
       // 这里同样不设 max_tokens：一天 10~15 条细化的正常输出就接近 3000 token，
       // 封顶会让当天的后半段（晚餐 + 夜间 + 回酒店）凭空消失
-      llm.chatWithRetry(dayDetailPrompt(p, days[idx], idx, outline), { deadline })
+      llm.chatWithRetry(dayDetailPrompt(p, days[idx], idx, outline), { deadline, temperature: 0.2 })
         .then((t) => ({ i: idx, items: asArray(parseJSONFromText(t)) }))
-        .catch((e) => ({ i: idx, error: e.message }))
+        .catch((e) => ({ i: idx, items: [], error: String(e && e.message || e || 'LLM 请求失败，未返回错误说明') }))
     ));
     lastCost = Date.now() - waveStart;
     rs.forEach((r) => {
-      if (r.error || !r.items.length) {
+      if (r.error || !Array.isArray(r.items) || !r.items.length) {
         failed.push(r.i);
         attempts[r.i] = (attempts[r.i] || 0) + 1;   // 记一次失败，续跑时才知道还能不能再试
         console.error(`[generatePlan] 第${r.i + 1}天细化失败（第${attempts[r.i]}次）:`,
@@ -8859,7 +8874,6 @@ async function genDayItems(p, outline, opts = {}) {
       finished.push(r.i);
     });
     k += wave;
-    prevWave = wave;
   }
 
   const doneAll = Array.from(done).concat(finished);
@@ -9255,8 +9269,14 @@ function annotateHotelItems(items, outline) {
   const days = asArray(outline && outline.days);
   // Canonicalizing aliases can collapse a hotel-to-hotel leg into no movement.
   // Clean those legs after the rewrite, before IDs and alarms are linked.
-  const synced = removeCheckoutBacktracks(removeZeroDistanceTransports(syncHotelReferences(items, outline)));
+  // 已验收日期不再运行基于hotel分类猜别名的初稿清洗。退房卡里的旧酒店
+  // 曾被误收入“今晚酒店别名”，使后续已验收交通起点瞬移，并删除真实跨城段。
+  const reviewed = asArray(items).filter((item) => item.executionReview === REVIEW_VERSION);
+  const drafts = asArray(items).filter((item) => item.executionReview !== REVIEW_VERSION);
+  const synced = reviewed.concat(removeCheckoutBacktracks(removeZeroDistanceTransports(syncHotelReferences(drafts, outline))))
+    .sort((a, b) => Number(a.dayIndex || 0) - Number(b.dayIndex || 0) || (toMin(a.startTime) ?? 1440) - (toMin(b.startTime) ?? 1440));
   return synced.map((item) => {
+    if (item.executionReview === REVIEW_VERSION) return item;
     if (!item || String(item.category || '') !== 'hotel') return item;
     const offset = /退房/.test(item.activity || '') && !/不退房|无需退房/.test(item.activity || '') ? -1 : 0;
     const day = days[Number(item.dayIndex || 0) + offset] || {};
@@ -10874,6 +10894,9 @@ function warningContext(profile, outline, di, items = []) {
       ...(day.executionRoadFacts || []), ...(day.executionTransitFacts || [])],
     visitWindows: (day.executionEvidence || {}).visitWindows || [],
     sailingWindows: (day.executionEvidence || {}).sailingWindows || [],
+    solar: items.filter((row) => Number(row.dayIndex || 0) === di && row.timingLocked && solarViewingAction(row))
+      .map((row) => ({ activity: row.activity, startTime: row.startTime, endTime: row.endTime,
+        startLocation: row.startLocation, endLocation: row.endLocation, note: row.note })),
     aliases: (day.executionEvidence || {}).aliases || [],
     localMobility: (day.executionEvidence || {}).localMobility || [],
     highlights: day.highlights || [],

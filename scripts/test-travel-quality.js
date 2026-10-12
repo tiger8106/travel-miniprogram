@@ -226,7 +226,9 @@ test('已查班次与旧接驳冲突时整天重排，结构错误不能丢失�
   assert(R.needsWholeDayRebuild({ executionReviewIssues: ['时段重叠；13:32早于前段结束14:00'] }, [], context));
   assert(R.needsWholeDayRebuild({ executionReviewIssues: ['铁路进站接驳没有40分钟安检缓冲'] }, [], context));
   assert(R.needsWholeDayRebuild({ executionForceReroute: true, executionReviewIssues: ['输出缺少items'] }, [], context));
-  assert(!R.needsWholeDayRebuild({ executionForceReroute: true }, [], { ...context, isLast: true }));
+  assert(R.needsWholeDayRebuild({ executionForceReroute: true }, [], { ...context, isLast: true }),
+    '多次失败后末日也必须进入完整重排，用户返家边界仍由执行验收锁定');
+  assert(!R.needsWholeDayRebuild({}, [], { ...context, isLast: true }), '无强制状态不额外重排返程日');
   assert(!R.needsWholeDayRebuild({ executionReviewIssues: ['菜品重复'] }, [], context));
   assert(R.needsWholeDayRebuild({ executionRepairFailures: 1, executionReviewIssues: ['寄存行李未在离开前取回'] }, [], {}));
 });
@@ -314,6 +316,15 @@ test('未购中间转场赶不上班次可换实际较晚候选，已购票和�
   assert.equal(day.moves[0].endTime, '17:00'); assert.equal(day.moves[0].schedSource, 'reference');
   assert.equal(day.executionCandidate, undefined); assert.equal(day.executionReviewAttempted, false);
   assert(!R.deferUnbookedRail({ ...day, executionRailDeferrals: 2 }, [access, rail], ctx));
+  assert(!R.deferUnbookedRail({ ...day, executionRailDeferrals: 0 }, [access, rail], { ...ctx, required: ['甲景区'] }),
+    '缺少实际必游不能通过晚班选路忽略，须完整重排');
+  const visit = { ...item('游览乙景区', 'sight', '', '乙景区', ''), startTime: '16:00', endTime: '17:00' };
+  const newDay = () => ({ ...day, moves: [{ from: '甲站', to: '乙站', mode: 'train', code: 'G1' }], executionRailDeferrals: 0 });
+  const window = { place: '乙景区', closeTime: '18:00', sourceUrl: 'https://operator.example/open' };
+  assert(!R.deferUnbookedRail(newDay(), [access, rail, visit], { ...ctx, required: ['乙景区'], visitWindows: [window] }),
+    '晚班平移游览超过已核查闭园仍不换车');
+  assert(R.deferUnbookedRail(newDay(), [access, rail, { ...visit, endTime: '16:30' }],
+    { ...ctx, required: ['乙景区'], visitWindows: [window] }), '有实际必游且保留闭园窗口时可提名真实晚班，之后仍完整审计');
 });
 test('导航扩张上游耗时优先消费多余候车，仍留40分钟且不改固定列车', () => {
   const ride = { ...item('乘网约车前往甲站', 'transport', '甲景区', '甲站', 'ride'), startTime: '12:00', endTime: '14:00' };

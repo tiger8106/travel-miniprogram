@@ -42,7 +42,7 @@ const COL_SCHED = 'schedule_cache';
 const SCHED_TTL_MS = 36 * 3600 * 1000;
 
 // 生成引擎版本（用于确认线上跑的是哪一版）
-const GEN_VERSION = 'v2.24-lodging-stage-recovery';
+const GEN_VERSION = 'v2.25-transfer-luggage-review';
 const { publicationState, collectGenerationRows } = require('./publication');
 
 async function generateOutlineWithHotelCheck(input, opts) {
