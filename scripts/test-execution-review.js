@@ -540,7 +540,8 @@ test('已执行复核的日期入库审计不修改时段或重排大纲', () =>
     llm.chatWithRetry = async (messages, opts) => {
       calls++;
       assert(!opts.maxTokens, '执行复核不得硬截断输出');
-      assert(opts.enableSearch, '地理与运营知识必须联网核对');
+      assert.equal(opts.enableSearch, messages[0].content.includes('运营知识') || messages[0].content.includes('旅行票务'),
+        '独立知识查询联网，审计复用证据而不重复强制搜索');
       if (messages[0].content.includes('运营知识')) return JSON.stringify({ routeFacts: [], scenicRoute: '市区酒店附近短线，具体班次待查询', warnings: [], sources: [] });
       return JSON.stringify({ items: [row('12:00', '13:00', 'transport', '从家出发', '用户家', '甲城车站', 'ride'), room], moves: [] });
     };

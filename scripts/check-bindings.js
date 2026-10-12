@@ -65,7 +65,7 @@ fs.readdirSync(CF).forEach((dir) => {
   ok(`JS 语法 cloudfunctions/${dir}/index.js`, !err, err || '');
 });
 ['generatePlan/plan.js', 'generatePlan/schedule.js', 'generatePlan/rail12306.js', 'generatePlan/hotel-validation.js',
-  'generatePlan/execution-review.js', 'generatePlan/publication.js', 'generatePlan/route-evidence.js', 'generatePlan/solar-time.js',
+  'generatePlan/execution-review.js', 'generatePlan/llm.js', 'generatePlan/publication.js', 'generatePlan/route-evidence.js', 'generatePlan/solar-time.js',
   'generatePlan/ticket-products.js', 'parseTravelPlan/ticket-products.js', 'ticketAlarm/ticket-products.js', 'parseTravelPlan/ticket-source.js',
   'parseTravelPlan/alarm-infer.js', 'parseTravelPlan/llm.js', 'sendAlarm/alarm-title.js', 'sendAlarm/ticket-products.js'].forEach((rel) => {
   const err = syntaxOk(path.join(CF, rel));
@@ -384,8 +384,9 @@ ok('跨天同类体验差异化写入两段 prompt（大纲 7.4 + 细化规则 1
     && /19\. \*\*别重复排已安排过的内容\*\*/.test(planJs));
 ok('早餐兜底只在上午补，中午后补午餐而不是早餐',
   /fs <= 11 \* 60 \+ 30/.test(planJs) && /补午餐而不是早餐/.test(planJs));
-ok('细化 prompt 禁止白天回酒店睡觉（15:00 前）',
-  /白天不许回酒店睡觉/.test(planJs) && /15:00 前禁止安排/.test(planJs));
+ok('细化 prompt 不安排无必要午休折返，保留用户明确休息及实际办理例外',
+  /无用户明确午休要求时白天不回酒店睡觉/.test(planJs)
+    && /15:00 前不安排/.test(planJs) && /必要原地取件或用户明确休息需求除外/.test(planJs));
 ok('大纲 prompt：相邻两天核心片区相距超 1 小时必须换基地',
   /必须换基地/.test(planJs) && /来回通勤 4 小时/.test(planJs));
 ok('大纲 prompt：ml 三餐都要点名（店名或片区+招牌菜）',
@@ -437,8 +438,9 @@ ok('人已在目的地时不造 A→A 假移动（保留单头终点给前端导
   /lastKnown !== it\.endLocation/.test(parseNormJs));
 ok('细化 prompt 不再把大纲班次说成"用户可能手工改过"（自家大纲的参考时刻被当成圣旨，模型会写独白抗议）',
   !/用户可能手工改过/.test(planJs) && /今天的大交通（路线既定）/.test(planJs));
-ok('中间天班次时刻允许静默微调，首末日用户指定时刻才锁死',
-  /粗排参考/.test(planJs) && /静默地调/.test(planJs) && /用户指定的硬约束/.test(planJs));
+ok('所有已查询铁路时刻均锁定，首末日另遵守用户启程和到家边界',
+  /含近期运行图参考/.test(planJs) && /都是锁定事实，不可微调/.test(planJs)
+    && /不平移或缩短列车/.test(planJs) && /用户指定的硬约束/.test(planJs));
 ok('整段"内心独白"条目有硬识别（META_HARD）',
   /const META_HARD/.test(genNormJs) && /鉴于上游/.test(genNormJs) && /倒叙/.test(genNormJs));
 ok('有起终点的独白条目抢救成干净交通条目，没起终点的丢弃',
@@ -848,7 +850,7 @@ ok('大纲只按日期展示，不再绑定长按拖动或重排日期',
 ok('候选隔离，进度以整天检查后的实际发布内容为准',
   /publicationState/.test(genIndex2) && /genDraftItems/.test(genIndex2) && /delete out.genDraftItems/.test(itineraryFn2)
     && /publication.progress.done < publication.progress.total/.test(genIndex2));
-ok('局部重复失败带警示收尾，已发布日期保留、不终止整单',
+ok('资料未知有界警示收尾；实际执行矛盾拦截，已发布日期保留',
   /finalizeWithWarnings/.test(planJs) && /needs_confirmation/.test(fs.readFileSync(path.join(CF, 'generatePlan/execution-review.js'), 'utf8'))
     && /preservePublishedDays: true/.test(genIndex2) && /finalizePending/.test(genIndex2));
 

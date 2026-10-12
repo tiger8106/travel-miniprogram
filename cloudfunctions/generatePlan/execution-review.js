@@ -6,6 +6,9 @@ const schedules = require('./schedule');
 const { normalizeTicketProducts, normalizeTicketPolicies, ticketAccessOnly, ticketKey: ticketPlaceKey } = require('./ticket-products');
 const { solarEventMinute } = require('./solar-time');
 const REVIEW_VERSION = 'v7';
+// 完整审计通常输出整天时间线；检索后只剩二十余秒容易截在请求中途。
+// 先存证据让下一轮取得完整预算，不缩输出或减少验收换速度。
+const MIN_AUDIT_BUDGET_MS = 30000;
 const clock = (n) => `${String(Math.floor(Math.max(0, n) / 60)).padStart(2, '0')}:${String(Math.max(0, n) % 60).padStart(2, '0')}`;
 
 function referenceSchedules(day) {
@@ -140,7 +143,12 @@ function deferUnbookedRail(day, rows, context) {
   return true;
 }
 function locatedCorePlaces(context) {
-  return (context.highlights || []).filter((place) => Object.entries(context.points || {}).filter(([name, point]) =>
+  // 城市是游览范围，不是一个必须把导航终点命名为该城市的独立景点。
+  // 真实景点仍按定位核验，不能借城市范围绕过核心观景点检查。
+  const city = String(context.city || '').trim().replace(/[市县区]$/, '');
+  return (context.highlights || []).filter((place) => !(String(place).replace(/[市县区]$/, '') === city
+      && !/景区|公园|古镇|梯田|田园|瀑布|山|湖|寺|庙|观景|博物馆|纪念馆/.test(place))
+    && Object.entries(context.points || {}).filter(([name, point]) =>
     point && !point.areaAnchor && String(name).includes(place)
     && !/酒店|宾馆|民宿|客栈|餐厅|饭店|停车场|游客(?:服务)?中心|车站/.test(name)).length === 1);
 }
@@ -182,10 +190,10 @@ function collectMealNames(rows, knownNames = []) {
     .map((name) => name.replace(/[（(].*$/, '').replace(/^(?:早餐|午餐|晚餐)[：:]/, '').trim())
     .filter((name) => name.length >= 2 && name.length <= 20 && !/当地|特色|餐厅|附近|周边|推荐|品尝/.test(name));
   return [...new Set(rows.filter((row) => minute(row.startTime) >= 10 * 60 + 30
-    && (row.category === 'food' || /午餐|晚餐|晚饭/.test(row.activity || ''))).flatMap((row) => {
+    && (row.category === 'food' || row.category !== 'transport' && /午餐|晚餐|晚饭/.test(row.activity || ''))).flatMap((row) => {
     // “避免和昨日某菜重复”是排除说明，不是今天实际推荐该菜。
     const note = String(row.note || '').split(/[，,。；;]/).filter((part) =>
-      !/昨日|昨天|避免.*重复|不再推荐|替换|换掉|不吃|而非/.test(part)).join('；');
+      !/昨日|昨天|避免|避开|不重复|不再推荐|不推荐|替换|换掉|不吃|不点|而非/.test(part)).join('；');
     const text = `${row.activity || ''} ${note}`;
     const recommended = ((text.match(/推荐菜品[：:]([^。；;]+)/) || [])[1] || '').split(/[、，,]/);
     return [...(Array.isArray(row.mealNames) ? row.mealNames : []), ...known, ...recommended]
@@ -228,7 +236,7 @@ function invalidateUnsafeAcceptedDays(profile, outline, rows, selfDriveAllowed) 
     const proofs = [...(day.executionNetworkFacts || []), ...(day.executionRoadFacts || []), ...(day.executionTransitFacts || [])];
     const context = {
       isFirst: di === 0, isLast: di === days.length - 1, origin: profile.origin,
-      goTime: profile.goTime, backTime: profile.backTime, date: day.date,
+      goTime: profile.goTime, backTime: profile.backTime, date: day.date, city: day.city,
       hotel: day.hotel, overnight: day.overnight, previousHotel: previous.hotel,
       sameHotel: !!day.hotel && sameEndpoint(day.hotel, previous.hotel),
       noDrive: profile.transport !== '自驾出行', selfDriveAllowed, preferRail: /高铁|动车/.test(profile.transport || ''),
@@ -315,10 +323,42 @@ function positiveInstructions(value) {
     !/(?:无需|不用|不必|不要|禁止|严禁|没有|未曾|不重复|不安排|不选择|不采用|不寄存)/.test(part)).join('；');
 }
 
+function pickupInstruction(value) {
+  return positiveInstructions(value).split(/[；;]/).some((part) =>
+    /(?:取(?:回|出|走|齐)?|领取)(?:全部|所有|大件|小件|寄存的|暂存的|寄存|暂存|存放的){0,3}(?:行李|箱子)/.test(part)
+    && !/(?:明天|明日|次日|之后|届时|稍后|随后|计划|准备|将|若需|如果|到时).{0,20}(?:取|领取)/.test(part));
+}
+
 function storageInstruction(value) {
   return positiveInstructions(value).split(/[；;]/).some((part) => /寄存|暂存|寄放/.test(part)
+    && /行李|箱子|存包/.test(part)
     && !/(?:已|已经|此前|早上).{0,8}(?:寄存|暂存|寄放)/.test(part)
-    && !/取回|取出|取件|若需|如需|如果|若有|可能|需确认|后备箱或|寄存点.*若/.test(part));
+    && !pickupInstruction(part) && !/取件|若需|如需|如果|若有|可能|需确认|后备箱或|寄存点.*若/.test(part));
+}
+
+function storagePlace(row, city = '') {
+  const action = positiveInstructions(row.activity);
+  const pivot = action.search(/寄存|暂存|寄放/);
+  const cityStem = String(city || '').replace(/[市县区]$/, '');
+  // 寄存后入园/登船的复合办理条目，寄存动作可能发生在起点，不是
+  // 之后抵达的入口/码头。只采用实际起终点中被动作明确点名的地点，
+  // 不从泛泛备注造寄存处，也不把“酒店附近”当酒店本身。
+  const choices = [row.startLocation, row.endLocation].filter(Boolean).flatMap((place) => {
+    const names = [place];
+    if (cityStem && place.startsWith(cityStem) && place.length - cityStem.length >= 3) names.push(place.slice(cityStem.length));
+    return names.flatMap((name) => {
+      const i = action.indexOf(name);
+      if (i < 0 || /^(?:旁|附近|周边)/.test(action.slice(i + name.length))) return [];
+      const gap = i <= pivot ? pivot - i - name.length : i - pivot;
+      return gap >= 0 && gap <= (i <= pivot ? 24 : 8) ? [{ place, gap }] : [];
+    });
+  }).sort((a, b) => a.gap - b.gap);
+  const selected = choices.length ? choices[0].place : row.endLocation || row.startLocation || '';
+  // “在车站办理寄存”可以导航到该车站的具体寄存处；动作里的父节点
+  // 不能覆盖已经给出的精确服务点。这里只认同名前缀的寄存设施，
+  // 不把附近酒店/另一处游客中心等独立地点合并。
+  return [row.startLocation, row.endLocation].find((place) => selected && place && place.startsWith(selected)
+    && /^(?:行李)?(?:寄存处|寄存点|寄存柜|寄存服务台)$/.test(place.slice(selected.length))) || selected;
 }
 
 function previousStoragePlaces(items, beforeDay) {
@@ -326,10 +366,10 @@ function previousStoragePlaces(items, beforeDay) {
   (items || []).filter((row) => Number(row.dayIndex || 0) < beforeDay)
     .slice().sort((a, b) => Number(a.dayIndex || 0) - Number(b.dayIndex || 0)
       || (minute(a.startTime) || 0) - (minute(b.startTime) || 0)).forEach((row) => {
-      const place = row.endLocation || row.startLocation;
+      const place = storagePlace(row, row.city);
       if (storageInstruction(row.activity) && place && /行李|存包/.test(row.activity)) storage.add(place);
-      if (/取回.*行李|取.*寄存.*行李/.test(row.activity || '')) {
-        for (const stored of storage) if (sameEndpoint(stored, place) || sameEndpoint(stored, row.startLocation)) storage.delete(stored);
+      if (pickupInstruction(row.activity)) {
+        for (const stored of storage) if (sameEndpoint(stored, row.endLocation) || sameEndpoint(stored, row.startLocation)) storage.delete(stored);
       }
     });
   return [...storage];
@@ -875,7 +915,7 @@ function normalizeReviewRows(raw, dayIndex, context = {}) {
   let dropped = context.sameHotel;
   let diningAtHotel = false;
   rows.forEach((row) => {
-    if (/退房|取回.*(?:大件)?行李/.test(positiveInstructions(row.activity))) dropped = false;
+    if (/退房/.test(positiveInstructions(row.activity)) || pickupInstruction(row.activity)) dropped = false;
     if (dropped && sameEndpoint(row.endLocation, context.hotel)
       && /携带(?:全部)?大件行李/.test(row.activity)) row.activity = '轻装返回住宿地';
     if (sameEndpoint(row.endLocation, context.hotel) && /入住|放下(?:大件)?行李|放置行李/.test(row.activity)) dropped = true;
@@ -907,7 +947,7 @@ function normalizeReviewRows(raw, dayIndex, context = {}) {
     } else if (point) visitScope = point;
     if (row.category === 'transport' && visitScope && sameEndpoint(row.startLocation, visitScope)
       && !String(row.endLocation || '').includes(visitScope)
-      && /餐馆|餐厅|饭店|酒楼|酒店|民宿|\([^)]*店\)|（[^）]*店）/.test(row.endLocation || '')) visitScope = '';
+      && /餐馆|餐厅|饭店|酒楼|酒店|民宿|街区|古街|步行街|街$|路$|巷$|\([^)]*店\)|（[^）]*店）/.test(row.endLocation || '')) visitScope = '';
     // 旧候选的范围不能残留到已经离开景区后的街区游览。
     if (row.category === 'sight' && !visitScope) delete row.visitScope;
     if (row.category === 'sight' && visitScope) row.visitScope = visitScope;
@@ -1170,34 +1210,43 @@ function executionIssues(rows, context) {
   let checkouts = 0;
   let checkedInAt = -1;
   let storage = '';
+  // 昨晚入住的客房也是实际存放处；早上取箱退房不需要虚构一次寄存。
+  // 退房或取走以后消费该状态，不能再借它重复取件或轻装游玩。
+  let roomBagAvailable = !!context.previousHotel;
   const earlierStorage = new Set(context.previousStorage || []);
   sorted.forEach((row, i) => {
     const text = positiveInstructions(`${row.activity || ''}；${row.note || ''}`);
     const action = positiveInstructions(row.activity || '');
     if (context.isLast && storageInstruction(row.note) && /酒店|民宿|客栈/.test(row.note)
-      && !sorted.slice(i + 1).some((entry) => /取回.*行李/.test(entry.activity || ''))) issues.push('末日错误寄存行李');
+      && !sorted.slice(i + 1).some((entry) => pickupInstruction(entry.activity))) issues.push('末日错误寄存行李');
     if (/退房/.test(action) && ++checkouts > 1) issues.push('同一天重复退房');
     if (storageInstruction(row.activity) && !/取回/.test(action)
         && !(sameEndpoint(row.endLocation, context.hotel) && /入住|回房/.test(action))) {
-      const destination = row.endLocation || row.startLocation || '';
+      const destination = storagePlace(row, context.city);
       if (storage && destination && !sameEndpoint(storage, destination)) issues.push(`上一处${storage}的寄存行李未取回，不能直接在${destination}再次寄存`);
       storage = destination;
       if (!storage) issues.push('行李寄存缺少明确地点');
     }
-    if (/取回.*行李|取.*寄存.*行李/.test(action) && !storage
-        && ![...earlierStorage].some((place) => sameEndpoint(place, row.startLocation) || sameEndpoint(place, row.endLocation))) {
+    if (pickupInstruction(action) && !storage
+        && ![...earlierStorage].some((place) => sameEndpoint(place, row.startLocation) || sameEndpoint(place, row.endLocation))
+        && !(roomBagAvailable && [row.startLocation, row.endLocation].some((place) => sameEndpoint(place, context.previousHotel)))) {
       issues.push(`索引${i}取回行李前没有同地点的实际寄存记录；请在游览前安排存放并预留办理时间，不能仅添加泛泛备注`);
     }
-    if (/取回.*行李|取.*寄存.*行李/.test(action)) {
+    if (pickupInstruction(action)) {
+      if ([row.startLocation, row.endLocation].some((place) => sameEndpoint(place, context.previousHotel))) roomBagAvailable = false;
       for (const place of earlierStorage) if (sameEndpoint(place, row.startLocation)
         || sameEndpoint(place, row.endLocation)) earlierStorage.delete(place);
     }
-    if (/取回.*行李|取.*寄存.*行李/.test(action) && storage) {
+    if (pickupInstruction(action) && storage) {
       const aliases = [storage, ...[...storage.matchAll(/[（(]([^）)]+)[）)]/g)].map((match) => match[1])];
       if (!sameEndpoint(storage, row.startLocation) && !sameEndpoint(storage, row.endLocation)
-          && !aliases.some((name) => name.length >= 2 && text.includes(name))) issues.push('行李取回地点与寄存地点不一致');
+          && !aliases.some((name) => name.length >= 2 && [row.startLocation, row.endLocation].some((place) => sameEndpoint(name, place)))) {
+        issues.push('行李取回地点与寄存地点不一致');
+        issues.push(`索引${i}（${row.startTime} ${row.activity}）的实际寄存地点是${storage}，当前导航${row.startLocation || '空'}→${row.endLocation || '空'}未到该点；请补齐原地取件及前后接驳，不能只修改标题说已经取回`);
+      }
       else storage = '';
     }
+    if (/退房|办理离店|携带全部行李|携带大件行李/.test(action)) roomBagAvailable = false;
     if (!context.middayRest && minute(row.startTime) >= 16 * 60 && minute(row.startTime) < 19 * 60
         && /(?:返回|回到|回).*?(?:酒店|民宿|客栈).*?(?:休息|整理)/.test(action)
         && !/入住|取回|身体|疲劳/.test(text)
@@ -1226,7 +1275,7 @@ function executionIssues(rows, context) {
     if (context.sameHotel && /办理入住|重新入住|放下(?:大件)?行李/.test(text)) issues.push('连住期间重复入住或放下大件行李');
     if (i > firstSight && firstSight >= 0 && i < lastSight
       && /(?:返回|回到|回).*?(?:酒店|民宿|住宿|客栈)/.test(row.activity || '')
-      && !/取回|退房|首次入住|身体不适|疲劳/.test(row.activity || '') && !context.middayRest) issues.push(context.scenicRoute
+      && !pickupInstruction(row.activity) && !/退房|首次入住|身体不适|疲劳/.test(row.activity || '') && !context.middayRest) issues.push(context.scenicRoute
         ? '景区核心游线中途折返住宿地' : '游览中途非必要折返住宿地，优先就近休息，起早时晚上提前收尾');
     if (i > firstSight && firstSight >= 0 && i < lastSight && !context.middayRest
       && /酒店|民宿|住宿点|住宿地|客栈/.test(action)
@@ -1266,9 +1315,12 @@ function executionIssues(rows, context) {
       && sameEndpoint(sorted[sorted.length - 1].endLocation, storage))) {
     issues.push(context.isLast ? '末日错误寄存行李' : '寄存行李未在离开前取回');
   }
-  collectMealNames(sorted, context.knownMeals || []).forEach((name) => {
+  collectMealNames(sorted, [...(context.knownMeals || []), ...(context.previousMeals || []), ...(context.followingMeals || [])]).forEach((name) => {
     if ((context.previousMeals || []).includes(name) && !String(context.repeatMeals || '').includes(name)) {
       issues.push(`连续两天重复推荐主菜：${name}，请更换当地特色主菜`);
+    }
+    if ((context.followingMeals || []).includes(name) && !String(context.repeatMeals || '').includes(name)) {
+      issues.push(`与次日已验收行程重复推荐主菜：${name}，仅更换本日餐饮，不重做已发布的次日`);
     }
   });
   sorted.forEach((row, i) => {
@@ -1281,9 +1333,16 @@ function executionIssues(rows, context) {
   issues.push(...evidence.geometryIssues(sorted, context.points || {}));
   let location = context.previousHotel || (context.isFirst ? context.origin : '');
   let lastEnd = null;
-  sorted.forEach((row) => {
+  sorted.forEach((row, index) => {
     const start = row.startLocation;
-    const previous = sorted[sorted.indexOf(row) - 1];
+    const previous = sorted[index - 1];
+    if (/重新规划[：:]|此处安排.{0,24}(?:调整路线|需折返)|此处假设|此处应为/.test(`${row.activity || ''} ${row.note || ''}`)) {
+      issues.push(`索引${index}仍含未定稿的路线推演，请选定实际执行方案，移除自我纠错独白并核对起终点和接驳`);
+    }
+    if (previous && previous.category === 'transport' && row.category === 'sight' && location && start
+      && !sameEndpoint(canonicalNode(location, context), canonicalNode(start, context))) {
+      issues.push(`索引${index}前段交通到${location}，游览却从${start}开始，缺少独立接驳；不能用游览时长或空档代替实际移动`);
+    }
     if (previous && previous.category === 'food' && row.category === 'sight' && !start
       && location && row.endLocation && !sameEndpoint(location, row.endLocation)) {
       issues.push(`${location}→${row.endLocation}之间缺少独立接驳；用餐后前往新景点的移动和游览须分条`);
@@ -1313,13 +1372,21 @@ function executionIssues(rows, context) {
   return [...new Set(issues)];
 }
 
+// 执行说明的润色不改变收费/运营事实；政策、时间或行李服务证据变化仍需重查。
+function evidenceNote(note) {
+  // 只排除明确的纯观感润色；未识别的备注仍参与键，避免漏掉年龄、
+  // 身高、证件、安全限制等事实，不能用一张关键词白名单猜“无事实”。
+  return String(note || '').split(/[。；;\n]/).map((part) => part.trim()).filter((part) =>
+    !/^(?:自由)?(?:拍照(?:打卡|留念)?|欣赏风景(?:并拍照(?:留念)?)?)$/.test(part)).join('；');
+}
+
 async function collectOperatingEvidence(profile, day, previous, original, deadline) {
   const routes = original.filter((row) => row.category === 'transport' && row.startLocation && row.endLocation)
     .map((row) => ({ from: row.startLocation, to: row.endLocation, mode: row.transportType }));
   const references = (day.operatingReferences || []).filter((reference) => reference && /^https?:\/\//.test(reference.sourceUrl || ''));
   const visits = original.filter((row) => ['sight', 'ticket'].includes(row.category) || row.transportType === 'ship');
-  const key = JSON.stringify(['operating-windows-v9-ticket-policies', day.date, day.highlights, previous.hotel, day.hotel, routes,
-    visits.map((row) => [row.activity, row.ticketPlace, row.visitScope, row.startLocation, row.endLocation, row.note]), references]);
+  const key = JSON.stringify(['operating-windows-v10-evidence-notes', day.date, day.highlights, previous.hotel, day.hotel, routes,
+    visits.map((row) => [row.activity, row.ticketPlace, row.visitScope, row.startLocation, row.endLocation, evidenceNote(row.note)]), references]);
   const usable = (value) => value && ((value.routeFacts || []).length || (value.visitWindows || []).length
     || (value.sailingWindows || []).length || (value.ticketProducts || []).length || value.scenicRoute || value.notes || (value.warnings || []).length);
   const addReferences = (result) => {
@@ -1336,7 +1403,7 @@ async function collectOperatingEvidence(profile, day, previous, original, deadli
   try {
     const ticketVisits = visits.filter((row) => !ticketAccessOnly(row));
     const ticketKey = JSON.stringify([day.date, day.city, ticketVisits.map((row) =>
-      [row.activity, row.ticketPlace, row.visitScope, row.startLocation, row.endLocation, row.note])]);
+      [row.activity, row.ticketPlace, row.visitScope, row.startLocation, row.endLocation, evidenceNote(row.note)])]);
     const cachedTickets = day.executionTicketEvidence;
     const ticketRequest = cachedTickets && cachedTickets.key === ticketKey ? Promise.resolve(cachedTickets)
       : ticketVisits.length ? llm.chatWithRetry([
@@ -1354,8 +1421,8 @@ async function collectOperatingEvidence(profile, day, previous, original, deadli
     const text = await llm.chatWithRetry([
       { role: 'system', content: '你只核查旅行运营知识，不制定时间线。联网查运营方、属地政府、运营公众号/小程序的公开发布；无正规官方渠道时可参考可信旅行平台及多份近期实地资料，但标注来源层级、日期、待确认，不能冒称官方。找不到就明确未知，不复制候选的地理假设。只输出JSON。' },
       { role: 'user', content: `核查日期${day.date}，昨晚在${previous.hotel || profile.origin}，今晚在${day.hotel || profile.origin}。景点${JSON.stringify(day.highlights)}。待核查路线${JSON.stringify(routes)}。
-实际游览条目（逐个核对票务，不只检查大纲）：${JSON.stringify(original.filter((row) => ['sight', 'ticket'].includes(row.category)).map((row) => ({ activity: row.activity, place: row.endLocation, note: row.note })))}。
-逐项核对景区入园、独立收费景点、索道、观光车、船筏、演出的门票/预约要求，不根据名字是否含景区/山/公园猜收费。返回ticketProducts数组，每个产品格式为{"place":"该产品实际景区/地点","product":"准确购票产品名，如入园票/前山门票/索道往返票","ticketRequired":true,"reservationRequired":false,"sourceUrl":"售票/运营证据URL","basisDate":"资料日期","note":"是否包含内部观光车/索道、有效期或免费预约说明"}。确定需要票的全部列出；免费但需预约的ticketRequired:false、reservationRequired:true；免费且无需预约的不列；未知不可伪称已确定。不同收费区域及门票/索道等独立产品分开，游览途中仅经过、不实际进入的不催购票。
+实际游览条目（核对开放及游线，不只检查大纲）：${JSON.stringify(original.filter((row) => ['sight', 'ticket'].includes(row.category)).map((row) => ({ activity: row.activity, place: row.endLocation, note: row.note })))}。
+票务由独立联网查询完整核对并合并，本请求只核查线路、运营、开放、游线与行李服务，不重复查询售票产品。
 已有外部检索的运营资料（资料不是旅行路线答案；适用日期/季节与当前行程一致才使用）：${JSON.stringify(references)}
 补充核查：当地短途游览最合适的工具（租自行车/合规电动自行车、步行、公交等）、按天或按次租赁、续航/禁行/头盔/还车点及截止时间，纳入localMobility；不能把“禁止自驾汽车”等同禁止合法自行车，用户明确不会骑或拒绝骑行时提供替代。旅游专线和景区观光车可用运营公众号、小程序及近期网上资料交叉核对，写清sourceKind/operator/sourceUrl/basisDate/estimated，不保证未来班次。景区入口、游客中心和停车场可能在同一节点，核对同址aliases，禁止在同址间安排虚假长距离转场。深夜山路徒步要考虑照明、安全和末班索道，不把追日落之后夜行当默认可行。
 返回JSON还须包含localMobility:[{"area":"片区","mode":"bike|ebike|walk|bus|ride","rentalPeriod":"按天/按次","notes":"归还地点、续航、安全限制与资料层级","sourceUrl":"来源URL","basisDate":"资料日期","estimated":true}]及aliases:[{"place":"准确节点","names":["同址别名"],"sourceUrl":"同址证据URL"}]；visitWindows须包括minVisitMinutes（纯游览分钟），不得用一句游线描述代替时长字段。无证据的字段留空或数组为空，不冒称运营方已确认。
@@ -1458,6 +1525,7 @@ function acceptExecutionRows(rows, dayIndex, day, context) {
   });
   syncAcceptedMoves(day, rows);
   delete day.executionReviewIssues; delete day.executionCandidate;
+  delete day.executionCandidateUnaudited;
   day.executionReviewStatus = 'passed';
   delete day.executionReviewWarnings;
   delete day.executionForceReroute;
@@ -1475,10 +1543,13 @@ function finalizeWithWarnings(rows, dayIndex, day, issues, context = {}) {
   const result = normalizeReviewRows(rows, dayIndex, context);
   if (!result.length) return result;
   // 资料未知可以警示，已确认的不可执行矛盾不可通过“待确认”发布。
-  const scheduleIssues = executionIssues(result, context).filter((issue) => /入住后仍单向跨城乘车/.test(issue)
-    || context.enforceRailSchedules && /铁路缺少匹配|修改或遗漏了官方班次|铁路进站接驳没有40分钟|携带大件行李安排了不便|取回行李前没有同地点|行李取回地点与寄存地点不一致|寄存行李未在离开前取回|位置凭空跳转|时段重叠/.test(issue));
+  const scheduleIssues = executionIssues(result, context).filter((issue) => context.enforceRailSchedules
+    || /入住后仍单向跨城乘车/.test(issue));
   if (scheduleIssues.length) {
     day.executionReviewIssues = [...new Set([...(issues || []), ...scheduleIssues])];
+    // 预算兜底的原始骨架没有经过模型审计；续跑时即使新证据修正了
+    // 硬错误，也不可借“已有候选”快路径跳过完整语义审计。
+    if (!Array.isArray(day.executionCandidate)) day.executionCandidateUnaudited = true;
     day.executionCandidate = result;
     return [];
   }
@@ -1507,6 +1578,7 @@ function finalizeWithWarnings(rows, dayIndex, day, issues, context = {}) {
   day.executionReviewWarnings = warnings;
   day.executionReviewStatus = 'needs_confirmation';
   delete day.executionCandidate;
+  delete day.executionCandidateUnaudited;
   syncAcceptedMoves(day, result);
   return result;
 }
@@ -1517,10 +1589,12 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
   const results = await Promise.all(indexes.map(async (dayIndex) => {
     const original = items.filter((row) => Number(row.dayIndex || 0) === dayIndex);
     if (original.every((row) => row.executionReview === REVIEW_VERSION)) return original;
-    if (deadline - Date.now() < 5000) return original;
     const day = days[dayIndex] || {};
     day.executionReviewAttempted = false;
+    day.executionReviewPhase = 'deferred';
+    if (deadline - Date.now() < 5000) return original;
     const previous = days[dayIndex - 1] || {};
+    const followingRows = (options.allItems || []).filter((row) => Number(row.dayIndex || 0) === dayIndex + 1);
     const official = (day.moves || []).filter((move) => move.schedSource === '12306').map((move) => ({
       startLocation: move.from, endLocation: move.to, startTime: move.startTime, endTime: move.endTime, code: move.code,
     }));
@@ -1541,6 +1615,10 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
       railAlreadyBooked: /已(?:经)?(?:购|买|订|预约|出票)/.test(positiveInstructions(profile.extra)),
       accessConstraint: day.executionAccessConstraint,
       previousMeals: previous.executionMealNames || [], knownMeals: day.meals || [], repeatMeals: positiveInstructions(profile.extra),
+      // 并行生成可能后一天先通过；较早日期要避开已发布的相邻日，
+      // 不能完成后才发现重复，又为修餐饮撤回已经发布的后一天。
+      followingMeals: followingRows.length && followingRows.every((row) => row.executionReview === REVIEW_VERSION)
+        ? collectMealNames(followingRows, (days[dayIndex + 1] || {}).meals || []) : [],
       lightLuggage: /(?:行李|背包|小包).{0,16}(?:轻便|方便随身|方便携带)|只(?:带|携带).{0,8}(?:小包|背包)|无大件行李/.test(profile.extra || ''),
       scenicRoute: original.filter((row) => row.category === 'sight'
         && /梯田|山顶|观景|山峰|徒步|天梯/.test(`${row.activity} ${row.endLocation}`)).length >= 2,
@@ -1556,6 +1634,7 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
     context.solar = facts;
     const candidate = Array.isArray(day.executionCandidate) ? day.executionCandidate : original;
     // 此轮只补查班次并持久化，下轮再请求重排，避免长查询挤占云函数预算。
+    day.executionReviewPhase = 'schedules';
     if (await collectExecutionSchedules(day, candidate, context, deadline)) return original;
     const regions = [profile.origin, profile.dest, previous.overnight, day.overnight, day.city].filter(Boolean).join(' ');
     // 独立运营证据先缓存；预算足够同轮完整审计，不足则持久化到下一轮。
@@ -1564,17 +1643,34 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
       startLocation: previous.hotel || previous.overnight || previous.city,
       endLocation: context.accessConstraint.to }, { category: 'transport', transportType: 'ride',
       startLocation: previous.city, endLocation: context.accessConstraint.to }] : [];
+    day.executionReviewPhase = 'evidence';
+    const knownRail = context.official.concat(context.references);
+    const unprovedRails = candidate.filter((row) => row.transportType === 'train' && !knownRail.some((fact) => matchesSchedule(fact, row)));
+    const savedPoints = day.executionPointRegions === regions ? day.executionPoints || {} : {};
+    const missingPoints = accessProbe.concat(candidate).map((row) => Object.assign({}, row, {
+      startLocation: savedPoints[row.startLocation] ? '' : row.startLocation,
+      endLocation: savedPoints[row.endLocation] ? '' : row.endLocation,
+    }));
     const [operating, freshPoints, topology] = await Promise.all([
       collectOperatingEvidence(profile, day, previous, candidate, deadline),
-      evidence.collectRoutePoints(accessProbe.concat(candidate), regions, Math.min(deadline - 20000, Date.now() + 5000)),
-      evidence.collectRailTopology(candidate, Math.min(deadline, Date.now() + 12000)),
+      evidence.collectRoutePoints(missingPoints, regions, Math.min(deadline - 20000, Date.now() + 5000)),
+      unprovedRails.length ? evidence.collectRailTopology(unprovedRails, Math.min(deadline, Date.now() + 12000)) : Promise.resolve([]),
     ]);
-    const points = Object.assign({}, day.executionPoints || {}, freshPoints);
+    const points = Object.assign({}, savedPoints, freshPoints);
     day.executionPoints = points;
-    const [roads, transits] = await Promise.all([
+    day.executionPointRegions = regions;
+    const navigationKeyOf = (rows, map) => JSON.stringify([day.date, regions, rows.filter((row) => row.category === 'transport')
+      .map((row) => [row.startLocation, row.endLocation, row.transportType,
+        /地铁|轨道交通|公交|专线/.test(`${row.activity} ${row.note}`), map[row.startLocation], map[row.endLocation]])]);
+    const navigationKey = navigationKeyOf(accessProbe.concat(candidate), points);
+    const cachedNavigation = day.executionNavigation;
+    const [roads, transits] = cachedNavigation && cachedNavigation.key === navigationKey
+      ? [cachedNavigation.roads, cachedNavigation.transits] : await Promise.all([
       evidence.collectRoadTravelFacts(accessProbe.concat(candidate), points, Math.min(deadline - 15000, Date.now() + 3500)),
       evidence.collectUrbanTransitFacts(candidate, points, Math.min(deadline - 15000, Date.now() + 2000)),
     ]);
+    // 空查询失败不冒充已核查；成功导航随任务持久化，冷实例续跑也能复用。
+    if (roads.length || transits.length) day.executionNavigation = { key: navigationKey, roads, transits };
     if (!operating.key) {
       console.log('[generatePlan.review] 第%d天%s，下一轮执行时间线复核', dayIndex + 1,
         operating.key ? '运营知识已检索' : '运营知识暂未取得');
@@ -1611,11 +1707,12 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
         checked = normalizeReviewRows(checked, dayIndex, context);
       }
       checked = advanceFlexibleRailAccess(checked, context);
-      if (!executionIssues(checked, context).length) return acceptExecutionRows(checked, dayIndex, day, context);
+      if (!day.executionCandidateUnaudited && !executionIssues(checked, context).length)
+        return acceptExecutionRows(checked, dayIndex, day, context);
     }
     // 新证据已完整缓存且预算够时，同轮继续完整模型审计；不足则照常后台接力。
-    if (deadline - Date.now() < 20000) return original;
-    const prompt = `你是旅行执行审计员，逐段复核并重排这一天，返回完整可执行时间线，不要解释。当前条目是未经信任的候选，可能包含错误地理、编造铁路或地铁、错误游船方向。请用联网检索核对运营知识，再重排，不能直接复制这些错误。已核验铁路事实和太阳窗口除外。入住必须发生在抵达当晚住宿地后；入住后不能再单向乘高铁/飞机去另一个城市，确实已入住的基地往返游需有完整返程及回房安排，不能把寄存行李误写成入住。
+    if (deadline - Date.now() < MIN_AUDIT_BUDGET_MS) { day.executionReviewPhase = 'deferred'; return original; }
+    const prompt = `${day.executionForceReroute ? '本轮从零完整重排，不返回局部补丁或acceptOriginal；旧候选只用于识别地点和需求，不沿用已失败的估算时间窗口。先锁定下方实际列车到发时刻及用户启程/到家边界，再倒推接驳、办理、游览与用餐。\n' : ''}你是旅行执行审计员，逐段复核并重排这一天，返回完整可执行时间线，不要解释。当前条目是未经信任的候选，可能包含错误地理、编造铁路或地铁、错误游船方向。使用下方已独立联网检索的运营、地图和铁路证据核查并重排，不能直接复制候选错误；没有证据的关键事实保持未知，不用记忆编造班次或来源。已核验铁路事实和太阳窗口除外。入住必须发生在抵达当晚住宿地后；入住后不能再单向乘高铁/飞机去另一个城市，确实已入住的基地往返游需有完整返程及回房安排，不能把寄存行李误写成入住。
 完整审计所有原候选的交通、游线、票务、入住、行李、开放时间和用户约束。如果代码检查为空且你独立核查也确认无语义/执行问题，不需重写同一份时间线，可以仅返回{"acceptOriginal":true}；这表示完整核查通过，不可用于跳过审计、忽略未知关键事实或带着错误放行。任何错误或必要修改仍返回完整items或合法replacements。
 用户需求：${JSON.stringify(requirements)}
 本日（第${dayIndex + 1}天）：${JSON.stringify({ date: day.date, city: day.city, theme: day.theme,
@@ -1641,7 +1738,7 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
 当地日落估算（由地图坐标计算，户外山地游线应在此前完成，不替代开放公告）：${JSON.stringify(Object.fromEntries(Object.entries(points).map(([name, point]) => [name, solarEventMinute(day.date, point.lat, point.lon, true)])))}
 规则：
 1. 首日必须在${profile.goTime || '用户指定时间'}从${profile.origin}启程；不是此时列车发车。返程日必须在${profile.backTime || '用户指定时间'}到${profile.origin}结束。市内去车站至少留交通耗时和40分钟安检缓冲。返家接驳至少${context.homeAccessMin || '实际交通所需'}分钟，不能为凑到家时间随意压缩通勤耗时。
-2. 补齐真实游览，抵达/买票不算游玩。先交通后游览。同日只办理一次退房；连续住同酒店时大件留房，晚上只是回房，不重复入住或放行李。换城时带走全部行李；当天实际寄存过才写取回行李。包括末日在内，景区游玩需要时可在游客中心寄存，但必须在原地点取回，预留办理时间，取回后才去下一城市；不能把行李留在不再返回的酒店。不能拖箱登山、坐竹筏、漂流或骑行，不把大件行李解释为轻便双肩包。每日餐饮更换当地特色主菜，参照全程餐饮分配：${JSON.stringify(days.map((entry) => ({ date: entry.date, meals: entry.meals })))}。晚餐前不要为了整理行李无必要折返酒店又出门；用户明确需要休息时保留。所有景区在开放且光线合理时段游玩，不能早上等待日落。
+2. 补齐真实游览，抵达/买票不算游玩。先交通后游览。同日只办理一次退房；连续住同酒店时大件留房，晚上只是回房，不重复入住或放行李。换城时带走全部行李。昨晚入住的客房可直接取箱退房，无需虚构当天寄存；客房以外取件须有同地点的实际寄存（含已保存跨日寄存：${JSON.stringify(context.previousStorage)}）。寄存及取件单独分条，起终点明确实际办理处，不把之后的入园口/码头当寄存处。包括末日在内，景区游玩需要时可在游客中心寄存，但必须在原地点取回并预留办理时间。取回大件后直接用餐或转场，不再继续长时间街区散步、登山、竹筏或骑行；如还要游览，须先落实新的具体寄存处并最后原地取回，不能借用早上已结束的寄存状态。不能把行李留在不再返回的酒店，不能把大件解释为轻便双肩包。每日餐饮更换当地特色主菜，参照全程餐饮分配：${JSON.stringify(days.map((entry) => ({ date: entry.date, meals: entry.meals })))}。晚餐前不要为了整理行李无必要折返酒店又出门；用户明确需要休息时保留。所有景区在开放且光线合理时段游玩，不能早上等待日落。
 3. 路线按实际距离和游览时长安排，禁止折返折叠和凭空换城。景区核心点可同日，但步行、接驳、排队和下山时间必须足够；放行李在游线开始前，游线中途不要再回住宿地，沿途用餐后继续前进，最后回住宿地收尾。删除非必要点，不得删用户必去点。不得将A景点贴到B条目上假装已经游览。末日最后一段交通直接以用户到家时间结束，不要提前到家再用整理行李填满时间。
 4. 铁路不能到汽车站/码头/游客中心，需实际可检索的铁路枢纽；没有直达应写真实换乘链，到发站只能选一个准确站名，不能“X站/Y站”二选一。小型城际站到远方城市先回区域高铁枢纽再换乘，不要把城际站伪装成长途高铁始发站。联网检索与候选安排冲突时，以运营方和交通官网为准重新选线。已提供近期参考运行图时保留具体车次和对应时刻，明确参考性质，不清空；没有任何班次证据不得发布估算列车，应查询真实换乘或改用合理道路接驳。不要仅因尚未开售就放弃铁路；但已检索的前段候选无法赶上返程列车时，必须改用提前出发的合理道路接驳，锁住已选长途返程铁路，不能猜一班不存在的早班车。无铁路的景区段用旅游专线、大巴或司机接送。城市没有地铁时不能编造地铁线路；距离较远不能写成步行十分钟。只有明确选择自驾或点名具体段自驾才可安排本人驾驶。普通市内返家不得写景区接驳。不要在任何备注中编造后续日期车次。
 6. 严格分开到景点的交通与景区内部游览两条，不把“乘车前往并游览”装在一个时段；内部路线和纯游览时长依运营资料与普遍推荐综合选择。停车场与同址游客中心只办理进出园，不发明二次到达或长途接驳。船本身完成城市转移，抵达后从实际下船码头接续，不重复执行起点码头到终点码头的汽车段。参考localMobility适合骑行的目的地优先按天租合规电动自行车，取车、续航、租用时段、归还同一地点都安排清楚；竹筏单向路线要考虑还车衔接。无特殊需要不在游线中途回酒店休整，早起可夜间提前返回休息。
@@ -1652,7 +1749,7 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
     try {
       const previousIssues = day.executionReviewIssues || [];
       // 无效补丁和整天动线冲突应重新给完整时间线，不能对错误索引反复局修。
-      const repairing = !context.accessConstraint && Array.isArray(day.executionCandidate) && previousIssues.length
+      const repairing = !day.executionForceReroute && !context.accessConstraint && Array.isArray(day.executionCandidate) && previousIssues.length
         && previousIssues.length < 6 && Number(day.executionRepairFailures || 0) < 2
         && !previousIssues.some((issue) => /索引无效|输出缺少|已有运行图候选|非正时长|交通下限/.test(issue));
       // 已证实接续不可行时不用重复喂入那组错误列车时间线，防止模型锚定旧方案。
@@ -1676,12 +1773,15 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
 上轮问题：${JSON.stringify(previousIssues)}。
 输出 {"items":[{"startTime":"HH:mm","endTime":"HH:mm","category":"transport|hotel|food|other","activity":"活动","startLocation":"起点","endLocation":"终点","transportType":"train|ride|walk或空","note":"执行要点","mealNames":[]}]}，包含完整当天，不能只返回修改片段。`
         : repairing ? `${prompt}\n本轮改为局部修订，禁止复制整天！以上输出格式由本条覆盖：返回 {"replacements":[{"startIndex":0,"endIndex":0,"items":[修改后的完整条目]}]}。索引是当前条目数组的0起始下标，闭区间；可替换连续几段，但不要改没有问题的段。代码会自动保留其他条目并验收整天。寄存问题要在游览前安排明确地点寄存并在同一地点取回，可从该游览窗口中留出办理时间；不能只补泛泛备注。修订重点：${JSON.stringify(day.executionReviewIssues)}` : prompt;
+      day.executionReviewPhase = 'audit';
+      const auditStarted = Date.now();
       let text = await llm.chatWithRetry([
         { role: 'system', content: '仅输出合法JSON；按时间与地点依赖逐段审核旅行，不能用改标签冒充解决问题。' },
         { role: 'user', content: requestPrompt },
       // 运营知识已在独立轮检索，班次和导航也已有证据。确定性重排不
       // 再重复联网，避免模型输出检索推理长文而忽略结构与接续约束。
-      ], { deadline, enableSearch: !infeasibleDay && !context.accessConstraint, temperature: 0.1 });
+      ], { deadline, enableSearch: false, temperature: 0.1, phase: 'execution-audit' });
+      console.log('[generatePlan.review] 第%d天完整审计用时%dms，使用已独立检索证据', dayIndex + 1, Date.now() - auditStarted);
       day.executionReviewAttempted = true;
       let parsed = llm.parseJSONFromText(text);
       if (parsed && parsed.acceptOriginal === true && !Array.isArray(parsed.items)) {
@@ -1694,22 +1794,34 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
       if (parsed && !Array.isArray(parsed.items) && Array.isArray(parsed.schedule)) parsed.items = parsed.schedule;
       if (parsed && Array.isArray(parsed.replacements)) parsed.items = applyExecutionPatch(candidate, parsed.replacements);
       if (!parsed || !Array.isArray(parsed.items)) {
-        day.executionReviewAttempted = false;
         day.executionReviewIssues = [parsed && Array.isArray(parsed.replacements)
           ? `局部修订索引无效：当前仅${candidate.length}项，索引须为0到${candidate.length - 1}的整数闭区间且不能重叠。收到：${JSON.stringify(parsed.replacements.map((patch) => ({ startIndex: patch.startIndex, endIndex: patch.endIndex, hasItems: Array.isArray(patch.items) })))}`
           : '复核输出缺少完整 items 数组，必须按指定JSON结构输出完整时间线'];
         console.warn('[generatePlan.review] 第%d天复核结构错误：%s', dayIndex + 1, JSON.stringify(Object.keys(parsed || {})));
         return original;
       }
+      delete day.executionCandidateUnaudited;
       let cleaned = normalizeReviewRows(parsed.items, dayIndex, context);
+      const missing = cleaned.map((row) => Object.assign({}, row, {
+        startLocation: context.points[row.startLocation] ? '' : row.startLocation,
+        endLocation: context.points[row.endLocation] ? '' : row.endLocation,
+      }));
+      const newRails = cleaned.filter((row) => row.transportType === 'train'
+        && !knownRail.some((fact) => matchesSchedule(fact, row))
+        && !unprovedRails.some((before) => sameEndpoint(before.startLocation, row.startLocation) && sameEndpoint(before.endLocation, row.endLocation)));
       const [additional, updatedRail] = await Promise.all([
-        evidence.collectRoutePoints(cleaned, regions, Math.min(deadline - 1500, Date.now() + 2500)),
-        evidence.collectRailTopology(cleaned, Math.min(deadline - 1500, Date.now() + 8000)),
+        evidence.collectRoutePoints(missing, regions, Math.min(deadline - 1500, Date.now() + 2500)),
+        newRails.length ? evidence.collectRailTopology(newRails, Math.min(deadline - 1500, Date.now() + 8000)) : Promise.resolve([]),
       ]);
       context.points = Object.assign({}, context.points, additional);
-      const updatedRoads = await evidence.collectRoadTravelFacts(cleaned, context.points, Math.min(deadline - 1500, Date.now() + 3000));
-      context.routeFacts = context.routeFacts.filter((fact) => !updatedRail.concat(updatedRoads).some((proof) =>
-        sameEndpoint(proof.from, fact.from) && sameEndpoint(proof.to, fact.to) && proof.mode === fact.mode)).concat(updatedRail, updatedRoads);
+      const updatedKey = navigationKeyOf(accessProbe.concat(cleaned), context.points);
+      const [updatedRoads, updatedTransits] = updatedKey === navigationKey ? [roads, transits] : await Promise.all([
+        evidence.collectRoadTravelFacts(cleaned, context.points, Math.min(deadline - 1500, Date.now() + 3000)),
+        evidence.collectUrbanTransitFacts(cleaned, context.points, Math.min(deadline - 1500, Date.now() + 2000)),
+      ]);
+      if (updatedRoads.length || updatedTransits.length) day.executionNavigation = { key: updatedKey, roads: updatedRoads, transits: updatedTransits };
+      context.routeFacts = context.routeFacts.filter((fact) => !updatedRail.concat(updatedRoads, updatedTransits).some((proof) =>
+        sameEndpoint(proof.from, fact.from) && sameEndpoint(proof.to, fact.to) && proof.mode === fact.mode)).concat(updatedRail, updatedRoads, updatedTransits);
       cleaned = normalizeReviewRows(cleaned, dayIndex, context);
       // 新铁路路线必须先补查，再验收/计算失败次数；不能在最后一次模型
       // 修订提出正确铁路后立即耗尽尝试，带着未查询班次降级发布。
@@ -1722,12 +1834,13 @@ async function reviewExecutionItems(profile, outline, items, deadline, options =
       cleaned = advanceFlexibleRailAccess(cleaned, context);
       let errors = executionIssues(cleaned, context);
       if (errors.length) { day.executionReviewIssues = errors; day.executionCandidate = cleaned; }
-      if (errors.length && !repairing && deadline - Date.now() >= 25000) {
+      // 带上一轮完整输出的立即二次修订更长，额外留5秒；不足就保存候选接力。
+      if (errors.length && !repairing && deadline - Date.now() >= MIN_AUDIT_BUDGET_MS + 5000) {
         text = await llm.chatWithRetry([
           { role: 'system', content: '仅输出完整合法JSON，修复明确的执行验收问题，不要解释。' },
           { role: 'user', content: requestPrompt }, { role: 'assistant', content: text },
           { role: 'user', content: `验收没有通过：${errors.join('；')}。逐项修正后重新输出完整JSON，保留其他合理安排。` },
-        ], { deadline, enableSearch: !infeasibleDay && !context.accessConstraint, temperature: 0.1 });
+        ], { deadline, enableSearch: false, temperature: 0.1, phase: 'execution-audit' });
         const retry = llm.parseJSONFromText(text);
         if (retry && Array.isArray(retry.items)) {
           parsed = retry;

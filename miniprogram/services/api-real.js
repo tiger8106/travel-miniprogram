@@ -143,8 +143,10 @@ async function resumeGen(jobId, expectRound, runnerId) {
 }
 
 // 查当前有没有正在后台生成的任务
-async function genJobStatus() {
-  return callFn('generatePlan', { action: 'jobStatus' });
+async function genJobStatus(options) {
+  options = options || {};
+  return callFn('generatePlan', { action: 'jobStatus',
+    includeCompleted: !!options.includeCompleted, generationRequestId: String(options.requestId || '').slice(0, 100) });
 }
 
 async function dismissGen(jobId) {

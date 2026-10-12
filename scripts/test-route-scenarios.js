@@ -31,6 +31,22 @@ const { searchHotelPoi, searchHotelsNearby } = require('../cloudfunctions/genera
 const { validateOutlineHotels } = require('../cloudfunctions/generatePlan/hotel-validation');
 const { lookupSchedules, canLookupSchedules } = require('../cloudfunctions/generatePlan/schedule');
 const { executionIssues, reviewExecutionItems, normalizeReviewRows, sameEndpoint } = require('../cloudfunctions/generatePlan/execution-review');
+const measurement = process.argv.includes('--measure') ? { startedAt: Date.now(), rounds: 0, modelTasks: 0,
+  searchTasks: 0, auditTasks: 0, auditDurationsMs: [], failedTasks: 0 } : null;
+if (measurement) {
+  const llm = require('../cloudfunctions/generatePlan/llm'), originalChat = llm.chatWithRetry;
+  llm.chatWithRetry = async (messages, a, b) => {
+    const opts = a && typeof a === 'object' ? a : b || {}, start = Date.now();
+    measurement.modelTasks++;
+    if (opts.enableSearch) measurement.searchTasks++;
+    if (opts.phase === 'execution-audit') measurement.auditTasks++;
+    try { return await originalChat(messages, a, b); }
+    catch (error) { measurement.failedTasks++; throw error; }
+    finally { if (opts.phase === 'execution-audit') measurement.auditDurationsMs.push(Date.now() - start); }
+  };
+}
+const performanceReport = () => measurement ? { ...measurement, elapsedMs: Date.now() - measurement.startedAt,
+  measurementScope: '本地脚本墙钟；modelTasks为逻辑任务计数，耗时包含封装内重试，非微信端到端或物理HTTP调用数' } : undefined;
 
 const scenarios = [
   {
@@ -163,7 +179,8 @@ function offlineFixture(scenario) {
       offlineItem(3, '14:00', '15:00', 'food', '在明仕田园附近农家菜馆午餐', '明仕田园', '明仕田园', ''),
       offlineItem(3, '15:00', '15:30', 'hotel', '到明仕田园住宿地放下行李', '明仕田园', '明仕田园酒店', ''),
       offlineItem(4, '07:30', '08:00', 'food', '在明仕田园吃早餐', '明仕田园酒店', '明仕田园酒店', ''),
-      offlineItem(4, '08:00', '11:00', 'sight', '游览明仕田园山水与拍照点', '明仕田园', '明仕田园', ''),
+      offlineItem(4, '08:00', '08:15', 'transport', '从酒店前往明仕田园游线起点', '明仕田园酒店', '明仕田园游线起点', 'walk'),
+      offlineItem(4, '08:15', '11:00', 'sight', '游览明仕田园山水与拍照点', '明仕田园游线起点', '明仕田园', ''),
       offlineItem(4, '11:00', '14:00', 'transport', '乘旅游专线从明仕田园前往德天瀑布', '明仕田园', '德天瀑布', 'bus'),
       offlineItem(4, '14:00', '14:30', 'hotel', '到硕龙镇住宿地放下行李', '德天瀑布', '硕龙镇酒店', ''),
       offlineItem(5, '07:30', '08:00', 'transport', '从硕龙镇住宿地前往德天瀑布', '硕龙镇酒店', '德天瀑布', 'ride'),
@@ -349,28 +366,8 @@ function inspectScenario(scenario, outline, items) {
     return false;
   };
 
-  // 行李提示必须有事实依据：仅写“取回在某地寄存的行李”并不等于之前真的
-  // 存过。跨日检查当前日和前一日，覆盖“前一晚酒店寄存、次日取回”的合法例外，
-  // 同时拦住最后一天/换城日凭空出现的回头取件安排。
-  const hasRealStorage = (item) => {
-    const text = `${item && item.activity || ''} ${item && item.note || ''}`;
-    const negative = /(?:不|无|无需|不用|禁止|避免|严禁)[^。；;，,]{0,12}(?:寄存|暂存|存放|存包|寄放)/.test(text);
-    const pickupOnly = /(?:取回|取出|取件|拿回|领回)[^。；;，,]{0,60}(?:寄存|暂存|存放|寄放|存包)/.test(text)
-      && !/(?:寄存|暂存|存放|寄放|存包)[^。；,，;]{0,60}(?:取回|取出|取件|拿回|领回)/.test(text);
-    return /行李|箱子|大件/.test(text) && !negative && !pickupOnly
-      && /寄存|暂存|存放|存包|寄放/.test(text);
-  };
-  items.forEach((item) => {
-    const text = `${item && item.activity || ''} ${item && item.note || ''}`;
-    if (!/(?:取回|取出|取件|拿回|领回)[^。；;，,]{0,80}(?:行李|箱子|大件)/.test(text)) return;
-    const di = Number(item.dayIndex || 0);
-    const hasNearbyStorage = items.some((candidate) => {
-      const candidateDay = Number(candidate.dayIndex || 0);
-      return Math.abs(candidateDay - di) <= 1 && hasRealStorage(candidate);
-    });
-    if (!hasNearbyStorage) issues.push(`第${di + 1}天出现没有寄存依据的取件安排：${fmt(item)}`);
-  });
-
+  // 用下方与生产共用的实际存取状态机检查，不能用备注关键词或邻日任意
+  // 地点的“寄存”当依据，也不能要求早晨从昨晚客房取箱前再虚构寄存。
   const dayReports = (outline.days || []).map((day, dayIndex) => {
     const rows = items.filter((item) => Number(item.dayIndex || 0) === dayIndex);
     executionIssues(rows, {
@@ -378,7 +375,8 @@ function inspectScenario(scenario, outline, items) {
       origin: scenario.input.origin, goTime: scenario.input.startTime, backTime: scenario.input.endTime,
       noDrive: true,
       preferRail: /高铁|动车/.test(profile.transport), date: day.date, points: day.executionPoints || {},
-      hotel: day.hotel, overnight: day.overnight,
+      city: day.city, hotel: day.hotel, overnight: day.overnight,
+      required: require('../cloudfunctions/generatePlan/execution-review').requiredPlacesForDay(profile, outline.days, dayIndex),
       previousHotel: (outline.days[dayIndex - 1] || {}).hotel,
       previousMeals: (outline.days[dayIndex - 1] || {}).executionMealNames || [], knownMeals: day.meals || [], repeatMeals: profile.extra,
       visitWindows: (day.executionEvidence || {}).visitWindows || [],
@@ -436,7 +434,9 @@ function inspectScenario(scenario, outline, items) {
     }
     const zeroDistance = rows.filter((item) => item.category === 'transport'
       && item.startLocation && item.endLocation
-      && P.samePlace(item.startLocation, item.endLocation)
+      && (item.executionReview === require('../cloudfunctions/generatePlan/execution-review').REVIEW_VERSION
+        ? require('../cloudfunctions/generatePlan/execution-review').sameEndpoint(item.startLocation, item.endLocation)
+        : P.samePlace(item.startLocation, item.endLocation))
       && !/环线|环游|绕行|往返|环岛|环湖|环山|游览车|观光车|接驳循环/.test(String(item.activity || '')));
     if (zeroDistance.length) {
       issues.push(`第${dayIndex + 1}天仍有起终点相同的无效交通：${zeroDistance.map(fmt).join('；')}`);
@@ -852,6 +852,7 @@ async function runScenario(scenario) {
   let final = null;
   const maxRounds = 28; // 与后台知识检索/局部修訂分轮预算一致，不把未复核天当完成。
   for (let round = 1; round <= maxRounds; round++) {
+    if (measurement) measurement.rounds++;
     console.log(`[${scenario.name}] 细化第 ${round} 轮，已完成 ${doneDayIndexes.length}/${outline.days.length} 天`);
     const heartbeat = setInterval(() => console.log(`[${scenario.name}] 正在细化第 ${round} 轮，已完成 ${doneDayIndexes.length}/${outline.days.length} 天…`), 12000);
     let result;
@@ -860,6 +861,7 @@ async function runScenario(scenario) {
         doneDayIndexes,
         attempts,
         reviewItems: allItems.length ? allItems : undefined,
+        preservePublishedDays: true,
       });
     } finally {
       clearInterval(heartbeat);
@@ -876,7 +878,7 @@ async function runScenario(scenario) {
     attempts = result.attempts || attempts;
     final = result;
     fs.writeFileSync(path.join(checkpointDir, 'result.json'), JSON.stringify({
-      input, outline, items: allItems, attempts, doneDayIndexes,
+      input, outline, items: allItems, attempts, doneDayIndexes, performance: performanceReport(),
     }, null, 2));
     if (result.reviewError) throw new Error(result.reviewError);
     if (!result.partial) break;
@@ -945,7 +947,8 @@ async function runScenario(scenario) {
   }
   const verifiedHotels = (outline.days || []).filter((day) => day.hotelPoiVerified).length;
   const reportDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'travel-route-'));
-  fs.writeFileSync(path.join(reportDir, 'result.json'), JSON.stringify({ input, outline, items: finalItems, alarms, issues }, null, 2));
+  fs.writeFileSync(path.join(reportDir, 'result.json'), JSON.stringify({ input, outline, items: finalItems, alarms, issues, performance: performanceReport() }, null, 2));
+  if (measurement) console.log('本地性能实测：' + JSON.stringify(performanceReport()));
   console.log(`完整实测记录：${path.join(reportDir, 'result.json')}`);
   console.log(`\n行前/购票提醒数量：${JSON.stringify(alarmCounts)}；酒店提醒 ${hotelAlarms.length} 条；核验酒店 POI ${verifiedHotels} 家；错误门票分类 ${alarmIssues.length} 条`);
   if (issues.length) {
@@ -1041,6 +1044,8 @@ function inspectBookingReminders(profile, items, alarms) {
         const day = saved.outline.days[di];
         day.ticketProducts = day.ticketProducts || (day.executionEvidence || {}).ticketProducts || [];
         delete day.executionEvidence;
+        delete day.executionCandidate;
+        delete day.executionCandidateUnaudited;
       });
     }
     const reportDir = liveReview ? fs.mkdtempSync(path.join(require('os').tmpdir(), 'travel-review-')) : '';
@@ -1048,7 +1053,7 @@ function inspectBookingReminders(profile, items, alarms) {
     const checkpoint = () => {
       if (!reportDir) return;
       fs.writeFileSync(path.join(reportDir, 'result.json'), JSON.stringify({
-        input: saved.input, outline: saved.outline, items, alarms,
+        input: saved.input, outline: saved.outline, items, alarms, performance: performanceReport(),
       }, null, 2));
     };
     if (liveReview) {
@@ -1056,7 +1061,10 @@ function inspectBookingReminders(profile, items, alarms) {
       let attempts = {};
       try {
         for (let round = 0; round < 28; round++) {
-          const result = await P.buildPlan(saved.input, { outline: saved.outline }, { reviewItems: items, attempts });
+          if (measurement) measurement.rounds++;
+          const result = await P.buildPlan(saved.input, { outline: saved.outline }, {
+            reviewItems: items, attempts, preservePublishedDays: true,
+          });
           const fresh = new Set(result.items.map((row) => Number(row.dayIndex || 0)));
           items = items.filter((row) => !fresh.has(Number(row.dayIndex || 0))).concat(result.items);
           items = auditPublishedRows(items, saved.outline, saved.input);
@@ -1085,9 +1093,10 @@ function inspectBookingReminders(profile, items, alarms) {
     }
     if (liveReview) {
       fs.writeFileSync(path.join(reportDir, 'result.json'), JSON.stringify({
-        input: saved.input, outline: saved.outline, items, alarms, issues: inspected.issues,
+        input: saved.input, outline: saved.outline, items, alarms, issues: inspected.issues, performance: performanceReport(),
       }, null, 2));
       console.log(`复核记录：${path.join(reportDir, 'result.json')}`);
+      if (measurement) console.log('本地性能实测：' + JSON.stringify(performanceReport()));
     }
     inspected.dayReports.forEach((day, index) => {
       console.log(`第${index + 1}天 ${day.date}｜${day.city}｜住${day.overnight || '返程'}`);

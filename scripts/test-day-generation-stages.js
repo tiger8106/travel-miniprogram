@@ -23,12 +23,12 @@ const { validateOutlineHotels } = require('../cloudfunctions/generatePlan/hotel-
     const knowledge = await P.buildPlan(input, { outline }, { reviewItems: [room] });
     assert.deepEqual(knowledge.doneDayIndexes, [0]);
     assert(!knowledge.attempts['review-0'], '检索知识不消耗内容修订次数');
-    assert(knowledge.partial); assert.equal(calls, 1);
-    const reviewed = await P.buildPlan(input, { outline }, { reviewItems: knowledge.items, attempts: knowledge.attempts });
-    assert(reviewed.items.every((row) => row.executionReview === R.REVIEW_VERSION));
-    assert.equal(reviewed.progress.done, 1); assert(reviewed.partial);
-    assert.deepEqual(reviewed.doneDayIndexes, [0], '不能把尚未生成的三天算完成');
-    assert.equal(calls, 2, '只处理已有日期，不生成后续天或重复提名提醒');
+    assert(knowledge.partial); assert.equal(calls, 2, '预算充足时运营检索后同轮完整审计');
+    const reviewed = await R.reviewExecutionItems(P.normalizeInput(input), outline, knowledge.items, Date.now() + 43000);
+    assert(reviewed.every((row) => row.executionReview === R.REVIEW_VERSION));
+    assert.equal(knowledge.progress.done, 1);
+    assert.deepEqual(knowledge.doneDayIndexes, [0], '不能把尚未生成的三天算完成');
+    assert.equal(calls, 2, '已通过的日期不再审计，也不生成后续天或重复提名提醒');
   } finally { L.chatWithRetry = original; }
   // 新一批超时必须返回空增量，并且保护上一批的大纲/时刻。
   const acceptedOutline = { days: [
@@ -47,7 +47,7 @@ const { validateOutlineHotels } = require('../cloudfunctions/generatePlan/hotel-
     assert(empty.partial); assert.deepEqual(empty.doneDayIndexes, [0]);
     assert.equal(JSON.stringify(acceptedOutline.days[0]), savedDay, '失败续跑不能重排已通过日期大纲');
   } finally { L.chatWithRetry = original; }
-  // 用户要求优先完成：重试耗尽按大纲补全，但必须明确标为待确认，不冒称通过。
+  // 连续超时按大纲补出候选，但不能跳过独立查询和完整审计。
   try {
     L.chatWithRetry = async () => JSON.stringify([room]);
     const failedOutline = { days: [
@@ -59,8 +59,8 @@ const { validateOutlineHotels } = require('../cloudfunctions/generatePlan/hotel-
     assert(mixed.partial); assert(!mixed.reviewError);
     assert(mixed.items.some((item) => Number(item.dayIndex || 0) === 0));
     const fallback = mixed.items.filter((item) => Number(item.dayIndex || 0) === 1);
-    assert(fallback.length && fallback.every((item) => item.executionReviewStatus === 'needs_confirmation'));
-    assert(fallback.some((item) => /待确认/.test(item.note)));
+    assert(fallback.length && fallback.every((item) => item.executionReview !== R.REVIEW_VERSION));
+    assert.equal(mixed.progress.done, 0, '模型未审计的骨架不计发布完成');
     assert.deepEqual(mixed.gaveUpDayIndexes, []);
   } finally { L.chatWithRetry = original; }
   const result = { outline: { days: [{ city: '甲城市', overnight: '甲城市', hotel: '晨光酒店' }, { overnight: '返程' }] } };

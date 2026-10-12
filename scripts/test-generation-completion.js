@@ -10,7 +10,8 @@ const L = require('../cloudfunctions/generatePlan/llm');
 const copy = (value) => JSON.parse(JSON.stringify(value));
 const row = (di, finalized = false) => Object.assign({ dayIndex: di, startTime: '20:00', endTime: '21:00',
   category: 'hotel', activity: '回房休息', endLocation: '甲城晨光酒店', note: '' }, finalized ? { executionReview: R.REVIEW_VERSION } : {});
-const input = { origin: '用户家', dest: '甲城', startDate: '2026-12-20', endDate: '2026-12-25', startTime: '12:00', endTime: '17:00' };
+const input = { origin: '用户家', dest: '甲城', startDate: '2026-12-20', endDate: '2026-12-25',
+  startTime: '12:00', endTime: '17:00', transport: '大巴/直通车' };
 const outline = { executionSuggestions: {}, days: Array.from({ length: 6 }, (_, i) => ({
   date: `2026-12-${20 + i}`, city: '甲城', overnight: i === 5 ? '返程' : '甲城',
   hotel: i === 5 ? '' : '甲城晨光酒店', highlights: [], meals: [], moves: [],
@@ -51,8 +52,12 @@ const db = { command: { lt: (value) => ({ lt: value }) }, collection(name) {
 } };
 let buildCalls = 0;
 let outlineCalls = 0;
+let consumes = 0;
 const fakeCloud = { init() {}, DYNAMIC_CURRENT_ENV: 'test', getWXContext: () => ({ OPENID: 'user' }),
-  database: () => db, callFunction: async () => ({ result: { code: 0, data: {} } }) };
+  database: () => db, callFunction: async (call) => {
+    if (call.data.action === 'consume') consumes++;
+    return { result: { code: 0, data: {} } };
+  } };
 const originalLoad = Module._load;
 Module._load = function (request, parent, isMain) {
   if (request === 'wx-server-sdk') return fakeCloud;
@@ -89,12 +94,22 @@ Module._load = originalLoad;
 
 (async () => {
   const trip = collections.trips[0], job = collections.gen_jobs[0];
+  Object.assign(job, { leaseUntil: Date.now() + 70000, leaseOwner: 'test' });
+  let busy = await generate.main({ action: 'resume', jobId: 'job', expectRound: 4, runnerId: 'test' });
+  assert(busy.data.busy, '同 runner 网络超时重发也不能重入在执行的同一轮');
+  assert.equal(buildCalls, 0);
+  busy = await generate.main({ action: 'resume', jobId: 'job', expectRound: 4, runnerId: 'worker' });
+  assert(busy.data.busy); assert.equal(buildCalls, 0);
+  Object.assign(job, { leaseUntil: 0, leaseOwner: '' });
   let result = await generate.main({ action: 'resume', jobId: 'job', expectRound: 4, runnerId: 'test' });
   assert.equal(result.code, 0); assert.equal(job.hotelDone, true);
+  assert.equal(job.leaseUntil, 0, '已落库轮次须立即释放租约，后台不等待70秒');
   assert.equal(buildCalls, 0, '酒店核验须占独立一轮，不能挤进细化轮');
   result = await generate.main({ action: 'resume', jobId: 'job', expectRound: job.round, runnerId: 'test' });
   assert.equal(result.code, 0); assert.equal(trip.items.length, 4); assert.equal(trip.genProgress.done, 4);
   assert.equal(job.status, 'running', '生成器误报完成仍以已发布天数为准');
+  assert.equal(job.leaseUntil, 0); assert.equal(job.leaseOwner, '');
+  assert.equal(consumes, 0, '半成品/未验收日期不能扣额度或计成功次数');
   assert.equal(trip.genDraftItems.length, 1); assert.equal(trip.genDraftItems[0].dayIndex, 4);
   const publicGet = await itinerary.main({ action: 'get', tripId: 'trip' });
   assert(!('genDraftItems' in publicGet.data)); assert(!('genDraftOutline' in publicGet.data));
@@ -103,6 +118,11 @@ Module._load = originalLoad;
   result = await generate.main({ action: 'resume', jobId: 'job', expectRound: job.round, runnerId: 'test' });
   assert.equal(result.code, 0); assert.equal(trip.genProgress.done, 5); assert.equal(trip.items.length, 5);
   const accepted = JSON.stringify(trip.items);
+  // 未知接送服务可以警示；该候选本身须已具备可执行的返家闭环。
+  job.input.outline.days[5].executionCandidate = [{ ...row(5), category: 'transport',
+    startTime: '16:20', endTime: '17:00', activity: '乘网约车返家', transportType: 'ride',
+    startLocation: '甲城晨光酒店', endLocation: '用户家' }];
+  job.input.outline.days[5].city = '返程';
   job.createdAt = Date.now() - 26 * 60000;
   result = await generate.main({ action: 'resume', jobId: 'job', expectRound: job.round, runnerId: 'test' });
   assert.equal(result.code, 0); assert.equal(job.status, 'done'); assert.equal(trip.genStatus, 'done');
@@ -110,7 +130,28 @@ Module._load = originalLoad;
   assert.equal(JSON.stringify(trip.items.filter((it) => it.dayIndex < 5)), accepted, '已发布的五天不能被兜底修改');
   assert(trip.items.some((it) => it.dayIndex === 5 && /待确认/.test(it.note)));
   assert.equal(trip.genWarningCount, 1);
+  assert.equal(consumes, 1, '全部验收并成功入库后才调用一次幂等扣费');
   console.log('✓ 实际云函数续跑：候选隐藏、4→5→6进度不回退、限时收尾完整且备注待确认');
+  console.log('✓ 执行中租约防同端/跨端重入，持久化成功即释放，下一轮不等70秒');
+  job.input.generationRequestId = 'this-start';
+  assert.equal((await generate.main({ action: 'jobStatus' })).data.job, null, '普通轮询不重现历史完成任务');
+  assert.equal((await generate.main({ action: 'jobStatus', includeCompleted: true,
+    generationRequestId: 'this-start' })).data.job.status, 'done', '结果失效能恢复本次已完成结果');
+  assert.equal((await generate.main({ action: 'jobStatus', includeCompleted: true,
+    generationRequestId: 'another-start' })).data.job, null, '不能把别次完成结果当作本次生成');
+
+  assert.equal((await generate.main({ action: 'inspectJobs' })).code, -1);
+  collections.users = [{ _openid: 'user', role: 'admin' }];
+  collections.gen_jobs.push({ _id: 'not-owned', _openid: 'other', status: 'failed' });
+  const readOnly = await generate.main({ action: 'inspectJobs' });
+  assert.equal(readOnly.code, 0); assert(!readOnly.data.jobs.some((j) => j.jobId === 'not-owned'));
+  assert(!('input' in readOnly.data.jobs[0])); assert(!('_openid' in readOnly.data.jobs[0]));
+  const loggedContext = fakeCloud.getWXContext;
+  fakeCloud.getWXContext = () => ({});
+  assert.equal((await generate.main({ action: 'inspectJobs', openid: 'user' })).code, -1,
+    '诊断不能由没有平台登录身份的调用代传管理员openid');
+  fakeCloud.getWXContext = loggedContext;
+  console.log('✓ 管理员诊断摘要只读本人任务，普通用户无权，原始输入与账号不下发');
 
   const tripCount = collections.trips.length;
   const madeOutline = await generate.main(Object.assign({ action: 'outlineStart' }, input));
@@ -158,12 +199,14 @@ Module._load = originalLoad;
   try {
     L.chatWithRetry = async () => { calls++; throw new Error('测试模拟模型不可用'); };
     const detail = copy(outline); detail.days = detail.days.slice(0, 2);
+    Object.assign(detail.days[1], { city: '返程', overnight: '返程', hotel: '' });
     // 资料暂缺仍可有界警示收尾；实际携大件登山等不可执行矛盾另测阻止发布。
-    const candidate = Object.assign(row(1), { activity: '在酒店附近休息，出行前确认服务开放情况', category: 'other' });
+    const candidate = Object.assign(row(1), { activity: '乘网约车返家，出行前确认接送服务', category: 'transport',
+      transportType: 'ride', startLocation: '甲城晨光酒店', endLocation: '用户家', startTime: '16:20', endTime: '17:00' });
     detail.days[1].executionCandidate = [candidate];
     detail.days[1].executionReviewIssues = ['服务开放资料暂缺，出行前向运营方确认。'];
     const finalized = await P.buildPlan(input, { outline: detail }, { reviewItems: [row(0, true), candidate],
-      attempts: { 'review-1': 3 }, preservePublishedDays: true });
+      attempts: { 'review-1': 6 }, preservePublishedDays: true });
     assert(!finalized.partial); assert(!finalized.reviewError); assert.equal(finalized.progress.done, 2);
     assert(finalized.items.some((it) => it.executionReviewStatus === 'needs_confirmation' && /待确认/.test(it.note)));
     assert(calls <= 2, '运营和票务独立检索有界，各最多一轮');
@@ -192,11 +235,15 @@ Module._load = originalLoad;
   edges.days[0].highlights = ['甲景点']; edges.days[1].hotel = ''; edges.days[1].overnight = '返程';
   const edgePlan = await P.buildPlan({ ...input, startTime: '17:00' }, { outline: edges }, { reviewItems: [],
     finalizePending: true, preservePublishedDays: true });
-  assert(!edgePlan.partial); assert.equal(edgePlan.progress.done, 2);
-  const first = edgePlan.items.filter((it) => it.dayIndex === 0);
+  assert(edgePlan.partial); assert(edgePlan.reviewError, '预算耗尽且返程仍有真实缺失时必须有界失败');
+  assert.equal(edgePlan.progress.done, 0, '首日晚到且没有真实游览、末日返程不完整时，两个骨架均不可伪造完成');
+  assert(edges.days[0].executionReviewIssues.some((issue) => /缺少实际游览/.test(issue)),
+    '警示收尾同样核验必去内容，不能丢失 required 上下文');
+  const first = edges.days[0].executionCandidate;
   assert(first.every((it) => it.startTime >= '17:00'), '补全首日不能把游玩放到用户启程之前');
   assert(first.some((it) => it.startLocation === input.origin && it.startTime === '17:00'));
-  console.log('✓ 全部详情不可用仍补齐各天；首日启程边界与返家收口保留');
+  assert(edges.days[1].executionCandidate.length, '未通过的返程骨架保留以便用户续跑');
+  console.log('✓ 预算耗尽仍验收全部执行约束，首日边界保留；不完整返程有界失败并可续跑');
 
   let serverJob = { jobId: 'stale', tripId: 'deleted', status: 'failed', error: '旧失败' }, statusError = false;
   const storage = new Map();

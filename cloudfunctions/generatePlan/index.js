@@ -41,7 +41,7 @@ const COL_SCHED = 'schedule_cache';
 const SCHED_TTL_MS = 36 * 3600 * 1000;
 
 // 生成引擎版本（用于确认线上跑的是哪一版）
-const GEN_VERSION = 'v2.22-ticket-intent-review-speed';
+const GEN_VERSION = 'v2.23-review-recovery-handoff';
 const { publicationState, collectGenerationRows } = require('./publication');
 
 async function generateOutlineWithHotelCheck(input, opts) {
@@ -624,7 +624,6 @@ function jobPublic(job, now) {
  */
 async function runJobRound(openid, job) {
   const db = cloud.database();
-  const runnerId = runnerIdOf(job.leaseOwner);
   const input = Object.assign({}, job.input || {});
   const payload = Object.assign({}, input, {
     tripId: job.tripId || '',
@@ -644,19 +643,6 @@ async function runJobRound(openid, job) {
       const res = await generateOutlineWithHotelCheck(payload, {});
       const totalDays = (res.outline && res.outline.days || []).length;
       const now = Date.now();
-      await db.collection(COL_JOB).doc(job._id).update({
-        data: {
-          input: Object.assign({}, input, {
-            outline: res.outline, title: res.title, summary: res.summary,
-          }),
-          title: String(res.title || job.title || ''),
-          progress: { done: 0, total: totalDays },
-          round: (job.round || 0) + 1,
-          updatedAt: now,
-          leaseUntil: now + JOB_LEASE_MS,
-          leaseOwner: runnerId,
-        },
-      }).catch((e) => console.warn('[generatePlan] 大纲写回任务失败:', e.message));
       await updateTripGeneration(db, job.tripId, {
         title: String(res.title || job.title || '正在生成的攻略').slice(0, 60),
         summary: String(res.summary || '').slice(0, 200),
@@ -667,6 +653,19 @@ async function runJobRound(openid, job) {
         genProgress: { done: 0, total: totalDays },
         genError: '',
         jobId: job._id,
+      });
+      await db.collection(COL_JOB).doc(job._id).update({
+        data: {
+          input: Object.assign({}, input, {
+            outline: res.outline, title: res.title, summary: res.summary,
+          }),
+          title: String(res.title || job.title || ''),
+          progress: { done: 0, total: totalDays },
+          round: (job.round || 0) + 1,
+          updatedAt: now,
+          leaseUntil: 0,
+          leaseOwner: '',
+        },
       });
       console.log('[generatePlan] 任务 %s 后台大纲完成：%d 天', job._id, totalDays);
       return {
@@ -694,8 +693,8 @@ async function runJobRound(openid, job) {
           status: giveUp ? 'failed' : 'running',
           error: giveUp ? `大纲连续 ${attempts.outline} 次没生成出来：${String(e.message || e).slice(0, 80)}` : '',
           updatedAt: now,
-          leaseUntil: giveUp ? 0 : now + JOB_LEASE_MS,
-          leaseOwner: giveUp ? '' : runnerId,
+          leaseUntil: 0,
+          leaseOwner: '',
         },
       }).catch(() => {});
       if (giveUp) throw e;
@@ -757,8 +756,8 @@ async function runJobRound(openid, job) {
           hotelDone: !!job.hotelDone,
           round: (job.round || 0) + 1,
           updatedAt: now,
-          leaseUntil: now + JOB_LEASE_MS,
-          leaseOwner: runnerId,
+          leaseUntil: 0,
+          leaseOwner: '',
         },
       }).catch((e) => console.warn('[generatePlan] 班次写回任务失败:', e.message));
       job.schedDone = true;
@@ -790,8 +789,8 @@ async function runJobRound(openid, job) {
         hotelDone: true,
         round,
         updatedAt: now,
-        leaseUntil: now + JOB_LEASE_MS,
-        leaseOwner: runnerId,
+        leaseUntil: 0,
+        leaseOwner: '',
       },
     });
     return {
@@ -824,7 +823,7 @@ async function runJobRound(openid, job) {
   }
   const data = await savePlan(openid, plan, job.tripId, job._id, payload.outline, payload);
   // 落库成功才扣费；bizKey 按 tripId 幂等，续跑多轮也只扣一次
-  if (data && data.tripId) {
+  if (data && data.tripId && !data.partial) {
     await quotaCall(openid, {
       action: 'consume', scene: 'plan', bizKey: `plan:${data.tripId}`, tripId: data.tripId,
     });
@@ -846,13 +845,11 @@ async function runJobRound(openid, job) {
     status,
     error: status === 'failed' ? (data.reviewError || '生成时间过长已停止，请重新生成或稍后再试') : '',
     updatedAt: now,
-    // 还在跑 → 继续占着租约，定时触发器别插手；跑完/失败 → 释放
-    leaseUntil: status === 'running' ? now + JOB_LEASE_MS : 0,
-    leaseOwner: status === 'running' ? runnerId : '',
+    // 本轮已全部落库，不再有在途写入；立即允许下一轮原子领取。
+    // 只有正在执行的轮次占租约，避免关闭小程序后每轮额外等待70秒。
+    leaseUntil: 0,
+    leaseOwner: '',
   };
-  await db.collection(COL_JOB).doc(job._id).update({ data: patch }).catch((e) => {
-    console.warn('[generatePlan] 任务进度写回失败:', e.message);
-  });
   if (status === 'failed' && patch.tripId) {
     await updateTripGeneration(db, patch.tripId, {
       genStatus: 'failed',
@@ -861,6 +858,8 @@ async function runJobRound(openid, job) {
       jobId: '',
     });
   }
+  // 行程状态也写完才释放，避免新轮复活后被旧轮的失败写回覆盖。
+  await db.collection(COL_JOB).doc(job._id).update({ data: patch });
   console.log('[generatePlan] 任务 %s 第 %d 轮完成：%s，进度 %s',
     job._id, round, status, JSON.stringify(patch.progress || {}));
   return Object.assign({ jobId: job._id }, patch, {
@@ -920,7 +919,7 @@ async function ensureCollection(db, name) {
   _ensuredCols.add(name);
 }
 
-/** 建任务（首轮）。只在建任务前查一次额度，续跑不再查（那一次的钱已经扣过了） */
+/** 建任务（首轮）。启动前校验额度，续跑不重复校验；整单成功才幂等消费。 */
 async function createJob(openid, event) {
   const db = cloud.database();
   await ensureCollection(db, COL_JOB);
@@ -1107,6 +1106,27 @@ exports.main = async (event, context) => {
   }
 
   // ②-B 查后台生成进度（用户回到小程序 / 切到「我的行程」时问一次）
+  // 管理员仅查本人近期任务摘要，包含已删除行程留下的取消任务；不开放客户端数据库权限。
+  if (action === 'inspectJobs') {
+    // 新诊断只接受平台登录身份，不使用后台接力的 event.openid 代传。
+    if (!ctxOpenid) return { code: -1, msg: '无权限' };
+    const db = cloud.database();
+    const users = await db.collection('users').where({ _openid: openid }).limit(1).get();
+    if (!users.data || !users.data[0] || users.data[0].role !== 'admin') return { code: -1, msg: '无权限' };
+    const recent = await db.collection(COL_JOB).where({ _openid: openid }).orderBy('updatedAt', 'desc').limit(5).get();
+    return { code: 0, data: { version: GEN_VERSION, jobs: (recent.data || []).map((job) => ({
+      jobId: job._id, kind: job.kind || 'detail', title: job.title, status: job.status, round: job.round,
+      progress: job.progress, attempts: job.attempts, error: String(job.error || '').slice(0, 300),
+      elapsedMs: Number(job.updatedAt || 0) - Number(job.createdAt || 0), updatedAt: job.updatedAt,
+      days: ((job.input || {}).outline || {}).days?.map((day, i) => ({
+        day: i + 1, date: day.date, issues: (day.executionReviewIssues || []).slice(0, 8),
+        repairFailures: day.executionRepairFailures, phase: day.executionReviewPhase,
+        attempted: !!day.executionReviewAttempted, hasEvidence: !!day.executionEvidence,
+        candidateCount: (day.executionCandidate || []).length,
+      })),
+    })) } };
+  }
+
   if (action === 'jobStatus') {
     try {
       const db = cloud.database();
@@ -1114,10 +1134,16 @@ exports.main = async (event, context) => {
         .where({ _openid: openid })
         .orderBy('updatedAt', 'desc').limit(10).get();
       const now = Date.now();
+      // 首次调用结果失效时按本次请求关联恢复，包括已经完成的任务；
+      // 普通启动/页面轮询仍不恢复历史完成任务，也不依赖手机时钟。
+      const requestId = String(event.generationRequestId || '').slice(0, 100);
+      const includeCompleted = event.includeCompleted === true && !!requestId;
       const candidates = (res.data || [])
         .filter((j) => j.kind !== 'outline')
+        .filter((j) => !includeCompleted || (j.input || {}).generationRequestId === requestId)
         .filter((j) => j.status === 'running'
-          || (j.status === 'failed' && now - Number(j.updatedAt || 0) <= JOB_STATUS_TTL_MS))
+          || (j.status === 'failed' && now - Number(j.updatedAt || 0) <= JOB_STATUS_TTL_MS)
+          || (includeCompleted && j.status === 'done'))
         .filter((j) => !j.dismissed);
       const jobs = [];
       for (const job of candidates) {
@@ -1176,42 +1202,43 @@ exports.main = async (event, context) => {
       function asCompletedDay(key) {
         return (job.doneDayIndexes || []).includes(Number(key));
       }
-      await cloud.database().collection(COL_JOB).doc(jobId).update({
+      const revived = await db.collection(COL_JOB).where({ _id: jobId, _openid: openid, status: 'failed' }).update({
         data: {
           attempts,
           createdAt: now0, round: 0,
           status: 'running', revivals: revivals + 1, error: '',
-          leaseUntil: now0 + JOB_LEASE_MS, leaseOwner: runnerId, updatedAt: now0,
+          leaseUntil: 0, leaseOwner: '', updatedAt: now0,
         },
-      }).catch(() => {});
+      });
+      if (!Number(revived.stats && (revived.stats.updated || revived.stats.updatedCount))) {
+        const current = await db.collection(COL_JOB).doc(jobId).get();
+        return { code: 0, data: Object.assign(jobPublic(current.data, Date.now()), { busy: true }) };
+      }
       job.status = 'running';
       job.attempts = attempts;
       job.createdAt = now0; job.round = 0;
-      job.leaseOwner = runnerId;
-      job.leaseUntil = now0 + JOB_LEASE_MS;
+      job.leaseOwner = '';
+      job.leaseUntil = 0;
+      // 此请求主动恢复后从新第0轮领取，旧 expectRound 不适用于新预算。
+      event = Object.assign({}, event, { expectRound: 0 });
       console.log('[generatePlan] 任务 %s 复活（第 %d 次）', jobId, revivals + 1);
     }
     if (job.status !== 'running') return { code: 0, data: jobPublic(job, Date.now()) };
     const now = Date.now();
-    // 乐观锁：带 expectRound 说明是"我刚跑完第 n 轮，我要接着跑" ——
-    // 只要没别人推进过（round 没变）就放行，这样连续几轮之间不用干等租约过期。
-    // 不带 expectRound 的是定时触发器，靠租约判断上一轮是不是已经死了。
-    const sameOwner = job.leaseOwner && job.leaseOwner === runnerId;
-    const busy = event.expectRound != null
-      ? (Number(job.round) !== Number(event.expectRound)
-        || (job.leaseUntil > now && !sameOwner))
-      : (job.leaseUntil > now);
+    // 成功持久化后已主动释放租约；仍有效的租约一定视为在执行。
+    // 同 runner 的网络超时重发也不可重入同轮，expectRound 只检查进度。
+    const busy = job.leaseUntil > now || (event.expectRound != null
+      && Number(job.round) !== Number(event.expectRound));
     if (busy) return { code: 0, data: Object.assign(jobPublic(job, now), { busy: true }) };
     // 读取租约后再做一次带条件的更新，防止两个 genWorker 实例同时捞到同一任务。
-    // 前端续跑可以续自己的租约；不同 runner 不能覆盖正在执行的那一轮。
+    // 前台、worker 及同 runner 的重发都只能领取过期/已释放的租约。
     const claimWhere = {
       _id: jobId,
       _openid: openid,
       status: 'running',
       round: Number(job.round) || 0,
     };
-    if (job.leaseUntil > now) claimWhere.leaseOwner = runnerId;
-    else claimWhere.leaseUntil = db.command.lt(now);
+    claimWhere.leaseUntil = db.command.lt(now);
     const claimed = await db.collection(COL_JOB).where(claimWhere).update({
       data: { leaseUntil: now + JOB_LEASE_MS, leaseOwner: runnerId, updatedAt: now },
     }).catch(() => null);
@@ -1355,7 +1382,7 @@ exports.main = async (event, context) => {
     const data = await savePlan(openid, plan, event.tripId, '', event.outline, event);
     // 落库成功才扣费：大纲阶段没生成出来不收钱（避免"失败也扣费"的投诉）。
     // bizKey 用 tripId，续跑多轮也只扣一次（quota 侧按 bizKey 幂等）。
-    if (data && data.tripId) {
+    if (data && data.tripId && !data.partial) {
       await quotaCall(openid, {
         action: 'consume', scene: 'plan', bizKey: `plan:${data.tripId}`, tripId: data.tripId,
       });

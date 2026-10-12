@@ -148,7 +148,8 @@ test('批量日历组件、回调与死工具已移除，逐项日历回调保�
     const origin = row('从家出发', 'transport', '12:00', '13:00', '用户家', '甲酒店', 'ride');
     const day = { date: '2027-10-04', city: '甲城', overnight: '甲城', hotel: '甲酒店', highlights: [], moves: [] };
     L.chatWithRetry = async (messages, options) => {
-      assert(options.enableSearch); assert(!options.maxTokens);
+      assert.equal(options.enableSearch, messages[0].content.includes('旅行票务') || messages[0].content.includes('运营知识'));
+      assert(!options.maxTokens);
       if (messages[0].content.includes('旅行票务')) { ticketQueries++; return JSON.stringify({ ticketProducts: [], ticketPolicies: [{ ...policies[0], activity: visit.activity, place: '甲河' }] }); }
       if (messages[0].content.includes('运营知识')) return JSON.stringify({ routeFacts: [], scenicRoute: '市区短线', warnings: [] });
       audits++; return JSON.stringify({ items: [origin, visit, resting] });
@@ -173,7 +174,7 @@ test('批量日历组件、回调与死工具已移除，逐项日历回调保�
     const baseChat = L.chatWithRetry;
     L.chatWithRetry = async (messages, options) => {
       if (messages[0].content.includes('旅行票务') || messages[0].content.includes('运营知识')) return baseChat(messages, options);
-      audits++; assert(options.enableSearch); return '{"acceptOriginal":true}';
+      audits++; assert.equal(options.enableSearch, false); return '{"acceptOriginal":true}';
     };
     const confirmed = await R.reviewExecutionItems({ origin: '用户家', extra: '无大件行李' }, outline,
       [origin, visit, resting], Date.now() + 45000);

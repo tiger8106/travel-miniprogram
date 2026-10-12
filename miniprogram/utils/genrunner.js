@@ -17,7 +17,7 @@ const api = require('../services/api');
 
 const STORE_KEY = 'gen_running_job';
 const MAX_RUN_MS = 12 * 60 * 1000;   // 本客户端最多驱动 12 分钟（防死循环）
-const TIMEOUT_RE = /-504003|-601002|ESOCKETTIMEDOUT|timed out|TIME_LIMIT|执行超时/i;
+const TIMEOUT_RE = /-504003|-601002|ESOCKETTIMEDOUT|ETIMEDOUT|ECONNRESET|network|网络|timed out|TIME_LIMIT|执行超时|result.*expired|poll.*expired/i;
 const RUNNER_ID = `client-${Date.now()}-${Math.floor(Math.random() * 1000000000)}`;
 
 let state = {
@@ -92,6 +92,11 @@ async function pump(jobId, round, token) {
         await sleep(6000);
         continue;
       }
+      if (TIMEOUT_RE.test((e && e.message) || '')) {
+        // 多次前台取结果失败不代表云端任务失败，停止本地驱动让后台接力。
+        set({ jobId, status: 'running', error: '' });
+        return Object.assign({}, r, { partial: true, status: 'running' });
+      }
       set({ status: 'failed', error: e.message || '续跑失败' });
       return r;
     }
@@ -125,6 +130,7 @@ async function pump(jobId, round, token) {
 async function start(payload) {
   if (driving) return state;
   const token = ++runToken;
+  const requestId = `${RUNNER_ID}:${token}`;
   driving = true;
   const total = ((payload && payload.outline && payload.outline.days) || []).length || 0;
   set({
@@ -132,7 +138,7 @@ async function start(payload) {
     round: 0, progress: { done: 0, total }, itemCount: 0, error: '',
   });
   try {
-    const res = await api.startGen(Object.assign({}, payload, { runnerId: RUNNER_ID }));
+    const res = await api.startGen(Object.assign({}, payload, { runnerId: RUNNER_ID, generationRequestId: requestId }));
     if (token !== runToken) return state;
     if (!res) throw new Error('生成失败，请重试');
     set({
@@ -155,6 +161,29 @@ async function start(payload) {
   } catch (e) {
     driving = false;
     if (token !== runToken) return state;
+    if (TIMEOUT_RE.test((e && e.message) || '')) {
+      // 首轮已在云端建任务但结果失效时，按服务端状态恢复，不重复新建。
+      let job;
+      try {
+        const latest = await api.genJobStatus({ includeCompleted: true, requestId });
+        job = latest && latest.job;
+      } catch (_) { /* 只读进度也可能暂不可用，等待应用恢复时再次同步。 */ }
+      if (token !== runToken) return state;
+      if (job && job.status === 'failed') {
+        set({ status: 'failed', error: job.error || '生成暂未完成，请稍后继续' });
+        throw new Error(state.error);
+      }
+      if (job && job.status === 'cancelled') { reset(); return job; }
+      if (job) {
+        set({ jobId: job.jobId, tripId: job.tripId || '', status: job.status,
+          title: job.title || state.title, itemCount: job.itemCount || 0,
+          round: job.round || 0, progress: job.progress || state.progress, error: '' });
+        saveJobId(job.status === 'running' ? job.jobId : '');
+        return Object.assign({}, job, { partial: job.status !== 'done' });
+      }
+      set({ status: 'running', error: '' });
+      return Object.assign({}, state, { partial: true });
+    }
     set({ status: 'failed', error: e.message || '生成失败' });
     throw e;
   }
