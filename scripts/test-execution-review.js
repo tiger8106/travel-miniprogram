@@ -540,14 +540,15 @@ test('已执行复核的日期入库审计不修改时段或重排大纲', () =>
     llm.chatWithRetry = async (messages, opts) => {
       calls++;
       assert(!opts.maxTokens, '执行复核不得硬截断输出');
-      assert(opts.enableSearch, '地理与运营知识必须联网核对');
+      assert.equal(opts.enableSearch, messages[0].content.includes('运营知识') || messages[0].content.includes('旅行票务'),
+        '独立知识查询联网，审计复用证据而不重复强制搜索');
       if (messages[0].content.includes('运营知识')) return JSON.stringify({ routeFacts: [], scenicRoute: '市区酒店附近短线，具体班次待查询', warnings: [], sources: [] });
       return JSON.stringify({ items: [row('12:00', '13:00', 'transport', '从家出发', '用户家', '甲城车站', 'ride'), room], moves: [] });
     };
     const outline = { days: [{ city: '甲城', overnight: '甲城', hotel: '甲城晨光酒店', highlights: [], moves: [] }, { overnight: '返程' }] };
     const first = await R.reviewExecutionItems({ origin: '用户家' }, outline, [room], Date.now() + 20000);
     assert(!first[0].executionReview, '运营检索轮不能提前标记时间线通过');
-    const accepted = await R.reviewExecutionItems({ origin: '用户家' }, outline, first, Date.now() + 20000);
+    const accepted = await R.reviewExecutionItems({ origin: '用户家' }, outline, first, Date.now() + 45000);
     assert.equal(accepted[0].executionReview, R.REVIEW_VERSION);
     await R.reviewExecutionItems({ origin: '用户家' }, outline, accepted, Date.now() + 20000);
     assert.equal(calls, 2, '知识和时间线分轮，已完成日期不能重复调用 LLM');

@@ -55,10 +55,6 @@
       </view>
     </view>
     <view class="refund-tip">⚠️ 虚拟权益到账后原则上不支持主动撤销，请确认后再下单；如重复扣款、未到账或非本人购买，请通过支付平台售后或联系客服处理，最终以平台审核结果为准</view>
-    <view class="sync-row" wx:if="{{loggedIn}}">
-      <text class="sync-text">付了钱额度没到账？</text>
-      <text class="sync-btn" bindtap="onSync">刷新额度</text>
-    </view>
     <!-- 订单中心入口：提审时填的「小程序订单中心 path」指向这里 -->
     <view class="orders-row" wx:if="{{loggedIn}}" bindtap="onTapOrders">
       <text class="orders-text">🧾 我的订单</text>

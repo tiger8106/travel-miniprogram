@@ -4,6 +4,7 @@ const auth = require('../../utils/auth');
 const homeCache = require('../../utils/homecache');
 const privacy = require('../../utils/privacy');
 const quota = require('../../utils/quota');
+const { userErrorMessage } = require('../../utils/user-error');
 
 const app = getApp();
 
@@ -29,6 +30,10 @@ Page({
    * 于是弹窗反复出现。现在先授权、后调用，且不再自动重试，循环从根上断掉。
    */
   async onChooseFile() {
+    if (this._activeTaskId) {
+      wx.showToast({ title: '当前攻略仍在后台解析，请完成后再选新文件', icon: 'none' });
+      return;
+    }
     if (this._choosing) return;      // 防重入：连点两次不会弹两轮
     if (!wx.chooseMessageFile) {
       wx.showModal({
@@ -50,9 +55,7 @@ Page({
         wx.showModal({
           title: notReady ? '隐私指引还没生效' : '还没完成授权',
           content: notReady
-            ? '小程序后台的《用户隐私保护指引》还没有生效（读到的指引名称是空的）。\n\n'
-              + '请到后台 → 设置 → 服务内容声明 → 用户隐私保护指引，'
-              + '勾选「读取聊天文件」这一类并提交，等微信审核通过（保存不等于生效）。'
+            ? '暂时无法完成文件授权，请稍后再试。'
             : '刚才没有完成授权，暂时不能选择文件。回到页面重新点一次，在弹窗里选「同意并继续」即可。',
           showCancel: false,
           confirmText: '知道了',
@@ -86,18 +89,14 @@ Page({
     if (/privacy|scope|author/i.test(msg)) {
       // 走到这儿说明"同意"了还是被拦 —— 十有八九是后台的《用户隐私保护指引》
       // 没声明「读取聊天文件」或还没审核通过（不是保存即生效）。
-      // 只提示一次，把排查路径讲清楚，不再弹授权窗、不再重试。
+      // 用户只看到授权提示；后台配置诊断留在日志，不再弹授权窗、不再重试。
       if (this._privacyWarned) return;
       this._privacyWarned = true;
       this.setData({ showPrivacy: false });
       privacy.diagnose('upload');
       wx.showModal({
         title: '隐私授权还没生效',
-        content: '微信提示仍需要《用户隐私保护指引》授权。\n\n'
-          + '请在小程序后台 → 设置 → 服务内容声明 → 用户隐私保护指引里：\n'
-          + '1）勾选「读取聊天文件」这一类；\n'
-          + '2）提交后等微信审核通过（不是保存即生效）。\n\n'
-          + '生效后重新进入本页即可选择文件。',
+        content: '暂时无法读取文件，请稍后重新进入页面完成隐私授权。',
         showCancel: false,
         confirmText: '知道了',
       });
@@ -105,7 +104,7 @@ Page({
     }
     wx.showModal({
       title: '选择文件失败',
-      content: `${msg || '未知原因'}\n\n可以换个文件再试，或先把文档发到「文件传输助手」再从这里选择。`,
+      content: '可以换个文件再试，或先把文档发到「文件传输助手」再从这里选择。',
       showCancel: false,
       confirmText: '知道了',
     });
@@ -133,15 +132,20 @@ Page({
 
   onLoad() {
     // 订阅全局登录态：一处登录全站解锁
-    this._offAuth = auth.watch(this, { onLogout: () => this.setData({ fileName: '', result: null }) });
+    this._offAuth = auth.watch(this, { onLogout: () => {
+      this._activeTaskId = null;
+      this.setData({ fileName: '', result: null, parsing: false, uploading: false, errorMsg: '' });
+    } });
   },
 
   onUnload() {
+    this._visible = false;
     if (this._offAuth) { this._offAuth(); this._offAuth = null; }
     this.unbindPrivacy();
   },
 
   onHide() {
+    this._visible = false;
     // 离开本页就交出授权处理权，避免别的页面触发时弹到看不见的地方
     this.unbindPrivacy();
   },
@@ -163,6 +167,7 @@ Page({
   },
 
   async onShow() {
+    this._visible = true;
     this.bindPrivacy();
     // 未登录 → 先自动静默登录一次；仍然失败才显示登录门禁卡
     const ok = await auth.requireLogin();
@@ -171,6 +176,70 @@ Page({
       return;
     }
     if (this.data.needLogin) this.setData({ needLogin: false });
+    this.resumeActiveTask();
+  },
+
+  taskStorageKey() { return `parse_active_task_v1_${auth.getOpenid() || ''}`; },
+
+  async resumeActiveTask() {
+    const taskId = wx.getStorageSync(this.taskStorageKey());
+    if (!taskId || this._driving) return;
+    this._activeTaskId = taskId;
+    try {
+      const status = await api.parseTravelPlanStep({ action: 'status', taskId });
+      if (!this._visible) return;
+      this.showTaskStatus(status);
+      if (status.status === 'done') return this.finishParse(status.result, false);
+      if (status.status === 'running') this.driveParse(taskId);
+    } catch (e) {
+      console.error('[upload] status failed:', e);
+      this.setData({ errorMsg: userErrorMessage(e, '暂时无法读取解析进度，请稍后重试。') });
+    }
+  },
+
+  showTaskStatus(status) {
+    const phaseText = { day: '逐天解析行程', collect: '提取提醒与建议', infer: '整理住宿与行程',
+      geocode: '校验地图位置', commit: '保存详细行程' };
+    this.setData({ uploading: false, parsing: status.status === 'running',
+      progress: status.progress || 0,
+      stageText: status.status === 'running'
+        ? `${phaseText[status.phase] || '解析中'}${status.phase === 'day' ? ` ${status.doneDays || 0}/${status.dayCount || 0}` : ''}`
+        : '',
+      errorMsg: status.status === 'failed' ? userErrorMessage(status.error, '解析暂未完成，请点击重试。') : '',
+    });
+    if (status.status === 'failed') console.error('[upload] task failed:', status.error);
+  },
+
+  finishParse(result, navigate) {
+    if (!result) return;
+    wx.removeStorageSync(this.taskStorageKey());
+    this._activeTaskId = null;
+    this.setData({ uploading: false, parsing: false, progress: 100, result, errorMsg: '', stageText: '' });
+    app.globalData.currentTripId = result.tripId;
+    homeCache.setSelectedTripId(auth.getOpenid(), result.tripId);
+    homeCache.clear();
+    quota.clear();
+    if (navigate && this._visible) wx.switchTab({ url: '/pages/index/index' });
+  },
+
+  async driveParse(taskId, retry) {
+    if (this._driving) return;
+    this._driving = true;
+    try {
+      let first = true;
+      while (this._visible && this._activeTaskId === taskId) {
+        const status = await api.parseTravelPlanStep({ action: 'resume', taskId, retry: !!retry && first });
+        first = false;
+        if (!this._visible) break;
+        this.showTaskStatus(status);
+        if (status.status === 'done') { this.finishParse(status.result, true); break; }
+        if (status.status === 'failed') break;
+        if (status.leaseUntil > Date.now()) await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+    } catch (e) {
+      console.error('[upload] resume failed:', e);
+      if (this._visible) this.setData({ errorMsg: userErrorMessage(e, '暂时无法更新进度，请稍后返回查看后台解析结果。'), parsing: true });
+    } finally { this._driving = false; }
   },
 
   // 登录成功后由门禁组件回调
@@ -179,6 +248,10 @@ Page({
   },
 
   async onUpload() {
+    if (this._activeTaskId) {
+      wx.showToast({ title: '已有解析任务，请点击重试或等待完成', icon: 'none' });
+      return;
+    }
     if (!this.data.filePath) {
       wx.showToast({ title: '请先选择文件', icon: 'none' });
       return;
@@ -190,148 +263,55 @@ Page({
     const can = await quota.ensureOrPay('parse');
     if (!can) return;
     this.setData({ uploading: true, progress: 5, errorMsg: '', result: null });
-    this._taskState = null; // 新任务从头开始
     try {
       // 1. 上传到云存储
       const fileID = await api.uploadDoc(this.data.filePath);
       this.setData({ fileID, progress: 12 });
-      // 2. 分步解析（六步流水线，每步远小于云函数 60s 上限）
-      await this.runParsePipeline({ fileID });
+      // 2. 创建持久化解析任务；之后页面与云端定时器共用同一续跑入口。
+      const init = await api.parseTravelPlanStep({ step: 'init', fileID });
+      if (!init || !init.taskId) throw new Error('解析任务创建失败，请确认云函数已部署');
+      this._activeTaskId = init.taskId;
+      wx.setStorageSync(this.taskStorageKey(), init.taskId);
+      this.setData({ uploading: false, parsing: true, progress: 15 });
+      this.driveParse(init.taskId);
     } catch (err) {
       console.error('[upload] error:', err);
       console.error('[upload] err.message:', err.message);
       console.error('[upload] err.errMsg:', err.errMsg);
       // 友好错误提示
       const rawMsg = err.errMsg || err.message || '解析失败';
-      const msg = rawMsg.includes('pako') || rawMsg.includes('inflate')
-        ? '当前为 mock 模式，docx 解析需要部署云函数才能使用。'
-        : rawMsg;
       // 次数用完/撞限额不是故障，给购买引导而不是丢一句红字
-      if (/次数|额度|上限/.test(msg)) {
+      if (/次数|额度|上限/.test(rawMsg)) {
         this.setData({ errorMsg: '' });
-        quota.guideToPay(msg);
+        quota.guideToPay(userErrorMessage(err));
         return;
       }
-      this.setData({ errorMsg: msg });
-    } finally {
-      this.setData({ uploading: false, parsing: false, progress: 0, stageText: '' });
-    }
+      this.setData({ errorMsg: userErrorMessage(err, '暂时无法开始解析，请稍后重试。') });
+    } finally { this.setData({ uploading: false }); }
   },
 
-  /**
-   * 分步解析流水线：init → day×N → collect → infer → geocode（循环）→ commit
-   *
-   * 为什么拆步：云函数同步调用上限就是 60s（调不高），七天攻略的
-   * 并行 LLM + 覆盖度复查 + 几十个地址定位 + AI 反推待办加起来经常破 60s。
-   * 拆步后每步都在云函数上限内跑完；任务进度存在云数据库 parse_tasks 里，
-   * 任何一步失败，点"重试"都从失败的那一步继续，前面已成功的天不会重跑。
-   */
+  /** 已上传文件重试时创建持久化任务；逐步推进由云端统一编排。 */
   async runParsePipeline(state) {
-    this.setData({ parsing: true });
-    // 断点记录：每成功一步就更新，失败时 onRetry 从这里续跑
-    const mark = () => { this._taskState = Object.assign({}, state); };
-    const step = (payload) => api.parseTravelPlanStep(payload);
-
-    // ① 读文档 + 切分（秒级）
-    if (!state.taskId) {
-      this.setStage('读取文档…', 15);
-      const init = await step({ step: 'init', fileID: state.fileID });
-      // 防御：callFn 约定云函数返回 {code:0,data}，若云端版本没对齐（返回平铺字段），
-      // 这里会拿到 undefined——给一句能定位问题的话，别让「reading 'taskId'」裸奔
-      if (!init || !init.taskId) {
-        throw new Error('解析服务返回异常（init 无 taskId）：请确认 parseTravelPlan 云函数已重新上传部署');
-      }
-      state.taskId = init.taskId;
-      state.dayCount = init.dayCount;
-      state.dayIndex = 0;
-      state.next = 'day';
-      mark();
-    }
-
-    // ② 逐天 AI 解析（一次调用解析一天，进度可见、失败可单天重试）
-    if (state.next === 'day') {
-      for (; state.dayIndex < state.dayCount; state.dayIndex++) {
-        this.setStage(
-          `AI 解析行程 第 ${state.dayIndex + 1}/${state.dayCount} 天…`,
-          15 + Math.round(55 * (state.dayIndex / state.dayCount))
-        );
-        await step({ step: 'day', taskId: state.taskId, index: state.dayIndex });
-        mark();
-      }
-      state.next = 'collect';
-      mark();
-    }
-
-    // ③ 闹钟（预订章节）+ 旅行建议
-    if (state.next === 'collect') {
-      this.setStage('提取闹钟与旅行建议…', 74);
-      await step({ step: 'collect', taskId: state.taskId });
-      state.next = 'infer';
-      mark();
-    }
-
-    // ④ 清洗汇总 + AI 反推待办
-    if (state.next === 'infer') {
-      this.setStage('反推抢票/预订待办…', 80);
-      await step({ step: 'infer', taskId: state.taskId });
-      state.next = 'geocode';
-      mark();
-    }
-
-    // ⑤ 地理编码（每轮限墙钟 35s，一次跑不完自动再来一轮）
-    if (state.next === 'geocode') {
-      let remaining = 1;
-      let round = 0;
-      while (remaining > 0) {
-        round++;
-        this.setStage(`地图定位中${round > 1 ? `（第 ${round} 轮）` : ''}…`, 86);
-        const g = await step({ step: 'geocode', taskId: state.taskId });
-        remaining = g.remaining || 0;
-        mark();
-      }
-      state.next = 'commit';
-      mark();
-    }
-
-    // ⑥ 坐标回填 + 入库
-    this.setStage('生成行程…', 96);
-    const result = await step({ step: 'commit', taskId: state.taskId });
-    this._taskState = null; // 全部完成，清掉断点
-    this.setData({ progress: 100, result });
-
-    // 成功：提示 + 跳首页（清掉首页快照缓存，避免先闪一下旧行程）
-    wx.showToast({ title: '导入成功', icon: 'success' });
-    app.globalData.currentTripId = result.tripId;
-    homeCache.clear();
-    quota.clear();     // 入库成功云端已扣 1 次，本地额度缓存作废
-    setTimeout(() => {
-      wx.switchTab({ url: '/pages/index/index' });
-    }, 800);
-  },
-
-  setStage(text, progress) {
-    this.setData({ stageText: text, progress });
+    // 兼容旧调用入口：实际步骤编排已经迁移到云端。
+    if (state && state.taskId) return this.driveParse(state.taskId);
+    const init = await api.parseTravelPlanStep({ step: 'init', fileID: state.fileID });
+    this._activeTaskId = init.taskId;
+    wx.setStorageSync(this.taskStorageKey(), init.taskId);
+    return this.driveParse(init.taskId);
   },
 
   onRetry() {
     this.setData({ result: null, errorMsg: '' });
-    // 有断点 → 从失败的那一步继续（已解析的天不重跑）；没有 → 从上传重头再来
-    if (this._taskState && this._taskState.taskId) {
-      const state = Object.assign({}, this._taskState);
-      this._taskState = null;
-      this.runParsePipeline(state).catch((err) => {
-        console.error('[upload] retry error:', err);
-        this.setData({ errorMsg: err.errMsg || err.message || '解析失败' });
-        this.setData({ uploading: false, parsing: false, progress: 0, stageText: '' });
-      });
+    if (this._activeTaskId) {
+      this.driveParse(this._activeTaskId, true);
       return;
     }
     if (this.data.fileID) {
-      // 文件已在云存储：跳过上传直接重跑流水线
+      // 任务尚未创建成功：文件已上传，直接重建解析任务。
       this.setData({ uploading: true, progress: 12 });
       this.runParsePipeline({ fileID: this.data.fileID }).catch((err) => {
         console.error('[upload] retry error:', err);
-        this.setData({ errorMsg: err.errMsg || err.message || '解析失败' });
+        this.setData({ errorMsg: userErrorMessage(err, '解析暂未完成，请稍后重试。') });
         this.setData({ uploading: false, parsing: false, progress: 0, stageText: '' });
       });
       return;

@@ -51,6 +51,7 @@ Page({
   },
 
   onShow() {
+    this.showCachedTrip();
     this.load();
     this.startTicker();    // 每分钟刷新一次"进行中/已结束"状态
   },
@@ -202,27 +203,68 @@ Page({
         this.setData({ needLogin: true, loading: false, trip: null, items: [], dayGroups: [] });
         return;
       }
+      const openid = auth.getOpenid();
+      this._openId = openid;
       this.setData({ needLogin: false });
       // 历史行程入口传了 viewTripId 就用它；否则用全局当前行程
-      const tripId = this.data.viewTripId || app.globalData.currentTripId;
+      const tripId = this.data.viewTripId || app.globalData.currentTripId || homeCache.selectedTripId(openid);
+      if (!app.globalData.currentTripId && !this.data.viewTripId) app.globalData.currentTripId = tripId;
       if (!tripId) {
         wx.showToast({ title: '请先上传攻略', icon: 'none' });
         return;
       }
 
-      const cached = app.globalData.currentTrip;
+      if (this.data.trip && this.data.trip._id === tripId && Array.isArray(this.data.trip.items)) {
+        this.bgRefresh(tripId, this.data.trip);
+        return;
+      }
+
+      const cached = app.globalData.openid === openid ? app.globalData.currentTrip : null;
       if (cached && cached._id === tripId && Array.isArray(cached.items) && cached.items.length) {
         this.renderTrip(cached, tripId);
         this.bgRefresh(tripId, cached);
         return;
       }
 
+      const local = this.localTrip(tripId);
+      if (local) {
+        this.renderTrip(local, tripId);
+        this.bgRefresh(tripId, local);
+        return;
+      }
+
       const trip = await api.getItinerary(tripId);
+      if (auth.getOpenid() !== openid || (this.data.viewTripId || app.globalData.currentTripId) !== tripId) return;
       app.globalData.currentTrip = trip;
+      this.cacheTrip(trip);
       this.renderTrip(trip, tripId);
     } catch (err) {
       wx.showToast({ title: err.message || '加载失败', icon: 'none' });
     }
+  },
+
+  localTrip(tripId) {
+    const openid = auth.getOpenid();
+    const snap = openid && homeCache.readPage('itinerary');
+    return snap && snap.openid === openid && snap.trip && snap.trip._id === tripId
+      && Array.isArray(snap.trip.items) ? snap.trip : null;
+  },
+
+  cacheTrip(trip) {
+    const openid = auth.getOpenid();
+    if (openid && trip && trip._id) homeCache.writePage('itinerary', { openid, trip });
+  },
+
+  showCachedTrip() {
+    if (!auth.getOpenid()) return false;
+    const tripId = this.data.viewTripId || app.globalData.currentTripId || homeCache.selectedTripId(auth.getOpenid());
+    if (!tripId) return false;
+    const trip = (app.globalData.openid === auth.getOpenid()
+      && app.globalData.currentTrip && app.globalData.currentTrip._id === tripId
+      ? app.globalData.currentTrip : null) || this.localTrip(tripId);
+    if (!trip || !Array.isArray(trip.items)) return false;
+    this.renderTrip(trip, tripId);
+    return true;
   },
 
   // 后台刷新：缓存渲染后拉最新数据，变了才重渲染（编辑抽屉打开时不打扰）
@@ -230,10 +272,12 @@ Page({
     try {
       const trip = await api.getItinerary(tripId);
       if (!trip || !trip._id) return;
+      if (auth.getOpenid() !== this._openId || (this.data.viewTripId || app.globalData.currentTripId) !== tripId) return;
       app.globalData.currentTrip = trip;
+      this.cacheTrip(trip);
       const same = trip.updatedAt && cached.updatedAt
         ? trip.updatedAt === cached.updatedAt
-        : (trip.items || []).length === (cached.items || []).length;
+        : JSON.stringify(trip.items || []) === JSON.stringify(cached.items || []);
       if (same) return;
       if (this.data.editForm) return;   // 用户正在编辑，别冲掉抽屉（下次进页再对齐）
       this.renderTrip(trip, tripId);
@@ -245,6 +289,7 @@ Page({
     const g = app.globalData.currentTrip;
     if (g && g._id === tripId) {
       app.globalData.currentTrip = Object.assign({}, g, { items });
+      this.cacheTrip(app.globalData.currentTrip);
     }
   },
 
@@ -660,9 +705,13 @@ Page({
     const key = tripId + '_' + dayIdx;
     if (this._tipsKey === key) return;
     this._tipsKey = key;
-    this.setData({ tipsLoading: true, dayTips: null });
+    const openid = auth.getOpenid();
+    const snap = homeCache.readPage('daytips_' + key);
+    const cached = snap && snap.openid === openid ? snap.tips : null;
+    this.setData({ tipsLoading: !cached, dayTips: cached || null });
     try {
       const res = await api.getDayTips(tripId, dayIdx);
+      if (auth.getOpenid() !== openid || this._tipsKey !== key) return;
       const d = (res && res.data) || res || {};
       const tips = {
         tips: (d.tips || []).slice(0, 6),
@@ -673,9 +722,10 @@ Page({
         return;
       }
       this.setData({ tipsLoading: false, dayTips: tips });
+      homeCache.writePage('daytips_' + key, { openid, tips });
     } catch (err) {
       console.warn('[itinerary] 当天建议加载失败:', err && err.message);
-      this.setData({ tipsLoading: false, dayTips: null });
+      if (this._tipsKey === key) this.setData({ tipsLoading: false, dayTips: cached || null });
     }
   },
 
@@ -685,6 +735,7 @@ Page({
     const { tripId, dayIdx } = this.data;
     if (!tripId) return;
     this._tipsKey = null;   // 强制重拉（否则会被"同一天只拉一次"的守卫拦下）
+    homeCache.clearPage('daytips_' + tripId + '_' + dayIdx);
     this.setData({ tipsLoading: true });
     try {
       await api.getDayTips(tripId, dayIdx, true); // force = 重新生成

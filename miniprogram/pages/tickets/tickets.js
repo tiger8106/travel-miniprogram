@@ -41,9 +41,11 @@ const TYPE_OPTIONS = [
 Page({
   data: {
     loading: true,
+    needLogin: false,
     alarms: [],
     groups: [],        // 按板块分类的待办（车票/门票/酒店/其他）
     nowAlarms: [],     // 正在进行 / 即将进行
+    hotelHint: false,
     nowExtra: 0,       // 顶部模块装不下、被折叠的条数
     // 编辑/新增抽屉：sheetMode = 'edit' | 'new'；editForm 为 null 时抽屉关闭
     sheetMode: 'edit',
@@ -52,7 +54,6 @@ Page({
     delItem: null,        // 待删除的闹钟（删除确认卡）
     typeOptions: TYPE_OPTIONS,
     pendingCount: 0,      // 所有未完成事项数
-    futureCount: 0,       // 尚未到办理时间的事项数（同步到日历入口显示）
     completedCount: 0,    // 已完成但仍保留在分类清单中的事项数
     advanceOptions: [1, 2, 3, 5, 10, 15, 30, 60],  // 提前提醒分钟数可选项
     advanceOptionsLabel: ['1 分钟', '2 分钟', '3 分钟', '5 分钟', '10 分钟', '15 分钟', '30 分钟', '60 分钟'],
@@ -69,10 +70,15 @@ Page({
     // 订阅全局登录态：一处登录全站解锁
     this._offAuth = auth.watch(this, {
       onLogin: () => this.load(),
-      onLogout: () => this.setData({
-        loading: false, alarms: [], pendingCount: 0, futureCount: 0, completedCount: 0, editForm: null, delItem: null,
-        groups: [], nowAlarms: [], nowExtra: 0,
-      }),
+      onLogout: () => {
+        this._loadToken = (this._loadToken || 0) + 1;
+        this._tripId = null;
+        this._sig = '';
+        this.setData({
+          loading: false, alarms: [], pendingCount: 0, completedCount: 0, editForm: null, delItem: null,
+          groups: [], nowAlarms: [], nowExtra: 0, hotelHint: false,
+        });
+      },
     });
   },
 
@@ -109,7 +115,28 @@ Page({
       // 正式版自动隐藏调试入口（受 config.js 的 SHOW_DEV_TOOLS 控制）
       devMode: env.showDevTools(),
     });
+    this.showCached();
     this.load();
+  },
+
+  // 首帧一次性还原列表与全部派生卡片，避免酒店提示/分类等云端回包后才逐块出现。
+  showCached() {
+    const openid = auth.getOpenid();
+    if (!openid) return false;
+    const tripId = app.globalData.currentTripId || homeCache.selectedTripId(openid);
+    if (!tripId) return false;
+    app.globalData.currentTripId = tripId;
+    const snap = homeCache.readPage(CACHE_KEY);
+    if (!snap || snap.tripId !== tripId || (snap.openid && snap.openid !== openid)) return false;
+    const items = snap.alarms || [];
+    this._tripId = tripId;
+    this._sig = JSON.stringify(snap);
+    this.setData(Object.assign({
+      loading: false, needLogin: false, alarms: items,
+      pendingCount: snap.pendingCount || 0,
+      completedCount: snap.completedCount || 0,
+    }, this.buildViews(items)));
+    return true;
   },
 
   // 修改提前提醒分钟数：本地轮询、系统日历和云端订阅消息统一使用这个值
@@ -143,22 +170,28 @@ Page({
   },
 
   async load() {
+    // async 函数在首次 await 前同步执行：即使 onShow 未先调用，也能首帧恢复。
+    if (!this._sig) this.showCached();
+    const token = this._loadToken = (this._loadToken || 0) + 1;
     // 未登录 → 先自动静默登录一次；仍然失败才显示登录门禁卡
     const ok = await auth.requireLogin();
+    if (token !== this._loadToken) return;
     if (!ok) {
       this.setData({
         loading: false, needLogin: true,
-        alarms: [], pendingCount: 0, futureCount: 0, completedCount: 0, editForm: null, delItem: null,
-        groups: [], nowAlarms: [], nowExtra: 0,
+        alarms: [], pendingCount: 0, completedCount: 0, editForm: null, delItem: null,
+        groups: [], nowAlarms: [], nowExtra: 0, hotelHint: false,
       });
       return;
     }
     if (this.data.needLogin) this.setData({ needLogin: false });
-    const tripId = app.globalData.currentTripId;
+    const openid = auth.getOpenid();
+    const tripId = app.globalData.currentTripId || homeCache.selectedTripId(openid);
+    if (tripId && !app.globalData.currentTripId) app.globalData.currentTripId = tripId;
     if (!tripId) {
       this.setData({
-        loading: false, alarms: [], groups: [], nowAlarms: [], nowExtra: 0,
-        pendingCount: 0, futureCount: 0, completedCount: 0,
+        loading: false, alarms: [], groups: [], nowAlarms: [], nowExtra: 0, hotelHint: false,
+        pendingCount: 0, completedCount: 0,
       });
       return;
     }
@@ -171,18 +204,12 @@ Page({
 
     // ① 先用本地快照秒开，有缓存就不转圈
     if (!this._sig) {
-      const snap = homeCache.readPage(CACHE_KEY);
-      if (snap && snap.tripId === tripId) {
-        this._sig = JSON.stringify(snap);
-        this.setData({ loading: false, alarms: snap.alarms || [], pendingCount: snap.pendingCount || 0,
-          futureCount: snap.futureCount || 0, completedCount: snap.completedCount || 0 });
-      } else {
-        this.setData({ loading: true });
-      }
+      if (!this.showCached()) this.setData({ loading: true });
     }
 
     try {
       const list = await api.listAlarms(tripId);
+      if (token !== this._loadToken || auth.getOpenid() !== openid || app.globalData.currentTripId !== tripId) return;
       const preferredLead = alarm.getAdvanceMin();
       const needAdvanceSync = (list || []).some((a) =>
         Number(a.leadMinutes || 5) !== preferredLead);
@@ -211,7 +238,6 @@ Page({
           status: this.computeStatus(remindAt, completed),
         };
       });
-      const now = Date.now();
       // 未完成事项在前，已完成事项沉底；各自按提醒时间排序。
       items.sort((a, b) => {
         if (a.completed !== b.completed) return a.completed ? 1 : -1;
@@ -220,16 +246,15 @@ Page({
         return ta - tb;
       });
       const pendingCount = items.filter((a) => !a.completed).length;
-      const futureCount = items.filter((a) => !a.completed && a.actionAt && a.actionAt > now).length;
       const completedCount = items.filter((a) => a.completed).length;
       const views = this.buildViews(items);
 
       // ② 内容没变就不 setData，避免无谓重绘（视图派生数据一起比，避免状态过期）
-      const snap = { tripId, alarms: items, pendingCount, futureCount, completedCount };
+      const snap = { openid, tripId, alarms: items, pendingCount, completedCount };
       const sig = JSON.stringify(snap);
       if (sig !== this._sig) {
         this._sig = sig;
-        this.setData(Object.assign({ alarms: items, pendingCount, futureCount, completedCount }, views));
+        this.setData(Object.assign({ alarms: items, pendingCount, completedCount }, views));
         homeCache.writePage(CACHE_KEY, snap);
       } else {
         // 数据没变，但"正在进行/即将进行"是按当前时间算的，仍要刷新一次
@@ -240,6 +265,7 @@ Page({
       // ③ 时区与提醒时间校准放后台，不阻塞渲染
       alarm.syncAlarms(items);
     } catch (err) {
+      if (token !== this._loadToken) return;
       wx.showToast({ title: err.message || '加载失败', icon: 'none' });
       this.setData({ loading: false });
     }
@@ -263,7 +289,7 @@ Page({
         count: list.length,
         pending: list.filter((a) => !a.completed).length,
         completed: list.filter((a) => a.completed).length,
-        nextTitle: def.key === 'hotel' && upcoming ? '请在此分类逐项确认住宿预订' : (upcoming ? upcoming.title : ''),
+        nextTitle: def.key === 'hotel' && upcoming ? '查看每日住宿与预订信息' : (upcoming ? alarm.alarmTitleOf(upcoming) : ''),
         nextTime: def.key === 'hotel' || !upcoming ? '' : `提醒 ${upcoming.remindFriendly}`,
       };
     }).filter((g) => g.count);
@@ -288,6 +314,7 @@ Page({
       return {
         ...a,
         ongoing,
+        displayTitle: alarm.alarmTitleOf(a),
         statusText,
         typeLabel: (GROUP_DEFS[groupRank(a.type)] || GROUP_DEFS[GROUP_DEFS.length - 1]).label,
       };
@@ -358,7 +385,7 @@ Page({
       sheetMode: 'edit',
       editingId: item._id,
       editForm: {
-        title: item.title || '',
+        title: alarm.alarmTitleOf(item),
         note: item.note || '',
         fireAtDate: this.toDateStr(item.actionAt || item.fireAt),
         fireAtTime: this.toTimeStr(item.actionAt || item.fireAt),
@@ -504,7 +531,7 @@ Page({
   onDelete(e) {
     const item = (e.detail && e.detail.item) || e.currentTarget.dataset.item;
     if (!item) return;
-    this.setData({ delItem: item });
+    this.setData({ delItem: { ...item, displayTitle: alarm.alarmTitleOf(item) } });
   },
 
   onCancelDelete() {
@@ -590,7 +617,12 @@ Page({
       step('调用云函数 sendAlarm', '发送中…');
       const t0 = Date.now();
       const res = await api.sendTestAlarm({
-        title: item.title || '行程提醒',
+        title: alarm.alarmTitleOf(item),
+        type: item.type,
+        bookingInfo: item.bookingInfo,
+        usageInfo: item.usageInfo,
+        visitDate: item.visitDate,
+        ticketProduct: item.ticketProduct,
         note: item.note || '点击查看详情',
         fireAt: item.actionAt || item.fireAt || Date.now(),
         leadMinutes: item.leadMinutes || this.data.advanceMin,
@@ -652,40 +684,6 @@ Page({
       await alarm.addToCalendar(item);
       wx.hideLoading();
       wx.showToast({ title: '已加入系统日历', icon: 'success' });
-    } catch (err) {
-      wx.hideLoading();
-      this.handleCalendarError(err);
-    }
-  },
-
-  // 一键同步所有未来闹钟 → 系统日历
-  async onSyncAllToCalendar() {
-    const { alarms, futureCount } = this.data;
-    if (!futureCount) {
-      wx.showToast({ title: '没有未来的事项', icon: 'none' });
-      return;
-    }
-    const res = await new Promise((resolve) => {
-      wx.showModal({
-        title: '同步到系统日历',
-        content: `将把 ${futureCount} 个未来事项写入手机系统日历，到点锁屏也会响铃震动（微信关了也有效）。`,
-        confirmText: '开始同步',
-        success: resolve,
-      });
-    });
-    if (!res.confirm) return;
-    try {
-      wx.showLoading({ title: '同步中…' });
-      const { ok, total, cancelled } = await alarm.addAllToCalendar(alarms);
-      wx.hideLoading();
-      // 全部被用户取消 —— 静默收工，不弹任何失败提示
-      if (!ok && cancelled) return;
-      const cancelPart = cancelled ? `，${cancelled} 个已取消` : '';
-      wx.showModal({
-        title: '同步完成',
-        content: `成功 ${ok}/${total} 个${cancelPart}。可以在手机日历 App 里查看，将提前 ${this.data.advanceMin} 分钟提醒。`,
-        showCancel: false,
-      });
     } catch (err) {
       wx.hideLoading();
       this.handleCalendarError(err);

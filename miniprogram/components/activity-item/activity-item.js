@@ -10,8 +10,14 @@ const CATEGORY_ICONS = {
 function transportIcon(item) {
   const t = String((item && item.transportType) || '').toLowerCase();
   const act = String((item && item.activity) || '');
+  // 明确交通类型优先，不能因目的地叫“高铁站”或文字含“步行登船”换错图标。
+  if (t === 'ship') return '⛴️';
+  if (t === 'train') return '🚄';
+  if (t === 'plane') return '✈️';
+  if (t === 'bus') return '🚌';
   if (t === 'walk' || /步行|徒步/.test(act)) return '🚶';
-  if (t === 'train' || /高铁|动车|火车|列车|城际/.test(act)) return '🚄';
+  if (!t && /船|游船|渡轮|竹筏/.test(act)) return '⛴️';
+  if (!t && /高铁|(?<!电)动车|火车|列车|城际/.test(act)) return '🚄';
   if (t === 'plane' || /航班|飞机|航站楼/.test(act)) return '✈️';
   if (t === 'ride') {
     if (/公交|巴士|大巴/.test(act)) return '🚌';
@@ -32,6 +38,7 @@ const TRANSPORT_OPTIONS = [
   { value: 'train', label: '火车', icon: '🚄' },
   { value: 'plane', label: '飞机', icon: '✈️' },
   { value: 'bus', label: '大巴', icon: '🚌' },
+  { value: 'ship', label: '船/轮渡', icon: '⛴️' },
 ];
 
 const CATEGORY_OPTIONS = [
@@ -109,14 +116,17 @@ Component({
       const verified = item.schedSource === '12306';
       const unavailable = item.schedSource === 'official-unavailable';
       const searched = item.schedSource === 'search';
-      if (t === 'train' || /高铁|动车|火车|列车|城际/.test(act)) {
+      const reference = item.schedSource === 'reference';
+      if (t === 'train' || !t && /^(?:乘坐|搭乘|乘|换乘).{0,12}(?:高铁|动车|火车|列车|城际)|\b[GDCZTK]\d{1,5}\b/.test(act)) {
         return verified
           ? '🚄 已按出行日期从 12306 核对车次和时刻，购票前请再次确认余票与运行状态'
+          : reference
+            ? `🚄 已检索${item.referenceDate || '近期'}运行图参考班次，并据此安排接驳；非出行当天确认班次，开售后请在12306核对`
           : unavailable
             ? '🚄 12306 暂未返回当天可用班次，行程时间仅作估算，请先在 12306 购票核实'
           : '🚄 班次与时刻为 AI 参考编排，乘车前请在 12306 核实实际车次与时刻';
       }
-      if (t === 'plane' || /航班|飞机|航站楼/.test(act)) {
+      if (t === 'plane' || !t && /^(?:乘坐|搭乘|乘).{0,12}(?:航班|飞机)|登机/.test(act)) {
         return (verified || searched)
           ? '✈️ 航班已联网检索核对，出行前请以航司实际信息为准'
           : '✈️ 航班时刻为 AI 参考编排，出行前请以航司实际信息为准';

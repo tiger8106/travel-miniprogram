@@ -57,10 +57,10 @@ async function main() {
       return found;
     };
     const validEmpty = await E.collectRailTopology(rows, Date.now() + 10000);
-    assert.equal(validEmpty[0].direct, false); assert(!validEmpty[0].code);
+    assert.deepEqual(validEmpty, [], '余票空结果不证明铁路无直达');
     rail.lookupOfficial = async () => Object.assign(new Map(), { routeMeta: new Map() });
     assert.deepEqual(await E.collectRailTopology(rows, Date.now() + 10000), [], '接口失败不能当成没有铁路');
-    console.log('✓ 当前铁路网络与未来班次隔离；有效空结果和接口失败分开处理');
+    console.log('✓ 当前铁路网络与未来班次隔离；余票空结果及接口失败都不误判无直达');
   } finally {
     rail.lookupOfficial = original;
     if (apiKey === undefined) delete process.env.LLM_API_KEY; else process.env.LLM_API_KEY = apiKey;

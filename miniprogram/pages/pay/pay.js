@@ -8,6 +8,8 @@
 
 const quota = require('../../utils/quota');
 const auth = require('../../utils/auth');
+const homeCache = require('../../utils/homecache');
+const CACHE_KEY = 'pay';
 
 Page({
   data: {
@@ -20,42 +22,67 @@ Page({
     loggedIn: false,
   },
 
-  async onLoad() {
-    await this.refresh();
-  },
-
   onShow() {
     // 从支付页回来 / 首次进入都要拿最新额度（云函数发货可能有延迟）
+    const openid = auth.getOpenid();
+    if (this._account && this._account !== openid) {
+      this._epoch = (this._epoch || 0) + 1;
+      this._refreshing = null;
+      this.setData({ info: null, goods: [], invite: null, giftInfo: null, loading: true });
+    }
+    this.showCached();
     this.refresh();
   },
 
+  showCached() {
+    const openid = auth.getOpenid();
+    const snap = openid && homeCache.readPage(CACHE_KEY);
+    if (!snap || snap.openid !== openid || !snap.info) return false;
+    this._account = openid;
+    this.setData({ loggedIn: true, loading: false, info: snap.info,
+      goods: snap.goods || [], invite: snap.invite || null, giftInfo: snap.giftInfo || null });
+    return true;
+  },
+
+  giftInfoOf(info) {
+    const exp = info && Number(info.giftExpireAt || 0);
+    if (!info || info.gift <= 0 || !exp) return null;
+    const d = new Date(exp);
+    return {
+      dateStr: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`,
+      daysLeft: Math.max(0, Math.ceil((exp - Date.now()) / 86400000)),
+    };
+  },
+
   async refresh() {
+    if (this._refreshing) return this._refreshing;
+    const epoch = this._epoch || 0;
     const logged = auth.isLoggedIn();
-    this.setData({ loggedIn: logged, loading: true });
+    const openid = auth.getOpenid();
+    const hadContent = !!this.data.info || this.showCached();
+    this.setData({ loggedIn: logged, loading: logged && !hadContent });
     if (!logged) {
-      this.setData({ loading: false });
+      this.setData({ loading: false, info: null, goods: [], invite: null });
       return;
     }
-    const [info, invite] = await Promise.all([
-      quota.info(true),
-      quota.inviteInfo(),
-    ]);
-    // 赠送额度的有效期展示用：到期日 + 剩余天数
-    let giftInfo = null;
-    const exp = info && Number(info.giftExpireAt || 0);
-    if (info && info.gift > 0 && exp) {
-      const d = new Date(exp);
-      const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-      const daysLeft = Math.max(0, Math.ceil((exp - Date.now()) / 86400000));
-      giftInfo = { dateStr, daysLeft };
-    }
-    this.setData({
-      info,
-      giftInfo,
-      goods: (info && info.goods) || [],
-      invite,
-      loading: false,
+    const fetchInfo = quota.info(true).then((info) => {
+      if (auth.getOpenid() !== openid || (this._epoch || 0) !== epoch || !info) return;
+      this._account = openid;
+      const giftInfo = this.giftInfoOf(info);
+      this.setData({ info, giftInfo, goods: info.goods || [], loading: false });
+      homeCache.writePage(CACHE_KEY, { openid, info, goods: info.goods || [],
+        invite: this.data.invite, giftInfo });
     });
+    const fetchInvite = quota.inviteInfo().then((invite) => {
+      if (auth.getOpenid() !== openid || (this._epoch || 0) !== epoch) return;
+      this.setData({ invite });
+      const snap = homeCache.readPage(CACHE_KEY);
+      if (snap && snap.openid === openid) homeCache.writePage(CACHE_KEY, Object.assign({}, snap, { invite }));
+    });
+    this._refreshing = Promise.all([fetchInfo, fetchInvite])
+      .catch(() => this.setData({ loading: false }))
+      .finally(() => { if ((this._epoch || 0) === epoch) this._refreshing = null; });
+    return this._refreshing;
   },
 
   /** 点「赠送额度（限时）」看有效期 */
@@ -90,10 +117,10 @@ Page({
         // 客户端支付入口已返回，但云端仍需从微信侧核实结果。
         wx.showModal({
           title: '支付已提交',
-          content: `${r.msg || '支付状态待核实'}\n\n请到「我的订单」查看并点「同步订单」；如已扣款但未出现订单，请保存购买凭证联系客服。`,
-          confirmText: '刷新额度',
+          content: `${r.msg || '支付状态待核实'}\n\n系统会自动核对，请稍后到「我的订单」查看；如已扣款但未出现订单，请保存购买凭证联系客服。`,
+          confirmText: '查看订单',
           cancelText: '知道了',
-          success: (res) => { if (res.confirm) this.onSync(); },
+          success: (res) => { if (res.confirm) this.onTapOrders(); },
         });
       }
     } catch (err) {
@@ -106,23 +133,6 @@ Page({
       this.setData({ payingId: '' });
       this.refresh();
     }
-  },
-
-  /** 付了钱额度没到 → 手动补发（幂等，不会重复加） */
-  async onSync() {
-    wx.showLoading({ title: '同步中…', mask: true });
-    try {
-      const r = await quota.syncOrders();
-      wx.hideLoading();
-      wx.showToast({
-        title: r.delivered ? `已补发 ${r.delivered} 笔` : '暂无可补发的订单',
-        icon: r.delivered ? 'success' : 'none',
-      });
-    } catch (e) {
-      wx.hideLoading();
-      wx.showToast({ title: '同步失败，请稍后再试', icon: 'none' });
-    }
-    this.refresh();
   },
 
   // ---------- 邀请 ----------

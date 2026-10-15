@@ -85,8 +85,10 @@ function normOpts(a, b) {
  */
 function chat(messages, a, b) {
   const opts = normOpts(a, b);
-  const limit = opts.timeoutMs || REQUEST_TIMEOUT_MS;
+  const limit = Math.min(opts.timeoutMs || REQUEST_TIMEOUT_MS,
+    opts.deadline ? Math.max(0, opts.deadline - Date.now() - 750) : Infinity);
   return new Promise((resolve, reject) => {
+    if (limit <= 0) return reject(new Error('本轮模型时间预算不足，保留进度后继续'));
     const { apiKey, baseURL, model } = getConfig();
     const bodyObj = {
       model,
@@ -116,6 +118,8 @@ function chat(messages, a, b) {
     const lib = isHttps ? https : http;
     const started = Date.now();
 
+    let hardTimer;
+    const finish = (error, value) => { clearTimeout(hardTimer); if (error) reject(error); else resolve(value); };
     const req = lib.request({
       hostname: u.hostname,
       port: u.port || (isHttps ? 443 : 80),
@@ -136,27 +140,30 @@ function chat(messages, a, b) {
             const resp = JSON.parse(data);
             const choice = resp?.choices?.[0];
             const text = choice?.message?.content;
-            if (!text) return reject(new Error('LLM 未返回内容'));
+            if (!text) return finish(new Error('LLM 未返回内容'));
             // 被上限截断时留个证据：日志里搜 "finish=length" 就能定位是哪种截断
             console.log('[generatePlan.llm] finish=%s usage=%s',
               choice?.finish_reason, JSON.stringify(resp?.usage || {}));
             if (choice?.finish_reason === 'length') {
               console.warn('[generatePlan.llm] ⚠️ 输出被 token 上限截断（finish_reason=length），内容不完整');
             }
-            resolve(text);
+            finish(null, text);
           } catch (e) {
-            reject(new Error('响应 JSON 解析失败: ' + data.slice(0, 200)));
+            finish(new Error('响应 JSON 解析失败: ' + data.slice(0, 200)));
           }
         } else {
-          reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 300)}`));
+          finish(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 300)}`));
         }
       });
+      res.on('error', (error) => finish(error));
     });
 
+    // socket timeout 仅计算无数据空闲；持续慢回包也必须遵守单轮总截止时间。
+    hardTimer = setTimeout(() => req.destroy(new Error(`单次 LLM 总时限(${limit / 1000}s)`)), limit);
     req.setTimeout(limit, () => {
       req.destroy(new Error(`单次 LLM 请求超时(${limit / 1000}s)：model=${model} baseURL=${baseURL}`));
     });
-    req.on('error', reject);
+    req.on('error', (error) => finish(error));
     req.write(body);
     req.end();
   });
@@ -185,9 +192,10 @@ async function chatWithRetry(messages, a, b) {
   const searchOptions = opts.searchOptions;
   const temperature = opts.temperature;
   const budget = () => (deadline ? deadline - Date.now() : Infinity);
-  const single = Math.max(8000, Math.min(REQUEST_TIMEOUT_MS, deadline ? budget() - 3000 : REQUEST_TIMEOUT_MS));
+  if (budget() < 5000) throw new Error('本轮模型时间预算不足，保留进度后继续');
+  const single = Math.min(REQUEST_TIMEOUT_MS, deadline ? budget() - 3000 : REQUEST_TIMEOUT_MS);
   try {
-    return await chat(messages, { maxTokens, timeoutMs: single, enableSearch, searchOptions, temperature });
+    return await chat(messages, { maxTokens, timeoutMs: single, deadline, enableSearch, searchOptions, temperature });
   } catch (e) {
     const left = budget();
     // 重试至少还要留 12s，否则这一轮大概率整体超时
@@ -196,8 +204,8 @@ async function chatWithRetry(messages, a, b) {
       throw e;
     }
     console.error('[generatePlan.llm] 调用失败，重试一次:', e.message, `剩余=${deadline ? left + 'ms' : '不限'}`);
-    const again = Math.max(8000, Math.min(single, deadline ? budget() - 3000 : REQUEST_TIMEOUT_MS));
-    return chat(messages, { maxTokens, timeoutMs: again, enableSearch, searchOptions, temperature });
+    const again = Math.min(single, deadline ? budget() - 3000 : REQUEST_TIMEOUT_MS);
+    return chat(messages, { maxTokens, timeoutMs: again, deadline, enableSearch, searchOptions, temperature });
   }
 }
 

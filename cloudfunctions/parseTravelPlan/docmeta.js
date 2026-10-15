@@ -36,12 +36,12 @@ function buildDocMeta(rawText) {
     pseudo = true;
   }
 
-  const year = inferYear(days);
+  // 明确的旅行年份优先于当前系统年份，不从正文里的历史介绍取年份。
+  const headerYear = header.join('\n').match(/(?:^|\n)\s*(?:旅行日期[：:]\s*)?(20\d{2})年/);
+  const year = days[0].year || (headerYear && Number(headerYear[1])) || inferYear(days);
   const startDate = ymd(year, days[0].month, days[0].day);
   const last = days[days.length - 1];
-  const endDate = (last.endMonth && last.endDay)
-    ? ymd(year, last.endMonth, last.endDay)
-    : ymd(year, last.month, last.day);
+  let endDate;
 
   // 标题取文档第一个非空行（去"1. / 一、"式编号；不能误伤"9月20日xxx"的日期数字）
   const firstLine = (rawText.split('\n').map((l) => l.trim()).find((l) => l) || '我的行程')
@@ -66,12 +66,17 @@ function buildDocMeta(rawText) {
   // 每天的日期 + 前文上下文（累积截尾）：让模型知道前一天结束时人在哪
   // （通常是昨晚住宿），否则当天第一条移动会因原文没写出发点而缺失起点。
   const contextLines = [];
+  let currentYear = year;
   const dayMeta = days.map((d, i) => {
-    const date = ymd(year, d.month, d.day);
+    if (d.year) currentYear = d.year;
+    else if (i && d.month * 100 + d.day < days[i - 1].month * 100 + days[i - 1].day) currentYear++;
+    const date = ymd(currentYear, d.month, d.day);
     const prevText = contextLines.join('\n').replace(/\s+\n/g, '\n').slice(-1200);
     contextLines.push(...d.lines);
     return { index: i, date, title: d.title, lines: d.lines, prevText };
   });
+  const endYear = currentYear + (last.endMonth && last.endMonth * 100 + last.endDay < last.month * 100 + last.day ? 1 : 0);
+  endDate = ymd(endYear, last.endMonth || last.month, last.endDay || last.day);
 
   return {
     title,

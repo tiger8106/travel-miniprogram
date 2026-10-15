@@ -21,6 +21,7 @@ const paid = {
 };
 const verified = X.readQueryResponse(paid, local);
 assert.strictEqual(verified.ok, true);
+assert.strictEqual(verified.canCancel, false);
 assert.strictEqual(verified.platform.channelOrderId, 'apple-123');
 assert.strictEqual(verified.platform.settlementState, 4);
 const refunded = X.readQueryResponse({
@@ -30,12 +31,56 @@ const refunded = X.readQueryResponse({
 assert.strictEqual(refunded.ok, false);
 assert.strictEqual(refunded.platform.refundFee, 300);
 assert.strictEqual(refunded.platform.leftFee, 0);
+// 未支付订单可以没有实付金额；这是取消和继续支付所需的明确证据。
+const unpaid = X.readQueryResponse({
+  errcode: '0',
+  order: { order_id: local.outTradeNo, order_fee: 300, status: 1, env_type: 1 },
+}, local);
+assert.strictEqual(unpaid.status, 1);
+assert.strictEqual(unpaid.canCancel, true);
+assert.strictEqual(unpaid.platform.paidFee, 0);
+assert.strictEqual(unpaid.canRepay, true);
+const missingRemote = X.readQueryResponse({ errcode: 0 }, local);
+assert.strictEqual(missingRemote.notFound, true);
+assert.strictEqual(missingRemote.canCancel, true);
+assert.strictEqual(missingRemote.canRepay, true);
+const explicitMissing = X.readQueryResponse({ errcode: 268490002,
+  errmsg: 'order_id not exist' }, local);
+assert.strictEqual(explicitMissing.notFound, true);
+assert.strictEqual(explicitMissing.canCancel, true);
+const actualMissing = X.readQueryResponse({ errcode: 268490002,
+  errmsg: '数据不存在 rid: test-request-id' }, local);
+assert.strictEqual(actualMissing.notFound, true, '真实查单无单说明必须识别');
+assert.strictEqual(actualMissing.canRepay, true);
+assert.strictEqual(X.readQueryResponse({ errcode: 268490002,
+  errmsg: '配置数据不存在，请检查 env' }, local).canCancel, false, '不能把其他数据缺失误判为订单不存在');
+const badParams = X.readQueryResponse({ errcode: 268490002,
+  errmsg: 'missing env field' }, local);
+assert.strictEqual(badParams.canCancel, false);
+assert.strictEqual(badParams.detail, 'missing env field');
+assert(!X.readQueryResponse({ errcode: 268490002,
+  errmsg: 'access_token=private-token env invalid' }, local).detail.includes('private-token'));
+const initialized = X.readQueryResponse({ errcode: 0, order: {
+  order_id: local.outTradeNo, order_fee: 300, status: 0, env_type: 1,
+} }, local);
+assert.strictEqual(initialized.canCancel, true);
+assert.strictEqual(initialized.canRepay, false);
+const closed = X.readQueryResponse({ errcode: 0, order: {
+  order_id: local.outTradeNo, order_fee: 300, status: 6, env_type: 1,
+} }, local);
+assert.strictEqual(closed.canCancel, true);
+assert.strictEqual(closed.canRepay, false);
+assert.strictEqual(X.readQueryResponse({
+  errcode: 0,
+  order: { order_id: local.outTradeNo, order_fee: 300, status: 1, paid_fee: 300 },
+}, local).canCancel, false);
 
 for (const response of [
   { ...paid, errcode: -1 },
   { ...paid, order: { ...paid.order, order_id: 'OTHER-ORDER' } },
   { ...paid, order: { ...paid.order, order_fee: 100 } },
   { ...paid, order: { ...paid.order, paid_fee: undefined } },
+  { ...paid, order: { ...paid.order, paid_fee: null } },
   { ...paid, order: { ...paid.order, paid_fee: 301 } },
   { ...paid, order: { ...paid.order, env_type: 2 } },
   { ...paid, order: { ...paid.order, status: 1, paid_fee: 300 } },

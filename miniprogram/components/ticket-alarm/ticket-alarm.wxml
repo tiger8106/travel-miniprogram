@@ -2,7 +2,7 @@
   <view class="alarm-header">
     <text class="alarm-icon">{{icon}}</text>
     <view class="alarm-info">
-      <view class="alarm-title">{{item.title}}</view>
+      <view class="alarm-title">{{displayTitle}}</view>
       <view class="alarm-time">提醒 {{item.remindFriendly || item.friendly}}</view>
     </view>
     <text class="tag {{item.completed ? 'tag-done' : (item.status === 'past' ? '' : (item.status === 'soon' ? 'tag-warning' : 'tag-success'))}}">

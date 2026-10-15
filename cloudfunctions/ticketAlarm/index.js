@@ -6,7 +6,8 @@ cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
 const COL = 'ticket_alarms';
 const COL_TRIP = 'trips';
-const ALARM_VERSION = 'v1.5-single-reminder-usage';
+const ALARM_VERSION = 'v1.8-admission-bundle-scope';
+const { filterTicketAlarms } = require('./ticket-products');
 const { synchronizeTrip, usageInfoForItem } = require('./booking-sync');
 const {
   DEFAULT_LEAD_MINUTES,
@@ -225,10 +226,10 @@ async function list(db, openid, tripId) {
     .limit(200)
     .get();
   const tripRes = tripId ? await db.collection(COL_TRIP).doc(tripId).get().catch(() => null) : null;
-  const trip = tripRes && tripRes.data;
+  const trip = tripRes && tripRes.data && tripRes.data._openid === openid ? tripRes.data : null;
   return {
     code: 0,
-    data: (res.data || []).map((a) => {
+    data: filterTicketAlarms(res.data || [], trip && trip.items, trip && trip.ticketPolicies).map((a) => {
       const tripItems = trip && Array.isArray(trip.items) ? trip.items : [];
       let linked = a.linkedItemId
         ? tripItems.find((item) => String(item && item.itemId || '') === String(a.linkedItemId))
@@ -242,8 +243,13 @@ async function list(db, openid, tripId) {
           : [];
         linked = textMatches.length === 1 ? textMatches[0] : (sameDay.length === 1 ? sameDay[0] : null);
       }
-      const usageInfo = String(a.usageInfo || '').trim()
-        || (linked ? usageInfoForItem(linked, trip) : '');
+      const storedUsage = String(a.usageInfo || '').trim();
+      // 旧版“住宿：起止日期”曾把北京时间午夜按 UTC 取日，整段偏前一天。
+      // 仅重算可关联行程条目的旧格式；新版“住宿时间：多段区间”保留原摘要。
+      const legacyStay = a.type === 'hotel'
+        && /^住宿：\d{4}-\d{2}-\d{2}\s*至\s*\d{4}-\d{2}-\d{2}/.test(storedUsage);
+      const usageInfo = legacyStay && linked ? usageInfoForItem(linked, trip)
+        : storedUsage || (linked ? usageInfoForItem(linked, trip) : '');
       return normalizeAlarm(Object.assign({}, a, usageInfo ? { usageInfo } : {}), DEFAULT_LEAD_MINUTES);
     }),
   };

@@ -1,0 +1,4 @@
+{
+  "permissions": { "openapi": [] },
+  "triggers": [{ "name": "parsePollEveryMinute", "type": "timer", "config": "0 * * * * * *" }]
+}

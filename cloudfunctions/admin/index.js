@@ -19,8 +19,9 @@ cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 const https = require('https');
 const http = require('http');
 const { allowed, COL_CONFIG, DOC_ID, resetCache } = require('./cloudCfg');
+const { generationCount } = require('./generation-count');
 
-const ADMIN_VERSION = 'v1.0-admin';
+const ADMIN_VERSION = 'v1.2-progressive-admin';
 
 const COL_USER = 'users';
 const COL_AUDIT = 'admin_audit';
@@ -181,6 +182,13 @@ function publicUser(u) {
   };
 }
 
+/** 旧版特权账号写了成功生成流水却未增加 users.totalGen，展示时用流水补齐。 */
+async function publicUserWithHistory(u) {
+  const info = publicUser(u);
+  info.totalGen = await generationCount(db, u);
+  return info;
+}
+
 // ============================================================
 // Actions
 // ============================================================
@@ -211,7 +219,7 @@ async function actionWhoami(openid) {
       isAdmin: isAdminUser(u),
       isSuper: u.role === 'super',
       role: u.role || '',
-      me: publicUser(u),
+      me: await publicUserWithHistory(u),
       claimEnabled: !!process.env.ADMIN_CLAIM_CODE,
       stats: {
         users: userCount.total || 0,
@@ -220,6 +228,30 @@ async function actionWhoami(openid) {
       },
     },
   };
+}
+
+/** 首屏身份：只读本人资料，不等平台统计和历史流水。 */
+async function actionIdentity(openid) {
+  const u = await loadUserByOpenid(openid);
+  return { code: 0, data: {
+    version: ADMIN_VERSION, loggedIn: !!u, isAdmin: isAdminUser(u),
+    isSuper: !!u && u.role === 'super', claimEnabled: !!process.env.ADMIN_CLAIM_CODE,
+    me: u ? publicUser(u) : null,
+  } };
+}
+
+async function actionOverview(openid) {
+  const auth = await requireAdmin(openid);
+  if (!auth.ok) return { code: -1, msg: auth.msg };
+  const [userCount, adminCount, unlimitedCount, totalGen] = await Promise.all([
+    db.collection(COL_USER).count(),
+    db.collection(COL_USER).where({ role: db.command.in(['admin', 'super']) }).count(),
+    db.collection(COL_USER).where({ unlimited: true }).count(),
+    generationCount(db, auth.user),
+  ]);
+  return { code: 0, data: { stats: {
+    users: userCount.total || 0, admins: adminCount.total || 0, unlimited: unlimitedCount.total || 0,
+  }, totalGen } };
 }
 
 /**
@@ -270,18 +302,19 @@ async function actionSearchUsers(actorOpenid, event) {
   const auth = await requireAdmin(actorOpenid);
   if (!auth.ok) return { code: -1, msg: auth.msg };
   const kw = String((event && event.keyword) || '').trim();
-  if (!kw) {
-    // 不给关键词时返回最近注册的一批，方便直接操作
-    const res = await db.collection(COL_USER)
-      .orderBy('createdAt', 'desc').limit(20).get().catch(() => ({ data: [] }));
-    return { code: 0, data: { list: (res.data || []).map(publicUser) } };
-  }
-  const res = await db.collection(COL_USER)
-    .where({ nickname: db.RegExp({ regexp: kw, options: 'i' }) })
-    .limit(20)
-    .get()
-    .catch(() => ({ data: [] }));
-  return { code: 0, data: { list: (res.data || []).map(publicUser) } };
+  const page = Math.max(1, Math.min(100000, Math.floor(Number(event && event.page) || 1)));
+  const pageSize = 10;
+  const query = kw
+    ? db.collection(COL_USER).where({ nickname: db.RegExp({ regexp: kw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), options: 'i' }) })
+    : db.collection(COL_USER);
+  const counted = await query.count().catch(() => ({ total: 0 }));
+  const total = Number(counted.total) || 0;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const offset = (currentPage - 1) * pageSize;
+  const ordered = kw ? query : query.orderBy('createdAt', 'desc');
+  const res = await ordered.skip(offset).limit(pageSize).get().catch(() => ({ data: [] }));
+  return { code: 0, data: { list: await Promise.all((res.data || []).map(publicUserWithHistory)), page: currentPage, pageSize, total, totalPages } };
 }
 
 /** 授权 / 取消授权「不限量使用」 */
@@ -605,6 +638,13 @@ exports.main = async (event, context) => {
 
   try {
     switch (action) {
+      // “我的”页只需要入口可见性；不要为此读取全站统计和用户生成历史。
+      case 'role': {
+        const user = await loadUserByOpenid(openid);
+        return { code: 0, data: { isAdmin: isAdminUser(user) } };
+      }
+      case 'identity': return await actionIdentity(openid);
+      case 'overview': return await actionOverview(openid);
       case 'whoami': return await actionWhoami(openid);
       case 'claim': return await actionClaim(openid, event);
       case 'searchUsers': return await actionSearchUsers(openid, event);

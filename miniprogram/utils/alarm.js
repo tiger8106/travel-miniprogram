@@ -1,6 +1,7 @@
 // utils/alarm.js
 // 订票闹钟前台轮询 + 震动提醒
 const timeUtil = require('./time');
+const { alarmTitleOf } = require('./alarm-title');
 
 const STORAGE_KEY = '__alarms_cache__';
 const POLL_INTERVAL = 30 * 1000;     // 30 秒检查一次
@@ -90,7 +91,7 @@ function alarmPopupContent(alarm, phase) {
   const friendly = timeUtil.fmtFriendly(actionAt);
   const leadMinutes = leadOf(a);
   const lines = [
-    a.title || '该办事项了',
+    alarmTitleOf(a),
     phase === 'advance' ? `还有 ${leadMinutes} 分钟` : '现在办理',
     `办理时间：${friendly}`,
   ];
@@ -278,10 +279,10 @@ function addToCalendar(a) {
     if (!start) return reject(new Error('该闹钟没有有效时间'));
     if (start <= Date.now()) return reject(new Error('该闹钟已过期，无需写入日历'));
     wx.addPhoneCalendar({
-      title: '⏰ ' + (a.title || '抢票提醒'),
+      title: alarmTitleOf(a),
       startTime: Math.floor(start / 1000),                       // 秒
       endTime: Math.floor((start + 30 * 60 * 1000) / 1000),      // 秒，半小时后结束
-      description: alarmKeyInfoOf(a) || a.title || '',
+      description: alarmKeyInfoOf(a) || alarmTitleOf(a),
       alarm: true,
       alarmOffset: leadMinutes * 60, // 每条事项自己的提前量，单位秒
       success: resolve,
@@ -297,49 +298,6 @@ function addToCalendar(a) {
       },
     });
   });
-}
-
-/**
- * 批量添加未来闹钟到系统日历（逐个串行，避免弹窗打架）
- * 用户中途点取消 → 停止批次，不算失败
- * @returns {Promise<{ok:number, total:number, cancelled:number}>}
- */
-async function addAllToCalendar(list) {
-  const now = Date.now();
-  const future = (list || []).filter((a) => {
-    const t = actionAtOf(a);
-    return t && t > now && !isCompleted(a);
-  });
-  if (!future.length) return { ok: 0, total: 0, cancelled: 0 };
-
-  let ok = 0;
-  let cancelled = 0;
-  let authDenied = false;
-  for (const a of future) {
-    try {
-      await addToCalendar(a);
-      ok++;
-    } catch (e) {
-      if (e.code === 'CANCELLED') {
-        // 用户取消了系统弹窗，不想继续写，直接收工
-        cancelled++;
-        break;
-      }
-      if (/auth|deny|authorize|permission/i.test(e.message || '')) {
-        authDenied = true;
-        break;
-      }
-      // 单个失败（如已过期、重复）跳过，继续下一个
-    }
-    await new Promise((r) => setTimeout(r, 150));
-  }
-
-  if (authDenied) {
-    const err = new Error('日历权限被拒绝');
-    err.code = 'AUTH_DENIED';
-    throw err;
-  }
-  return { ok, total: future.length, cancelled };
 }
 
 /**
@@ -372,10 +330,10 @@ module.exports = {
   remindAtOf,
   normalizeAlarm,
   alarmKeyInfoOf,
+  alarmTitleOf,
   alarmPopupContent,
   fireAlarm,         // 暴露供测试
   addToCalendar,
-  addAllToCalendar,
   getAdvanceMin,
   setAdvanceMin,
   requestSubscribe,

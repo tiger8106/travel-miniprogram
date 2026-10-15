@@ -13,16 +13,12 @@
     <!-- 处理中提醒：付了钱额度没到，给一条明确出路 -->
     <view class="card pending-card" wx:if="{{pendingCount}}">
       <view class="pending-title">有 {{pendingCount}} 笔订单在「处理中」</view>
-      <view class="pending-desc">支付状态正在确认。同步不会再次扣款，请勿重复付款。</view>
-      <view class="btn-sync {{syncing ? 'btn-sync-off' : ''}}" bindtap="onSync">
-        {{syncing ? '同步中…' : '同步订单'}}
-      </view>
+      <view class="pending-desc">系统会自动核对支付状态和发放权益，请勿重复付款；长时间未到账请联系客服。</view>
     </view>
 
     <view class="card pending-card" wx:if="{{loadError}}">
-      <view class="pending-title">订单核对未完成</view>
-      <view class="pending-desc">{{loadError}}。请稍后点“同步订单”；如有实际扣款，请保留支付凭证。</view>
-      <view class="btn-sync" bindtap="onSync">重试同步</view>
+      <view class="pending-title">订单读取未完成</view>
+      <view class="pending-desc">{{loadError}}。请稍后重新进入；如有实际扣款，请保留支付凭证联系客服。</view>
     </view>
 
     <!-- 订单列表 -->
@@ -53,22 +49,22 @@
           <view class="detail-row" wx:if="{{item.supportMerchantOrderNo}}">
             <text class="detail-label">商户订单号</text>
             <text class="detail-value" selectable="true">{{item.supportMerchantOrderNo}}</text>
-            <text class="detail-copy" data-value="{{item.supportMerchantOrderNo}}" bindtap="onCopyDetail">复制</text>
+            <view class="detail-copy" data-value="{{item.supportMerchantOrderNo}}" catchtap="onCopyDetail">复制</view>
           </view>
           <view class="detail-row" wx:if="{{item.supportPlatformOrderNo}}">
             <text class="detail-label">平台订单号</text>
             <text class="detail-value" selectable="true">{{item.supportPlatformOrderNo}}</text>
-            <text class="detail-copy" data-value="{{item.supportPlatformOrderNo}}" bindtap="onCopyDetail">复制</text>
+            <view class="detail-copy" data-value="{{item.supportPlatformOrderNo}}" catchtap="onCopyDetail">复制</view>
           </view>
           <view class="detail-row" wx:if="{{item.supportChannelOrderNo}}">
             <text class="detail-label">渠道交易号</text>
             <text class="detail-value" selectable="true">{{item.supportChannelOrderNo}}</text>
-            <text class="detail-copy" data-value="{{item.supportChannelOrderNo}}" bindtap="onCopyDetail">复制</text>
+            <view class="detail-copy" data-value="{{item.supportChannelOrderNo}}" catchtap="onCopyDetail">复制</view>
           </view>
           <view class="detail-row" wx:if="{{item.supportWxTransactionNo}}">
             <text class="detail-label">微信交易号</text>
             <text class="detail-value" selectable="true">{{item.supportWxTransactionNo}}</text>
-            <text class="detail-copy" data-value="{{item.supportWxTransactionNo}}" bindtap="onCopyDetail">复制</text>
+            <view class="detail-copy" data-value="{{item.supportWxTransactionNo}}" catchtap="onCopyDetail">复制</view>
           </view>
           <view class="detail-row" wx:if="{{item.supportPaidText}}">
             <text class="detail-label">实付金额</text>
@@ -81,12 +77,12 @@
           <view class="detail-row" wx:if="{{item.supportRefundOrderNo}}">
             <text class="detail-label">退款单号</text>
             <text class="detail-value" selectable="true">{{item.supportRefundOrderNo}}</text>
-            <text class="detail-copy" data-value="{{item.supportRefundOrderNo}}" bindtap="onCopyDetail">复制</text>
+            <view class="detail-copy" data-value="{{item.supportRefundOrderNo}}" catchtap="onCopyDetail">复制</view>
           </view>
           <view class="detail-row" wx:if="{{item.supportRefundWxTransactionNo}}">
             <text class="detail-label">退款交易号</text>
             <text class="detail-value" selectable="true">{{item.supportRefundWxTransactionNo}}</text>
-            <text class="detail-copy" data-value="{{item.supportRefundWxTransactionNo}}" bindtap="onCopyDetail">复制</text>
+            <view class="detail-copy" data-value="{{item.supportRefundWxTransactionNo}}" catchtap="onCopyDetail">复制</view>
           </view>
           <view class="detail-row" wx:if="{{item.supportRefundText}}">
             <text class="detail-label">退款金额</text>
@@ -105,6 +101,10 @@
       </view>
     </view>
 
+    <view class="card" wx:if="{{hasMore || loadingMore}}" bindtap="loadMore">
+      <view class="empty-sub" style="text-align:center">{{loadingMore ? '正在加载更多订单…' : '继续上滑查看更早订单'}}</view>
+    </view>
+
     <!-- 空态 -->
     <view class="card" wx:if="{{!loading && !list.length}}">
       <view class="empty">
@@ -118,7 +118,7 @@
     <view class="card">
       <view class="card-title">📋 说明</view>
       <view class="rule-item">· 权益已到账表示使用次数或会员已经生效</view>
-      <view class="rule-item">· 支付确认中请勿重复付款，可点击“同步订单”</view>
+      <view class="rule-item">· 支付确认中请勿重复付款，系统会自动核对</view>
       <view class="rule-item">· 如已扣款但订单未显示，请保留购买凭证并联系客服</view>
     </view>
   </block>

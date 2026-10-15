@@ -10,22 +10,32 @@ const { callFn, callFnKeepCode } = require('./request');
 
 let _cache = null;
 let _cacheAt = 0;
+let _cacheOpenid = '';
+let _epoch = 0;
 const CACHE_MS = 30 * 1000;      // 30 秒内不重复查，省调用次数
 
 function clear() {
   _cache = null;
   _cacheAt = 0;
+  _cacheOpenid = '';
+  _epoch++;
+  try { require('./homecache').clearPage('pay'); } catch (e) {}
 }
 
 /** 查额度（带短缓存） */
 async function info(force) {
   const now = Date.now();
-  if (!force && _cache && now - _cacheAt < CACHE_MS) return _cache;
+  const openid = wx.getStorageSync('__openid_cache__') || '';
+  if (!force && _cache && _cacheOpenid === openid && now - _cacheAt < CACHE_MS) return _cache;
+  const epoch = _epoch;
   try {
     const d = await callFn('quota', { action: 'info' });
-    _cache = d || null;
-    _cacheAt = now;
-    return _cache;
+    if (_epoch === epoch && (wx.getStorageSync('__openid_cache__') || '') === openid) {
+      _cache = d || null;
+      _cacheAt = now;
+      _cacheOpenid = openid;
+    }
+    return d || null;
   } catch (e) {
     // 额度服务没部署/出错时返回 null：调用方按"放行"处理，不能挡住用户
     console.warn('[quota] 查询失败（本次不拦截）:', e.message);
@@ -119,10 +129,14 @@ function raiseVirtualPay(order) {
       mode: order.mode || 'short_series_goods',
       success: resolve,
       fail: (err) => {
-        const code = err && err.errCode;
+        const code = Number(err && err.errCode);
         const raw = (err && err.errMsg) || '';
-        if (code === -2) reject(new Error('已取消支付'));
-        else if (code === -15007) reject(new Error('登录态过期，请重新进入小程序后重试'));
+        if (code === -2) reject(Object.assign(new Error('已取消支付'), { paymentCancelled: true }));
+        else if (code === -15007) reject(Object.assign(new Error('登录态过期，请稍后重试'), { sessionExpired: true }));
+        else if (code === -15002 || code === -15012
+          || /ios支付时订单号重复|outTradeNo重复使用|订单号重复/i.test(raw)) {
+          reject(Object.assign(new Error('订单未能发起，请稍后重试'), { orderNumberRejected: true }));
+        }
         else if (code === -15010 || code === -15014) reject(new Error('商品还没发布生效，请稍等 10 分钟再试'));
         else if (/no permission/i.test(raw)) {
           reject(new Error('虚拟支付在当前环境不可用：模拟器不支持支付，请用真机重试；真机仍报错请到小程序后台确认「虚拟支付」权限已开通'));
@@ -144,7 +158,40 @@ async function confirmOrder(outTradeNo) {
     clear();
     return { ok: true };
   }
-  return { ok: false, pending: true, msg: (r.data && r.data.msg) || '支付状态待核实，请到我的订单同步' };
+  return { ok: false, pending: true, msg: (r.data && r.data.msg) || '正在确认支付结果，请稍后查看我的订单' };
+}
+
+async function payPreparedOrder(order) {
+  let current = order;
+  const replaced = new Set(order.replacedOrderNo ? [order.replacedOrderNo] : []);
+  let sessionRetried = false;
+  let numberRetried = false;
+  try {
+    for (;;) {
+      try { await raiseVirtualPay(current); break; }
+      catch (error) {
+        if (error.sessionExpired && !sessionRetried) sessionRetried = true;
+        else if (error.orderNumberRejected && !numberRetried) numberRetried = true;
+        else throw error;
+        const code = await loginCode();
+        const prepared = await callFn('virtualPay', { action: 'repay', outTradeNo: current.outTradeNo,
+          code, platform: devicePlatform() });
+        // 防止客户端新代码调用旧云函数，又把已用号码送回 SDK。
+        if (prepared.outTradeNo === current.outTradeNo || !prepared.signData) {
+          throw new Error('订单未能更新，请稍后重试');
+        }
+        if (prepared.replacedOrderNo) replaced.add(prepared.replacedOrderNo);
+        current = prepared;
+      }
+    }
+    return Object.assign(await confirmOrder(current.outTradeNo), {
+      outTradeNo: current.outTradeNo, replacedOrderNo: [...replaced][0] || '', replacedOrderNos: [...replaced],
+    });
+  } catch (error) {
+    error.replacedOrderNo = [...replaced][0] || '';
+    error.replacedOrderNos = [...replaced];
+    throw error;
+  }
 }
 
 /**
@@ -155,7 +202,7 @@ async function pay(goodsId) {
   wx.showLoading({ title: '下单中…', mask: true });
   let order;
   try {
-    const code = await loginCode().catch(() => '');
+    const code = await loginCode();
     try {
       order = await callFn('virtualPay', { action: 'createOrder', goodsId, code, platform: devicePlatform() });
     } catch (e) {
@@ -170,12 +217,11 @@ async function pay(goodsId) {
   }
   if (!order || !order.signData) throw new Error('下单失败，请稍后再试');
 
-  await raiseVirtualPay(order);
-  return confirmOrder(order.outTradeNo);
+  return payPreparedOrder(order);
 }
 
 /**
- * 继续支付：对一笔「待支付」的订单，用原订单号重新签名后拉起支付
+ * 继续支付：云端查证未支付后关联新单号，不能重复使用已经拉起过支付的号码
  * @param {string} outTradeNo
  */
 async function payAgain(outTradeNo) {
@@ -183,7 +229,7 @@ async function payAgain(outTradeNo) {
   wx.showLoading({ title: '重新下单…', mask: true });
   let order;
   try {
-    const code = await loginCode().catch(() => '');
+    const code = await loginCode();
     try {
       order = await callFn('virtualPay', { action: 'repay', outTradeNo, code, platform: devicePlatform() });
     } catch (e) {
@@ -197,8 +243,7 @@ async function payAgain(outTradeNo) {
   }
   if (!order || !order.signData) throw new Error('重新发起支付失败，请稍后再试');
 
-  await raiseVirtualPay(order);
-  return confirmOrder(order.outTradeNo);
+  return payPreparedOrder(order);
 }
 
 /** 取消订单（云端只允许取消自己「待支付」的订单；已支付/已到账的会拒绝） */
@@ -212,17 +257,20 @@ async function cancelOrder(outTradeNo) {
  * 我的订单列表（订单中心页用）
  * 只读展示用；读取失败应提示错误，不能伪装成空订单。
  */
-async function orderList() {
-  const d = await callFn('virtualPay', { action: 'orderList' });
-  return (d && d.list) || [];
+async function orderList(page) {
+  const d = await callFn('virtualPay', { action: 'orderList', page: Math.max(1, Number(page) || 1) });
+  return d || { list: [], hasMore: false, page: 1 };
 }
 
-/** 手动补发：付了钱但额度没到账时点「刷新」用它 */
-async function syncOrders() {
-  const r = await callFnKeepCode('virtualPay', { action: 'sync' });
+/** 订单页后台自动核对和补发；不向用户展示手动同步入口。 */
+async function syncOrders(outTradeNos) {
+  const r = await callFnKeepCode('virtualPay', { action: 'sync',
+    outTradeNos: Array.isArray(outTradeNos) ? outTradeNos : undefined });
   if (r.code !== 0) throw new Error(r.msg || '订单同步失败');
-  clear();
-  return r.data || { delivered: 0, pending: 0, verified: 0, checked: 0 };
+  const result = r.data || { delivered: 0, pending: 0, verified: 0, checked: 0 };
+  // 只有权益真的变化才让额度页首屏快照失效；普通查单不能每次都造成下次进页转圈。
+  if (result.delivered) clear();
+  return result;
 }
 
 // ============================================================

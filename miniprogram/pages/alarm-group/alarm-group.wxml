@@ -109,7 +109,7 @@
     <view class="confirm-card" catchtap="noop">
       <view class="confirm-icon">🗑</view>
       <view class="confirm-title">删除这个提醒？</view>
-      <view class="confirm-text">{{delItem.title}}</view>
+      <view class="confirm-text">{{delItem.displayTitle}}</view>
       <view class="confirm-hint">删除后将不再提醒</view>
       <view class="confirm-actions">
         <view class="btn-cancel" bindtap="onCancelDelete">取消</view>

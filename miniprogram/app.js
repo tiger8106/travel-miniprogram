@@ -4,6 +4,7 @@ const auth = require('./utils/auth');
 const alarm = require('./utils/alarm');
 const privacy = require('./utils/privacy');
 const cloud = require('./utils/cloud');
+const homeCache = require('./utils/homecache');
 
 // ============================================================
 // ⚠️ 必填：云开发环境 ID（仅 USE_MOCK=false 时需要）
@@ -71,6 +72,12 @@ App({
       return;
     }
     this.globalData.cloudReady = true;
+    // 冷启动时同步恢复上次主动选择的行程，其他 Tab 不必等首页云请求结束。
+    const cachedOpenid = auth.getOpenid();
+    if (cachedOpenid) {
+      this.globalData.openid = cachedOpenid;
+      this.globalData.currentTripId = homeCache.selectedTripId(cachedOpenid) || null;
+    }
     if (!CLOUD_ENV_ID || CLOUD_ENV_ID === 'YOUR_ENV_ID') {
       console.warn('[阿稳提示] CLOUD_ENV_ID 还是占位符，当前使用开发者工具默认环境。正式环境请填入真实环境 ID。');
     }
@@ -101,6 +108,11 @@ App({
         return;
       }
       this.globalData.openid = auth.getOpenid();
+      if (!this.globalData.currentTripId) {
+        this.globalData.currentTripId = homeCache.selectedTripId(this.globalData.openid) || null;
+      }
+      // 预热轻量身份提示；“我的”页可直接用按账号缓存同步渲染管理员入口。
+      try { require('./utils/admin-role').refresh(this.globalData.openid).catch(() => {}); } catch (e) {}
 
       // 3. 启动闹钟轮询（前台）
       alarm.startPolling();

@@ -89,10 +89,16 @@ function silentLogin(force) {
           // openid 变了（换微信账号登录）→ 清掉所有本地快照，防止串号
           const prev = wx.getStorageSync(KEY_OPENID);
           if (prev && prev !== openid) {
+            try { require('./admin-role').clear(prev); } catch (e) {}
+            try { require('./avatar-cache').clear(prev); } catch (e) {}
+            try { require('./quota').clear(); } catch (e) {}
             try { require('./homecache').clearAll(); } catch (e) {}
             try { require('./genrunner').reset(); } catch (e) {}
           }
           wx.setStorageSync(KEY_OPENID, openid);
+          if (typeof data.isAdmin === 'boolean') {
+            try { require('./admin-role').remember(openid, data.isAdmin); } catch (e) {}
+          }
           // 只要用户主动登录过，就撤掉"已退出"标记，后续可以自动静默登录
           wx.removeStorageSync(KEY_LOGGED_OUT);
           // 云端返回的资料（昵称等）同步到本地缓存
@@ -185,8 +191,12 @@ async function updateProfile(patch) {
  * 重新登录后 openid 不变，行程/闹钟/建议全部还在。
  */
 function logout() {
+  const oldOpenid = getOpenid();
   wx.removeStorageSync(KEY_OPENID);
   wx.removeStorageSync(KEY_PROFILE);
+  try { require('./admin-role').clear(oldOpenid); } catch (e) {}
+  try { require('./avatar-cache').clear(oldOpenid); } catch (e) {}
+  try { require('./quota').clear(); } catch (e) {}
   // 退出后立即清掉首页/闹钟/建议快照，避免下一个账号在网络刷新前看到上一个账号的内容。
   try { require('./homecache').clearAll(); } catch (e) {}
   try { require('./genrunner').reset(); } catch (e) {}

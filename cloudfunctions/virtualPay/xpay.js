@@ -88,17 +88,41 @@ function notifyResponse(result, format) {
 
 function readQueryResponse(response, local) {
   const r = response || {};
-  if (r.errcode !== 0 || !r.order || typeof r.order !== 'object') {
-    return { ok: false, reason: `query_error:${r.errcode === undefined ? 'invalid' : r.errcode}` };
+  if (r.errcode !== 0 && r.errcode !== '0') {
+    const detail = String(r.errmsg || '')
+      .replace(/(access_token|pay_sig|session_key|appkey|app_secret|secret)\s*[:=]\s*[^\s&,;]+/ig, '$1=[redacted]')
+      .replace(/\s+/g, ' ').slice(0, 120);
+    const code = r.errcode === undefined ? 'invalid' : r.errcode;
+    // 参数错误可能具体指“订单不存在”，只有微信明确这样说时才当作无远端订单。
+    const notFound = Number(code) === 268490002 && (
+      /订单不存在|不存在的订单|查无此订单|未找到(?:该)?订单|找不到(?:该)?订单|order[_\s-]*(?:id[_\s-]*)?(?:(?:is|does)[_\s-]*)?not[_\s-]*(?:exist|found)|order[_\s-]*(?:id[_\s-]*)?(?:doesn't|does not)[_\s-]*exist/i.test(detail)
+      // query_order 线上真实返回：errmsg="数据不存在 rid: ..."。仅接受完整说明，不泛化参数错误。
+      || /^(?:数据不存在|data\s+(?:not\s+exist|does\s+not\s+exist))(?:\s+rid\s*[:：]|$)/i.test(detail));
+    return { ok: false, notFound, canCancel: notFound, canRepay: notFound,
+      reason: `query_error:${code}`, detail };
+  }
+  // 本地下单记录先于拉起支付创建；用户在支付页退出时，微信可能还没有建单。
+  if (r.order === undefined || r.order === null) {
+    return { ok: false, notFound: true, canCancel: true, canRepay: true, reason: 'order_not_found' };
+  }
+  if (typeof r.order !== 'object' || Array.isArray(r.order)) {
+    return { ok: false, reason: 'order_invalid' };
   }
   const p = r.order;
-  const status = Number(p.status);
+  const status = p.status === null || p.status === '' ? NaN : Number(p.status);
+  if (!Number.isInteger(status)) return { ok: false, reason: 'status_invalid' };
   if (String(p.order_id || '') !== String(local.outTradeNo || '')) return { ok: false, reason: 'order_id_mismatch' };
   if (!Number.isInteger(Number(p.order_fee)) || Number(p.order_fee) !== Number(local.price)) {
-    return { ok: false, reason: 'order_fee_mismatch' };
+    return { ok: false, reason: 'order_fee_mismatch',
+      detail: `status=${status};order_fee=${String(p.order_fee).slice(0, 24)};expected=${local.price}` };
   }
-  if (!Number.isInteger(Number(p.paid_fee)) || Number(p.paid_fee) < 0 || Number(p.paid_fee) > Number(p.order_fee)) {
-    return { ok: false, reason: 'paid_fee_invalid' };
+  // 尚未支付的订单可能没有 paid_fee；只对该状态按 0 处理。
+  // 已支付订单仍必须带明确的实付金额，不能因字段缺失误发权益。
+  const paidFeeMissing = p.paid_fee === undefined || p.paid_fee === null || p.paid_fee === '';
+  const paidFee = paidFeeMissing ? ([0, 1, 6].includes(status) ? 0 : NaN) : Number(p.paid_fee);
+  if (!Number.isInteger(paidFee) || paidFee < 0 || paidFee > Number(p.order_fee)) {
+    return { ok: false, reason: 'paid_fee_invalid',
+      detail: `status=${status};paid_fee=${paidFeeMissing ? 'missing' : String(p.paid_fee).slice(0, 24)}` };
   }
   if (p.env_type !== undefined && Number(p.env_type) !== Number(local.env || 0) + 1) {
     return { ok: false, reason: 'environment_mismatch' };
@@ -109,7 +133,7 @@ function readQueryResponse(response, local) {
     platformOrderId: String(p.wx_order_id || ''),
     channelOrderId: String(p.channel_order_id || ''),
     wxpayOrderId: String(p.wxpay_order_id || ''),
-    paidFee: Number(p.paid_fee || 0),
+    paidFee,
     platformPaidAt: Number(p.paid_time || 0) * 1000,
     platformProvidedAt: Number(p.provide_time || 0) * 1000,
     settlementState: p.sett_state === undefined ? null : Number(p.sett_state),
@@ -119,7 +143,9 @@ function readQueryResponse(response, local) {
     refundFee: Number(p.refund_fee || 0),
     leftFee: Number(p.left_fee || 0),
   };
-  return { ok: paid, paid, status, platform, reason: paid ? '' : `platform_status:${status}` };
+  return { ok: paid, paid, status, canCancel: [0, 1, 6].includes(status) && paidFee === 0,
+    canRepay: status === 1 && paidFee === 0,
+    platform, reason: paid ? '' : `platform_status:${status}` };
 }
 
 module.exports = {

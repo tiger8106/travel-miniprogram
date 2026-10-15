@@ -32,18 +32,6 @@
         </picker>
       </view>
 
-      <view class="settings-divider"></view>
-
-      <view class="settings-row" bindtap="onSyncAllToCalendar">
-        <text class="settings-icon">📅</text>
-        <view class="settings-main">
-          <view class="settings-label">同步到系统日历</view>
-          <view class="settings-sub">系统日历提醒，微信不用打开</view>
-        </view>
-        <view class="settings-value {{futureCount ? '' : 'muted'}}">
-          {{futureCount ? futureCount + ' 个 ›' : '无待同步'}}
-        </view>
-      </view>
       <view wx:if="{{devMode}}" class="settings-divider"></view>
 
       <view wx:if="{{devMode}}" class="settings-row" bindtap="onSelfCheck">
@@ -57,7 +45,7 @@
     </view>
 
     <view wx:if="{{hotelHint}}" class="card hotel-booking-hint">
-      🏨 酒店可随时提前预订，越早确认越好。请到下方「酒店住宿」分类逐项核对并确定预订。
+      🏨 酒店可随时提前预订，请在下方「酒店住宿」分类核对酒店、入住日期和预订状态；已预订的也可随时查看。
     </view>
 
     <!-- ===== 正在进行 / 即将进行（和首页「此刻行程」同一套视觉） ===== -->
@@ -84,7 +72,7 @@
                 <text class="now-status {{item.ongoing ? 'live' : ''}}">{{item.statusText}}</text>
                 <text class="now-day">{{item.typeLabel}}</text>
               </view>
-              <view class="now-title-text">{{item.title}}</view>
+              <view class="now-title-text">{{item.displayTitle}}</view>
               <view wx:if="{{item.displayInfo}}" class="now-usage">{{item.displayInfo}}</view>
               <view class="now-action-time">办理时间：{{item.actionFriendly}}</view>
               <view class="now-complete" data-idx="{{index}}" catchtap="onToggleComplete">✓ 标记已完成</view>
@@ -97,7 +85,7 @@
     <view wx:else class="card now-empty">
       <view class="now-empty-icon">🚩</view>
       <view class="now-empty-text">没有正在进行或即将进行的提醒</view>
-      <view class="now-empty-sub">{{hotelHint ? '酒店预订请到下方「酒店住宿」分类逐项确认' : (alarms.length ? '所有事项都还早，见下方分类待办' : '还没有任何提醒事项')}}</view>
+      <view class="now-empty-sub">{{hotelHint ? '每日住宿信息见下方「酒店住宿」分类' : (alarms.length ? '所有事项都还早，见下方分类待办' : '还没有任何提醒事项')}}</view>
     </view>
 
     <!-- ===== 分类待办：折叠卡，点击进入分类详情页 ===== -->
@@ -204,7 +192,7 @@
     <view class="confirm-card" catchtap="noop">
       <view class="confirm-icon">🗑</view>
       <view class="confirm-title">删除这个提醒？</view>
-      <view class="confirm-text">{{delItem.title}}</view>
+      <view class="confirm-text">{{delItem.displayTitle}}</view>
       <view class="confirm-hint">删除后将不再提醒</view>
       <view class="confirm-actions">
         <view class="btn-cancel" bindtap="onCancelDelete">取消</view>

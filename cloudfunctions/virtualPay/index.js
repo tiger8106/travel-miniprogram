@@ -39,6 +39,7 @@ const R = require('./quota-rules');
 const db = cloud.database();
 const COL_ORDER = 'orders';
 const MAX_PENDING_ORDERS = 10;
+const VERSION = 'v1.7-single-use-orders';
 
 const OFFER_ID = String(process.env.XPAY_OFFER_ID || '');
 const ENV = Number(process.env.XPAY_ENV || 0);          // 0 现网 / 1 沙箱
@@ -79,15 +80,49 @@ async function loadOrder(outTradeNo) {
   return (res.data && res.data[0]) || null;
 }
 
-async function loadOrderByOpenid(openid, limit) {
+async function loadOrderByOpenid(openid, limit, skip) {
   await ensureColl(COL_ORDER);
   const res = await db.collection(COL_ORDER)
-    .where({ _openid: openid }).orderBy('createdAt', 'desc').limit(limit || 20).get();
+    .where({ _openid: openid }).orderBy('createdAt', 'desc').skip(skip || 0).limit(limit || 20).get();
   return res.data || [];
 }
 
 async function updateOrder(id, patch) {
   await db.collection(COL_ORDER).doc(id).update({ data: patch });
+}
+
+function paymentEvidence(order) {
+  return !!(order.verifiedPaymentAt || order.paidAt || order.deliveredAt
+    || Number(order.paidFee || 0) > 0 || ['delivered', 'refunded'].includes(order.status)
+    || [2, 3, 4, 5, 7, 8, 9, 10].includes(Number(order.platformStatus)));
+}
+
+function actionableUnpaid(order, checked) {
+  return ['created', 'verifying', 'paid'].includes(order.status) && !paymentEvidence(order)
+    && checked.canCancel
+    && !(checked.notFound && (order.paymentReturnedAt || order.platformOrderId));
+}
+
+/** 支付回调/续付可能与查单并发；旧快照不能覆盖新状态。 */
+async function changeUnpaidOrder(order, patch) {
+  const condition = { _id: order._id, _openid: order._openid, status: order.status };
+  for (const field of ['paymentReturnedAt', 'verifiedPaymentAt', 'paidAt', 'deliveredAt', 'lastPayAt']) {
+    condition[field] = order[field] === undefined ? db.command.exists(false) : order[field];
+  }
+  const r = await db.collection(COL_ORDER).where(condition).update({ data: patch });
+  return Number(r.stats && r.stats.updated) === 1;
+}
+
+async function recordQuery(order, checked) {
+  const patch = { lastQueriedAt: Date.now(), lastQueryReason: checked.reason || '',
+    lastQueryDetail: checked.detail || '' };
+  // 已有付款证据却查到未支付时保留付款快照，不能第二次点击就绕过证据。
+  if (checked.platform && !(paymentEvidence(order) && checked.canCancel)) {
+    Object.assign(patch, checked.platform);
+  }
+  if (checked.ok) patch.verifiedPaymentAt = Date.now();
+  if (paymentEvidence(order) && checked.canCancel) patch.paymentReview = true;
+  await updateOrder(order._id, patch);
 }
 
 // ============================================================
@@ -162,13 +197,14 @@ function httpsPostJson(url, body) {
 /** GET 一个 JSON 接口（jscode2session 用；失败时 resolve 错误对象，不 reject） */
 function httpsGetJson(url) {
   return new Promise((resolve) => {
-    https.get(url, (res) => {
+    const req = https.get(url, (res) => {
       let buf = '';
       res.on('data', (c) => { buf += c; });
       res.on('end', () => {
         try { resolve(JSON.parse(buf)); } catch (e) { resolve({ errcode: -1, errmsg: `响应不是 JSON：${buf.slice(0, 80)}` }); }
       });
     }).on('error', (e) => resolve({ errcode: -1, errmsg: e.message }));
+    req.setTimeout(8000, () => req.destroy(new Error('微信接口请求超时')));
   });
 }
 
@@ -190,25 +226,20 @@ async function code2SessionHttp(code) {
 
 /** 小程序全局 access_token（cgi-bin/token 用 GET） */
 let tokenCache = { value: '', until: 0 };
-function getAccessToken() {
+let tokenPending = null;
+function getAccessToken(forceRefresh) {
+  if (forceRefresh) tokenCache = { value: '', until: 0 };
   if (tokenCache.value && tokenCache.until > Date.now()) return Promise.resolve(tokenCache.value);
   if (!MP_APPID || !MP_SECRET) return Promise.resolve('');
+  if (tokenPending) return tokenPending;
   const url = `https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential`
     + `&appid=${encodeURIComponent(MP_APPID)}&secret=${encodeURIComponent(MP_SECRET)}`;
-  return new Promise((resolve) => {
-    https.get(url, (res) => {
-      let buf = '';
-      res.on('data', (c) => { buf += c; });
-      res.on('end', () => {
-        try {
-          const parsed = JSON.parse(buf);
-          const value = parsed.access_token || '';
-          if (value) tokenCache = { value, until: Date.now() + Math.max(60, Number(parsed.expires_in || 7200) - 300) * 1000 };
-          resolve(value);
-        } catch (e) { resolve(''); }
-      });
-    }).on('error', () => resolve(''));
-  });
+  tokenPending = httpsGetJson(url).then((parsed) => {
+    const value = parsed.access_token || '';
+    if (value) tokenCache = { value, until: Date.now() + Math.max(60, Number(parsed.expires_in || 7200) - 300) * 1000 };
+    return value;
+  }).finally(() => { tokenPending = null; });
+  return tokenPending;
 }
 
 /**
@@ -216,7 +247,7 @@ function getAccessToken() {
  * 只要能认出"已支付"就发货，认不出来返回 pending（不误判、不重复发）。
  */
 async function queryOrder(order) {
-  const token = await getAccessToken();
+  let token = await getAccessToken();
   if (!token) {
     return { ok: false, pending: true, reason: 'no_access_token', msg: '无法取得微信 access_token，暂不能核实支付或发货' };
   }
@@ -226,9 +257,16 @@ async function queryOrder(order) {
     sandbox: process.env.XPAY_APP_KEY_SANDBOX,
   });
   if (!key) return { ok: false, pending: true, reason: 'missing_app_key', msg: '缺少对应支付环境的 AppKey' };
-  const request = X.signedRequest(uri, X.queryPayload(order), token, key);
   try {
-    const r = await httpsPostJson(request.url, request.body);
+    let request = X.signedRequest(uri, X.queryPayload(order), token, key);
+    let r = await httpsPostJson(request.url, request.body);
+    if ([40001, 40014, 42001].includes(Number(r.errcode))) {
+      token = await getAccessToken(true);
+      if (token) {
+        request = X.signedRequest(uri, X.queryPayload(order), token, key);
+        r = await httpsPostJson(request.url, request.body);
+      }
+    }
     const result = X.readQueryResponse(r, order);
     return Object.assign({ pending: !result.ok }, result);
   } catch (e) {
@@ -258,16 +296,16 @@ async function reconcileOrder(order, options) {
   const fromNotify = !!(options && options.fromNotify);
   const q = await queryOrder(order);
   const now = Date.now();
-  if (q.platform) {
-    await updateOrder(order._id, Object.assign({}, q.platform, {
-      lastQueriedAt: now, lastQueryReason: q.reason || '',
-    }));
-  } else {
-    await updateOrder(order._id, { lastQueriedAt: now, lastQueryReason: q.reason || 'unknown' });
-  }
+  await recordQuery(order, q);
   if (!q.ok) {
+    if (actionableUnpaid(order, q) && ['paid', 'verifying'].includes(order.status)) {
+      const changed = await changeUnpaidOrder(order, { status: 'created', paymentReview: false });
+      return { delivered: false, pending: false, changed, reason: q.reason };
+    }
     // 老版本把查单失败也标记为 paid；现在不允许用这个状态补发。
-    if (order.status === 'paid') await updateOrder(order._id, { status: 'verifying' });
+    if (order.status === 'paid' && !paymentEvidence(order)) {
+      await changeUnpaidOrder(order, { status: 'verifying' });
+    }
     if (q.platform && [5, 8].includes(q.status)) {
       // 回调可能丢失，但查单已经确认退款完成；先标记争议单，权益回收仍走售后复核。
       await updateOrder(order._id, {
@@ -374,6 +412,7 @@ async function resolveSessionKey(openid, code) {
       }
     }
     if (r && r.session_key) {
+      if (r.openid !== openid) return { sessionKey: '', err: '微信登录账号与订单账号不一致，请重新登录' };
       sessionKey = r.session_key;
       err = '';
       if (me && me._id) {
@@ -382,6 +421,8 @@ async function resolveSessionKey(openid, code) {
       }
     } else {
       console.warn('[virtualPay] code 换 session_key 失败:', err);
+      // 新 code 兑换失败后使用缓存会把过期签名再次交给微信；让客户端换 code 重试。
+      return { sessionKey: '', err };
     }
   } else {
     err = '前端没有传 wx.login code';
@@ -463,10 +504,7 @@ async function actionCreateOrder(openid, event) {
   };
 }
 
-/**
- * 继续支付：对一笔「待支付」的订单，用**原来的订单号**重新签名让前端拉起支付
- * 不新建订单记录（否则同一笔购买会留两条单），原单支付成功后照常走 confirm 发货。
- */
+/** 虚拟支付单号只能使用一次：续付先查证未支付，再关联新单号。 */
 async function actionRepay(openid, event) {
   const outTradeNo = String(event.outTradeNo || '');
   if (!outTradeNo) return { code: -1, msg: '缺少订单号' };
@@ -478,23 +516,37 @@ async function actionRepay(openid, event) {
   const order = await loadOrder(outTradeNo);
   if (!order || order._openid !== openid) return { code: -1, msg: '订单不存在' };
   if (order.status === 'delivered') return { code: -2, msg: '这笔订单已经到账了，不用再付' };
-  if (order.status === 'paid') return { code: -2, msg: '这笔订单已支付，额度发放中，点「同步订单」即可' };
-  if (order.status === 'cancelled') return { code: -2, msg: '这笔订单已取消，请回到付费页重新下单' };
+  if (order.status === 'cancelled') {
+    if (order.replacementOrderNo && Number(event.replacementDepth || 0) < 4) {
+      const result = await actionRepay(openid, Object.assign({}, event, { outTradeNo: order.replacementOrderNo,
+        replacementDepth: Number(event.replacementDepth || 0) + 1 }));
+      if (result.code === 0 && result.data) result.data.replacedOrderNo = outTradeNo;
+      return result;
+    }
+    return { code: -2, msg: '这笔订单已取消，请回到付费页重新下单' };
+  }
+  if (order.status === 'refunded') return { code: -2, msg: '这笔订单已退款，请重新选择套餐' };
   const checked = await queryOrder(order);
+  await recordQuery(order, checked);
   if (checked.ok) {
     await reconcileOrder(order);
-    return { code: -2, msg: '微信侧已支付，订单已同步，请勿重复付款' };
+    return { code: -2, msg: '微信侧已支付，正在处理权益，请勿重复付款' };
   }
-  if (checked.status !== 1) return { code: -2, msg: '微信侧支付状态尚未确认，请先同步订单，避免重复扣款' };
+  if (!actionableUnpaid(order, checked)) {
+    return { code: -2, msg: '原订单暂不能继续支付，请稍后查看订单状态；如未扣款，可重新选择套餐下单' };
+  }
 
   const g = R.goodsById(order.goodsId);
   if (!g) return { code: -3, msg: '商品已下架，请回到付费页重新购买' };
 
-  const picked = pickPayEnv(event.platform || order.platform);
-  if (picked.err) return { code: -2, msg: picked.err };
-  if (picked.env !== Number(order.env || 0)) {
-    return { code: -2, msg: '原订单支付环境与当前设备不一致，请重新下单' };
-  }
+  const platform = String(event.platform || order.platform || '').toLowerCase();
+  // status=1/无远端订单也不代表 SDK 没消费过单号；不能据此重复拉起同一单号。
+  // 保留原支付环境；iOS 不支持沙箱，只有这个明确的例外切到现网。
+  const env = platform === 'ios' ? 0 : Number(order.env || 0);
+  const picked = { env, platform,
+    appKey: X.appKeyForEnv(env, { production: process.env.XPAY_APP_KEY,
+      sandbox: process.env.XPAY_APP_KEY_SANDBOX }) };
+  if (picked.err || !picked.appKey) return { code: -2, msg: '当前支付配置暂不可用，请稍后重试' };
 
   const sk = await resolveSessionKey(openid, String(event.code || ''));
   if (!sk.sessionKey) {
@@ -503,11 +555,24 @@ async function actionRepay(openid, event) {
 
   // 价格以**下单时记录的为准**，防止期间调价导致与米大师下单金额不符
   const price = Number(order.price || g.price || 0);
-  await updateOrder(order._id, { platform: picked.platform, lastPayAt: Date.now() }).catch(() => {});
+  const payOrderNo = genOutTradeNo();
+  const lastPayAt = Date.now();
+  const replacement = await db.collection(COL_ORDER).add({ data: {
+    _openid: openid, outTradeNo: payOrderNo, goodsId: g.id, price, env: picked.env,
+    platform: picked.platform, status: 'created', createdAt: lastPayAt, lastPayAt,
+    replacesOrderNo: outTradeNo,
+  } });
+  const changed = await changeUnpaidOrder(order, { status: 'cancelled', cancelledAt: lastPayAt,
+    replacementOrderNo: payOrderNo });
+  if (!changed) {
+    await updateOrder(replacement._id, { status: 'cancelled', cancelledAt: Date.now() });
+    return { code: -2, msg: '订单状态已更新，请重试' };
+  }
 
   return {
     code: 0,
-    data: buildPayParams(g, outTradeNo, price, openid, picked.env, picked.appKey, sk.sessionKey),
+    data: Object.assign(buildPayParams(g, payOrderNo, price, openid, picked.env, picked.appKey, sk.sessionKey),
+      { replacedOrderNo: outTradeNo }),
   };
 }
 
@@ -525,20 +590,27 @@ async function actionCancelOrder(openid, event) {
   const order = await loadOrder(outTradeNo);
   if (!order || order._openid !== openid) return { code: -1, msg: '订单不存在' };
   if (order.status === 'cancelled') return { code: 0, data: { ok: true, duplicated: true, outTradeNo } };
-  if (order.status !== 'created') {
+  if (!['created', 'verifying', 'paid'].includes(order.status)) {
     return { code: -2, msg: '已支付 / 已到账的订单不能取消（用于对账和售后）' };
   }
 
   const checked = await queryOrder(order);
+  await recordQuery(order, checked);
   if (checked.ok) {
     await reconcileOrder(order);
-    return { code: -2, msg: '微信侧已支付，不能取消；已为你同步订单' };
+    return { code: -2, msg: '微信侧已支付，不能取消；权益正在处理，请稍后查看我的订单' };
   }
-  if (checked.status !== 1) {
-    return { code: -2, msg: '微信侧状态尚未确认，暂不能取消，请稍后同步订单' };
+  if (!actionableUnpaid(order, checked)) {
+    return { code: -2, msg: '这笔订单暂时无法取消，请稍后重试；如已扣款请联系客服' };
   }
 
-  await updateOrder(order._id, { status: 'cancelled', cancelledAt: Date.now() });
+  if (!(await changeUnpaidOrder(order, { status: 'cancelled', cancelledAt: Date.now() }))) {
+    const current = await loadOrder(outTradeNo);
+    if (current && current.status === 'cancelled') {
+      return { code: 0, data: { ok: true, duplicated: true, outTradeNo } };
+    }
+    return { code: -2, msg: '订单状态已更新，请重试' };
+  }
   return { code: 0, data: { ok: true, outTradeNo } };
 }
 
@@ -558,19 +630,25 @@ async function actionConfirm(openid, event) {
   if (result.delivered) return { code: 0, data: { ok: true, delivered: true } };
   return {
     code: 0,
-    data: { ok: false, pending: true, msg: '正在向微信核实支付结果，请稍后到我的订单同步' },
+    data: { ok: false, pending: true, msg: '正在向微信核实支付结果，请稍后查看我的订单' },
   };
 }
 
-/** 把所有"已支付未发货"的订单补发一遍（用户点「额度没到账？刷新」时调） */
-async function actionSync(openid) {
-  const all = await loadOrderByOpenid(openid, 50);
+/** 订单页后台自动核对并补发，客户端不展示手动同步入口。 */
+async function actionSync(openid, event) {
+  const requested = Array.isArray(event && event.outTradeNos)
+    ? [...new Set(event.outTradeNos.map(String).filter(Boolean))].slice(0, 12) : [];
+  const all = requested.length
+    ? (await db.collection(COL_ORDER).where({ _openid: openid,
+      outTradeNo: db.command.in(requested) }).limit(12).get()).data || []
+    : await loadOrderByOpenid(openid, 50);
   const priority = (o) => o.status !== 'delivered' ? 0 : (o.platformNotifyError ? 1 : 2);
   const list = all.sort((a, b) => priority(a) - priority(b)
     || Number(a.lastQueriedAt || 0) - Number(b.lastQueriedAt || 0)).slice(0, 12);
   let delivered = 0;
   let pending = 0;
   let verified = 0;
+  let changed = 0;
   for (let i = 0; i < list.length; i += 4) {
     const results = await Promise.all(list.slice(i, i + 4).map(async (o) => {
       try { return await reconcileOrder(o); }
@@ -580,9 +658,29 @@ async function actionSync(openid) {
       if (r.delivered) delivered++;
       if (r.pending) pending++;
       if (r.verified) verified++;
+      if (r.changed || r.delivered) changed++;
     }
   }
-  return { code: 0, data: { delivered, pending, verified, checked: list.length } };
+  const nos = list.map((o) => o.outTradeNo);
+  const current = nos.length ? (await db.collection(COL_ORDER).where({ _openid: openid,
+    outTradeNo: db.command.in(nos) }).limit(12).get()).data || [] : [];
+  return { code: 0, data: { delivered, pending, verified, changed, checked: list.length,
+    orders: current.map((o) => ({ outTradeNo: o.outTradeNo, status: o.status,
+      deliveredAt: Number(o.deliveredAt || 0), userNotice: userOrderNotice(o),
+      noticeType: userOrderNoticeType(o) })) } };
+}
+
+/** 自动化核查使用：管理员仅检查自己的单笔订单，不取消、不签名、不发货。 */
+async function actionAdminInspectOrder(openid, event) {
+  const user = (await db.collection('users').where({ _openid: openid }).limit(1).get()).data || [];
+  if (!user[0] || !['admin', 'super'].includes(user[0].role)) return { code: -1, msg: '无权核查订单' };
+  const order = await loadOrder(String(event.outTradeNo || ''));
+  if (!order || order._openid !== openid) return { code: -1, msg: '订单不存在' };
+  const checked = await queryOrder(order);
+  return { code: 0, data: { serviceVersion: VERSION, outTradeNo: order.outTradeNo,
+    localStatus: order.status, price: order.price, env: order.env,
+    paymentEvidence: paymentEvidence(order), query: checked,
+    canCancel: actionableUnpaid(order, checked), canRepay: actionableUnpaid(order, checked) } };
 }
 
 /**
@@ -599,7 +697,7 @@ function userOrderNotice(order) {
     return '订单状态需要人工核对，请联系客服。';
   }
   if (status === 'delivered') return '权益已到账，可以使用。';
-  if (status === 'paid') return '支付已完成，权益正在发放，请稍后同步订单。';
+  if (status === 'paid') return '支付已完成，权益正在发放，请稍后查看。';
   if (status === 'verifying') return '正在确认支付结果，请勿重复付款。';
   if (status === 'created') return '尚未完成支付，可以继续支付。';
   if (status === 'cancelled') return '订单已取消；如已扣款，请联系客服。';
@@ -612,9 +710,15 @@ function userOrderNoticeType(order) {
     || [5, 8].includes(Number(order.platformStatus))) ? 'warning' : 'normal';
 }
 
-async function actionOrderList(openid) {
+async function actionOrderList(openid, event) {
   // 包含取消订单，方便用户确认自己的购买状态。
-  const list = await loadOrderByOpenid(openid, 50);
+  // 旧小程序不传 page，仍返回原来的最近 50 笔；新版显式传页码才小批读取。
+  const paged = event && event.page !== undefined;
+  const pageSize = paged ? 10 : 50;
+  const page = Math.max(1, Math.min(100000, Math.floor(Number(event && event.page) || 1)));
+  const rows = await loadOrderByOpenid(openid, pageSize + (paged ? 1 : 0), (page - 1) * pageSize);
+  const hasMore = paged && rows.length > pageSize;
+  const list = rows.slice(0, pageSize);
   const money = (fen) => {
     const n = Number(fen || 0);
     return `¥${(n / 100).toFixed(n % 100 === 0 ? 0 : 2)}`;
@@ -622,6 +726,7 @@ async function actionOrderList(openid) {
   return {
     code: 0,
     data: {
+      page, pageSize, hasMore,
       list: (list || []).map((o) => {
         const g = R.goodsById(o.goodsId);
         return {
@@ -674,6 +779,7 @@ async function actionAdminLedger(openid, event) {
   return {
     code: 0,
     data: {
+      serviceVersion: VERSION,
       scope: '最近50笔本地订单',
       total: rows.length,
       verified: verified.length,
@@ -703,6 +809,7 @@ async function actionAdminLedger(openid, event) {
         refundOrderId: String(o.refundOrderId || ''),
         refundWxOrderId: String(o.refundWxOrderId || ''),
         lastQueryReason: String(o.lastQueryReason || ''),
+        lastQueryDetail: String(o.lastQueryDetail || ''),
       })),
     },
   };
@@ -857,7 +964,7 @@ function actionDiag() {
   return {
     code: 0,
     data: {
-      version: 'v1.2-reconcile',
+      version: VERSION,
       env: ENV,
       envText: ENV === 1 ? '沙箱（安卓可自测）' : '现网',
       offerId: OFFER_ID ? `${OFFER_ID.slice(0, 4)}****` : '',
@@ -927,9 +1034,10 @@ exports.main = async (event, context) => {
   try {
     if (action === 'createOrder') return await actionCreateOrder(openid, event);
     if (action === 'confirm') return await actionConfirm(openid, event);
-    if (action === 'sync') return await actionSync(openid);
-    if (action === 'orderList') return await actionOrderList(openid);
+    if (action === 'sync') return await actionSync(openid, event);
+    if (action === 'orderList') return await actionOrderList(openid, event);
     if (action === 'adminLedger') return await actionAdminLedger(openid, event);
+    if (action === 'adminInspectOrder') return await actionAdminInspectOrder(openid, event);
     if (action === 'repay') return await actionRepay(openid, event);
     if (action === 'cancelOrder') return await actionCancelOrder(openid, event);
     // notify 只允许从 HTTP 消息推送入口进入；不向小程序暴露一个可随意触发查单的 action。

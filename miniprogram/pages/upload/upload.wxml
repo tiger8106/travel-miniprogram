@@ -32,7 +32,7 @@
       <view class="progress-bar" style="width: {{progress}}%;"></view>
     </view>
     <view wx:if="{{parsing && stageText}}" class="text-secondary" style="font-size: 22rpx; margin-top: 8rpx;">
-      {{stageText}}（超长攻略会自动分段解析，请耐心等待）
+      {{stageText}}。可以返回其他页面或退出小程序，云端会继续解析。
     </view>
 
     <view wx:if="{{errorMsg}}" class="error-tip">

@@ -5,7 +5,7 @@ const cloud = require('wx-server-sdk');
 cloud.init({ env: cloud.DYNAMIC_CURRENT_ENV });
 
 const COL = 'trips';
-const ITINERARY_VERSION = 'v1.5-generation-cleanup';
+const ITINERARY_VERSION = 'v1.6-hotel-checkout-date';
 const { synchronizeTrip, usageInfoForItem } = require('./booking-sync');
 
 function bookingTypeForItem(item) {

@@ -5,8 +5,10 @@ const tripUtil = require('../../utils/trip');
 const homeCache = require('../../utils/homecache');
 const auth = require('../../utils/auth');
 const genrunner = require('../../utils/genrunner');
+const { userErrorMessage } = require('../../utils/user-error');
 
 const app = getApp();
+const CACHE_KEY = 'mytrips';
 
 Page({
   data: {
@@ -22,13 +24,16 @@ Page({
     // 订阅全局登录态：一处登录全站解锁
     this._offAuth = auth.watch(this, {
       onLogin: () => this.load(),
-      onLogout: () => this.setData({
-        loading: false, trips: [], activeCount: 0, endedCount: 0,
-      }),
+      onLogout: () => {
+        this._hasSnapshot = false;
+        this._loadToken = (this._loadToken || 0) + 1;
+        this.setData({ loading: false, trips: [], activeCount: 0, endedCount: 0 });
+      },
     });
   },
 
   onShow() {
+    this.showCached();
     this.load();
     // 回到本页先看一眼：有没有在后台生成中的行程。
     // 场景：用户在向导页点了"生成详细行程"就退出了小程序 —— 云端还在接力跑，
@@ -58,7 +63,7 @@ Page({
     genrunner.sync({ resumeFailed: true }).then((s) => {
       wx.hideLoading();
       const tip = s.status === 'done' ? '已生成完成'
-        : s.status === 'running' ? '正在后台生成…' : (s.error || '暂时没法继续');
+        : s.status === 'running' ? '正在后台生成…' : userErrorMessage(s.error, '暂时无法继续，请稍后重试。');
       wx.showToast({ title: tip, icon: 'none' });
       this.load();
     }).catch(() => {
@@ -73,7 +78,8 @@ Page({
       await genrunner.dismiss();
       wx.showToast({ title: '已清除提示', icon: 'none' });
     } catch (error) {
-      wx.showToast({ title: error.message || '清除失败', icon: 'none' });
+      console.error('[mytrips] dismiss failed:', error);
+      wx.showToast({ title: userErrorMessage(error, '暂时无法清除，请稍后重试。'), icon: 'none' });
     }
   },
 
@@ -88,17 +94,35 @@ Page({
     this.load().then(() => wx.stopPullDownRefresh());
   },
 
+  showCached() {
+    const openid = auth.getOpenid();
+    const snap = openid && homeCache.readPage(CACHE_KEY);
+    if (!snap || snap.openid !== openid || !Array.isArray(snap.trips)) return false;
+    this._hasSnapshot = true;
+    this.setData({
+      loading: false, needLogin: false, trips: snap.trips,
+      activeCount: snap.activeCount, endedCount: snap.endedCount,
+    });
+    return true;
+  },
+
   async load() {
+    if (!this._hasSnapshot) this.showCached();
+    const token = this._loadToken = (this._loadToken || 0) + 1;
     // 未登录 → 先自动静默登录一次；仍然失败才显示登录门禁卡
     const ok = await auth.requireLogin();
+    if (token !== this._loadToken) return;
     if (!ok) {
       this.setData({ loading: false, needLogin: true, trips: [], activeCount: 0, endedCount: 0 });
       return;
     }
     if (this.data.needLogin) this.setData({ needLogin: false });
-    this.setData({ loading: true });
+    const openid = auth.getOpenid();
+    // 已有同账号快照时保持整页稳定，静默更新，不重新显示加载占位。
+    if (!this._hasSnapshot && !this.showCached()) this.setData({ loading: true });
     try {
       const list = await api.listItineraries({ compact: true });
+      if (token !== this._loadToken || auth.getOpenid() !== openid) return;
       const pinned = tripUtil.getPinnedIds();
       const trips = (list || []).map((t) => ({
         _id: t._id,
@@ -120,13 +144,13 @@ Page({
         if (a.ended !== b.ended) return a.ended ? 1 : -1;
         return String(a.startDate).localeCompare(String(b.startDate));
       });
-      this.setData({
-        loading: false,
-        trips,
-        activeCount: trips.filter((t) => !t.ended).length,
-        endedCount: trips.filter((t) => t.ended).length,
-      });
+      const activeCount = trips.filter((t) => !t.ended).length;
+      const endedCount = trips.filter((t) => t.ended).length;
+      this.setData({ loading: false, trips, activeCount, endedCount });
+      homeCache.writePage(CACHE_KEY, { openid, trips, activeCount, endedCount });
+      this._hasSnapshot = true;
     } catch (err) {
+      if (token !== this._loadToken) return;
       this.setData({ loading: false });
       wx.showToast({ title: err.message || '加载失败', icon: 'none' });
     }
@@ -144,6 +168,8 @@ Page({
     const id = e.currentTarget.dataset.id;
     if (!id) return;
     const nowPinned = tripUtil.togglePinned(id);
+    homeCache.clearPage(CACHE_KEY);
+    this._hasSnapshot = false;
     if (!nowPinned && app.globalData.currentTripId === id) {
       app.globalData.currentTripId = null;
     }
@@ -173,6 +199,8 @@ Page({
       if (tripUtil.getPinnedIds().indexOf(id) >= 0) tripUtil.togglePinned(id);
       if (app.globalData.currentTripId === id) app.globalData.currentTripId = null;
       homeCache.clear(); // 首页快照可能正好是这条，直接失效
+      homeCache.clearPage(CACHE_KEY);
+      this._hasSnapshot = false;
       wx.hideLoading();
       wx.showToast({ title: '已删除', icon: 'success' });
       await this.load();

@@ -29,7 +29,20 @@ Component({
 
     // 打开微信官方的《用户隐私保护指引》
     openContract() {
-      if (wx.openPrivacyContract) wx.openPrivacyContract({});
+      if (!wx.openPrivacyContract) {
+        wx.showModal({ title: '暂时无法打开', content: '当前微信版本不支持打开隐私保护指引，请更新微信后再试。', showCancel: false });
+        return;
+      }
+      wx.openPrivacyContract({
+        fail: (err) => {
+          console.warn('[privacy] 打开官方指引失败', err);
+          wx.showModal({
+            title: '隐私指引未能打开',
+            content: '请稍后重试。若仍无法打开，需要管理员在小程序后台提交《用户隐私保护指引》并等待审核生效；在能阅读指引前请勿点击同意。',
+            showCancel: false,
+          });
+        },
+      });
     },
 
     onAgree() {

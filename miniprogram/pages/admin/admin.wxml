@@ -49,7 +49,7 @@
                bindinput="onKeywordInput" confirm-type="search" bindconfirm="onSearch" />
         <view class="search-btn" bindtap="onSearch">搜索</view>
       </view>
-      <view wx:if="{{!users.length}}" class="empty">没有匹配的用户</view>
+      <view wx:if="{{!users.length && loadedTabs.users && !loadingUsers}}" class="empty">没有匹配的用户</view>
       <view wx:for="{{users}}" wx:key="userId" class="user-card">
         <view class="user-top">
           <view class="user-main">
@@ -68,6 +68,9 @@
                 data-index="{{index}}" bindtap="onMakeAdmin">设为管理员</view>
         </view>
       </view>
+      <view class="user-pagination" wx:if="{{userTotalPages > 1 || loadingUsers}}" bindtap="loadMoreUsers">
+        <text>{{loadingUsers ? '正在加载更多用户…' : (userPage < userTotalPages ? '继续上滑查看 · 共 ' + userTotal + ' 人' : '已显示全部 ' + userTotal + ' 人')}}</text>
+      </view>
     </view>
 
     <!-- ② 支付对账 -->
@@ -76,12 +79,13 @@
       <view class="primary-btn payment-refresh" bindtap="onReconcilePayments">向微信核对近期订单</view>
       <view wx:if="{{paymentError}}" class="payment-error">{{paymentError}}</view>
       <view wx:if="{{paymentSummary}}" class="payment-summary">
+        <view wx:if="{{paymentSummary.serviceVersion}}">支付服务版本 {{paymentSummary.serviceVersion}}</view>
         <view>{{paymentSummary.scope}}：{{paymentSummary.total}} 笔</view>
         <view>平台确认 {{paymentSummary.verified}} 笔 · 实付 {{paymentSummary.verifiedPaid}}</view>
         <view>平台标记结算 {{paymentSummary.settled}} 笔 · 实付 {{paymentSummary.settledGross}}</view>
         <view>扣除平台字段费用估算 {{paymentSummary.settledNetEstimate}}，不等于实际到账</view>
       </view>
-      <view wx:if="{{!paymentOrders.length}}" class="empty">暂无本地订单；请核对云环境、AppID 和支付渠道。</view>
+      <view wx:if="{{!paymentOrders.length && loadedTabs.payments}}" class="empty">暂无本地订单；请核对云环境、AppID 和支付渠道。</view>
       <view wx:for="{{paymentOrders}}" wx:key="outTradeNo" class="user-card payment-order">
         <view class="user-name">{{item.amountText}} · {{item.goodsId}}</view>
         <view class="user-meta">{{item.timeText}} · 本地 {{item.status}} · {{item.platformText}}</view>
@@ -96,6 +100,7 @@
         <view wx:elif="{{item.paymentReview}}" class="payment-error">本地已发货但平台支付未确认，请人工核查权益</view>
         <view wx:if="{{item.platformNotifyError}}" class="payment-error">发货回传待重试：{{item.platformNotifyError}}</view>
         <view wx:if="{{item.lastQueryReason}}" class="user-meta">最近查单：{{item.lastQueryReason}}</view>
+        <view wx:if="{{item.lastQueryDetail}}" class="user-meta">查单说明：{{item.lastQueryDetail}}</view>
       </view>
     </view>
 
@@ -181,7 +186,7 @@
     <!-- ④ 日志 -->
     <view wx:else class="panel">
       <view wx:if="{{isSuper && logs.length}}" class="danger-btn" bindtap="onClearLogs">🗑 清空日志</view>
-      <view wx:if="{{!logs.length}}" class="empty">暂无操作记录</view>
+      <view wx:if="{{!logs.length && loadedTabs.audit}}" class="empty">暂无操作记录</view>
       <view wx:for="{{logs}}" wx:key="ts" class="log-row">
         <view class="log-main">
           <text class="log-action">{{item.actionText}}</text>

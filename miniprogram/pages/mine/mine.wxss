@@ -21,6 +21,7 @@
 /* chooseAvatar 按钮：button 自己就是圆形容器（官方写法）。
    min/max 双重锁死尺寸，防止 button 默认样式把容器撑成椭圆 */
 .avatar-btn {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -46,6 +47,8 @@
 }
 
 .avatar-img {
+  position: absolute;
+  inset: 0;
   width: 120rpx;
   height: 120rpx;
   border-radius: 50%;

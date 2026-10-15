@@ -10,6 +10,9 @@
 
 const api = require('../../services/api');
 const auth = require('../../utils/auth');
+const homeCache = require('../../utils/homecache');
+const adminRole = require('../../utils/admin-role');
+const CACHE_KEY = 'admin_panel';
 
 /**
  * api 层有两种封装，返回形态不一样：
@@ -69,6 +72,10 @@ Page({
     // 用户授权
     keyword: '',
     users: [],
+    userPage: 1,
+    userTotalPages: 1,
+    userTotal: 0,
+    loadingUsers: false,
 
     // 配置（configItems 是唯一数据源，llm/amap/advanced 三份是分组视图）
     configItems: [],
@@ -91,13 +98,42 @@ Page({
   },
 
   async onLoad() {
-    if (!api.adminWhoami) {
+    if (!api.adminIdentity) {
       wx.showToast({ title: '当前构建不支持管理后台', icon: 'none' });
       setTimeout(() => wx.navigateBack(), 1200);
       this.setData({ loading: false });
       return;
     }
+    this.showCached();
     await this.refresh();
+  },
+
+  showCached() {
+    const openid = auth.getOpenid();
+    if (!openid || !adminRole.cached(openid)) return false;
+    const snap = homeCache.readPage(CACHE_KEY);
+    if (!snap || snap.openid !== openid || !snap.identity || !snap.identity.isAdmin) return false;
+    this.setData(Object.assign({ loggedIn: true, loading: false }, snap.identity, snap.panels || {}));
+    if (this.data.configItems.length) this.regroupConfig();
+    return true;
+  },
+
+  saveSnapshot() {
+    const openid = auth.getOpenid();
+    if (!openid || !this.data.isAdmin) return;
+    const d = this.data;
+    const identity = { isAdmin: d.isAdmin, isSuper: d.isSuper,
+      claimEnabled: d.claimEnabled, me: d.me, stats: d.stats };
+    const panels = {
+      loadedTabs: { users: false, payments: false, config: false, staff: false, audit: false },
+      keyword: d.keyword, users: d.users.slice(0, 10), userPage: 1,
+      userTotalPages: d.userTotalPages, userTotal: d.userTotal,
+      paymentSummary: d.paymentSummary, paymentOrders: d.paymentOrders.slice(0, 10),
+      staff: d.staff, logs: d.logs.slice(0, 20),
+      configItems: d.configItems.map((it) => Object.assign({}, it, { input: it.value })),
+      configUpdatedAt: d.configUpdatedAt,
+    };
+    homeCache.writePage(CACHE_KEY, { openid, identity, panels });
   },
 
   onPullDownRefresh() {
@@ -106,33 +142,45 @@ Page({
 
   async refresh(force) {
     const loggedIn = !!auth.isLoggedIn();
-    this.setData({ loggedIn, loading: true });
+    this.setData({ loggedIn, loading: !this.data.isAdmin });
     if (!loggedIn) {
       this.setData({ loading: false });
       return;
     }
     try {
-      const r = await api.adminWhoami();
+      const openid = auth.getOpenid();
+      const r = await api.adminIdentity();
+      if (auth.getOpenid() !== openid) return;
       const d = bodyOf(r);
       this.setData({
         isAdmin: !!d.isAdmin,
         isSuper: !!d.isSuper,
         claimEnabled: !!d.claimEnabled,
         me: d.me || null,
-        stats: d.stats || null,
         loading: false,
       });
-      if (force) {
-        const loaded = Object.assign({}, this.data.loadedTabs);
-        loaded[this.data.tab] = false;
-        this.setData({ loadedTabs: loaded });
-      }
+      adminRole.remember(openid, !!d.isAdmin);
+      if (!d.isAdmin) { homeCache.clearPage(CACHE_KEY); return; }
+      this.saveSnapshot();
+      this.loadOverview(openid);
+      // 有快照也在后台逐页签校准，不让旧内容永久停留。
+      this.setData({ loadedTabs: { users: false, payments: false, config: false, staff: false, audit: false } });
       if (d.isAdmin) await this.ensureTabData(this.data.tab);
     } catch (e) {
       this.setData({ loading: false });
       console.error('[admin] 身份读取失败', e);
       wx.showToast({ title: e.message || '读取失败', icon: 'none' });
     }
+  },
+
+  async loadOverview(openid) {
+    try {
+      const d = bodyOf(await api.adminOverview());
+      if (auth.getOpenid() !== openid || !this.data.isAdmin) return;
+      this.setData({ stats: d.stats || null,
+        me: Object.assign({}, this.data.me || {}, { totalGen: d.totalGen || 0 }) });
+      this.saveSnapshot();
+    } catch (e) { console.warn('[admin] 平台概况读取失败', e); }
   },
 
   /**
@@ -157,6 +205,7 @@ Page({
     if (!jobs.length) return;
     await Promise.all(jobs);
     this.setData({ loadedTabs: loaded });
+    this.saveSnapshot();
   },
 
   onSwitchTab(e) {
@@ -172,6 +221,7 @@ Page({
       this.setData({
         paymentError: '',
         paymentSummary: {
+          serviceVersion: d.serviceVersion || '',
           scope: d.scope || '最近50笔本地订单',
           total: d.total || 0,
           verified: d.verified || 0,
@@ -191,6 +241,7 @@ Page({
             : (Number(o.settlementState) === 1 ? '结算中' : '未显示结算完成'),
         })),
       });
+      this.saveSnapshot();
     } catch (e) {
       this.setData({ paymentError: e.message || '支付对账读取失败' });
     }
@@ -237,21 +288,43 @@ Page({
   },
 
   async onSearch() {
-    await this.loadUsers();
+    await this.loadUsers(1, false);
   },
 
-  async loadUsers() {
+  onReachBottom() {
+    if (this.data.tab === 'users') this.loadMoreUsers();
+  },
+
+  loadMoreUsers() {
+    if (this.data.userPage < this.data.userTotalPages) return this.loadUsers(this.data.userPage + 1, true);
+    return Promise.resolve();
+  },
+
+  async loadUsers(page, append) {
+    if (this.data.loadingUsers) return;
+    const keyword = (this.data.keyword || '').trim();
+    const openid = auth.getOpenid();
+    const nextPage = page || 1;
+    this.setData({ loadingUsers: true });
     try {
-      const r = await api.adminSearchUsers((this.data.keyword || '').trim());
-      const list = bodyOf(r).list || [];
+      const r = await api.adminSearchUsers(keyword, nextPage);
+      if (auth.getOpenid() !== openid || (this.data.keyword || '').trim() !== keyword) return;
+      const d = bodyOf(r);
+      const list = (d.list || []).map((u) => Object.assign({}, u, {
+        createdAtText: u.createdAt ? this.timeText(u.createdAt) : '',
+      }));
+      const seen = new Set((append ? this.data.users : []).map((u) => u.userId));
+      const users = (append ? this.data.users : []).concat(list.filter((u) => !seen.has(u.userId)));
       this.setData({
-        users: list.map((u) => Object.assign({}, u, {
-          createdAtText: u.createdAt ? this.timeText(u.createdAt) : '',
-        })),
+        userPage: d.page || 1,
+        userTotalPages: d.totalPages || 1,
+        userTotal: d.total || 0,
+        users,
       });
+      this.saveSnapshot();
     } catch (e) {
       wx.showToast({ title: e.message || '搜索失败', icon: 'none' });
-    }
+    } finally { this.setData({ loadingUsers: false }); }
   },
 
   /**
@@ -263,10 +336,13 @@ Page({
     const word = enable ? '授权不限量' : '取消授权不限量';
     wx.showLoading({ title: '处理中…', mask: true });
     try {
-      await api.adminSetUnlimited(u.userId, enable);
+      const result = bodyOf(await api.adminSetUnlimited(u.userId, enable));
       wx.hideLoading();
       wx.showToast({ title: enable ? '已授权不限量' : '已取消授权', icon: 'success' });
-      await Promise.all([this.loadUsers(), this.loadStaff()]);
+      this.setData({ users: this.data.users.map((item) => item.userId === u.userId
+        ? Object.assign({}, item, result.user || {}, { createdAtText: item.createdAtText }) : item) });
+      this.saveSnapshot();
+      this.loadStaff();
     } catch (err) {
       wx.hideLoading();
       wx.showToast({ title: err.message || '操作失败', icon: 'none' });
@@ -306,7 +382,10 @@ Page({
           await api.adminSetAdmin(u.userId, true);
           wx.hideLoading();
           wx.showToast({ title: '已设为管理员', icon: 'success' });
-          await Promise.all([this.loadUsers(), this.loadStaff()]);
+          this.setData({ users: this.data.users.map((item) => item.userId === u.userId
+            ? Object.assign({}, item, { role: 'admin', isAdmin: true }) : item) });
+          this.saveSnapshot();
+          this.loadStaff();
         } catch (err) {
           wx.hideLoading();
           wx.showToast({ title: err.message || '操作失败', icon: 'none' });
@@ -328,6 +407,7 @@ Page({
         configUpdatedAt: d.updatedAt ? this.timeText(d.updatedAt) : '尚未修改过',
       });
       this.regroupConfig();
+      this.saveSnapshot();
     } catch (e) {
       wx.showToast({ title: e.message || '配置读取失败', icon: 'none' });
     }
@@ -488,6 +568,7 @@ Page({
     try {
       const r = await api.adminListStaff();
       this.setData({ staff: bodyOf(r).list || [] });
+      this.saveSnapshot();
     } catch (e) {
       console.warn('[admin] 名单读取失败', e);
     }
@@ -551,6 +632,7 @@ Page({
           timeText: a.ts ? this.timeText(a.ts) : '',
         })),
       });
+      this.saveSnapshot();
     } catch (e) {
       console.warn('[admin] 日志读取失败', e);
     }

@@ -6,6 +6,7 @@ const alarm = require('../../utils/alarm');
 const timeUtil = require('../../utils/time');
 const env = require('../../utils/env');
 const auth = require('../../utils/auth');
+const homeCache = require('../../utils/homecache');
 
 const app = getApp();
 
@@ -60,12 +61,31 @@ Page({
     if (query && query.label) wx.setNavigationBarTitle({ title: decodeURIComponent(query.label) });
     this._offAuth = auth.watch(this, {
       onLogin: () => this.load(),
-      onLogout: () => this.setData({ loading: false, needLogin: true, alarms: [], pendingCount: 0, completedCount: 0 }),
+      onLogout: () => {
+        this._loadToken = (this._loadToken || 0) + 1;
+        this.setData({ loading: false, needLogin: true, alarms: [], totalCount: 0, pendingCount: 0, completedCount: 0 });
+      },
     });
   },
 
   onShow() {
+    this.showCached();
     this.load();
+  },
+
+  // 分类详情复用提醒页快照，点卡片后无需再等一次云调用才出现条目。
+  showCached() {
+    const openid = auth.getOpenid();
+    const tripId = app.globalData.currentTripId || homeCache.selectedTripId(openid);
+    const snap = openid && homeCache.readPage('tickets');
+    if (!snap || snap.tripId !== tripId || (snap.openid && snap.openid !== openid)) return false;
+    const items = (snap.alarms || []).filter((a) => this._types.indexOf(a.type || 'other') >= 0);
+    this.setData({
+      loading: false, needLogin: false, alarms: items, totalCount: items.length,
+      pendingCount: items.filter((a) => !a.completed).length,
+      completedCount: items.filter((a) => a.completed).length,
+    });
+    return true;
   },
 
   onUnload() {
@@ -91,20 +111,25 @@ Page({
   },
 
   async load() {
+    const token = this._loadToken = (this._loadToken || 0) + 1;
     const ok = await auth.requireLogin();
+    if (token !== this._loadToken) return;
     if (!ok) {
-      this.setData({ loading: false, needLogin: true, alarms: [], pendingCount: 0, completedCount: 0 });
+      this.setData({ loading: false, needLogin: true, alarms: [], totalCount: 0, pendingCount: 0, completedCount: 0 });
       return;
     }
     if (this.data.needLogin) this.setData({ needLogin: false });
     this.bindPrivacy();
-    const tripId = app.globalData.currentTripId;
+    const openid = auth.getOpenid();
+    const tripId = app.globalData.currentTripId || homeCache.selectedTripId(openid);
+    if (tripId && !app.globalData.currentTripId) app.globalData.currentTripId = tripId;
     if (!tripId) {
       this.setData({ loading: false, alarms: [], totalCount: 0, pendingCount: 0, completedCount: 0 });
       return;
     }
     try {
       const list = await api.listAlarms(tripId);
+      if (token !== this._loadToken || auth.getOpenid() !== openid || app.globalData.currentTripId !== tripId) return;
       const preferredLead = alarm.getAdvanceMin();
       // 分类页也要把完整行程同步到本地轮询缓存，完成一条事项后不会继续弹旧提醒；
       // 不能只同步当前分类，否则会把其他分类从本地缓存覆盖掉。
@@ -146,10 +171,12 @@ Page({
       this.setData({
         loading: false,
         alarms: items,
+        totalCount: items.length,
         pendingCount: items.filter((a) => !a.completed).length,
         completedCount: items.filter((a) => a.completed).length,
       });
     } catch (err) {
+      if (token !== this._loadToken) return;
       wx.showToast({ title: err.message || '加载失败', icon: 'none' });
       this.setData({ loading: false });
     }
@@ -194,7 +221,7 @@ Page({
     this.setData({
       editingId: item._id,
       editForm: {
-        title: item.title || '',
+        title: alarm.alarmTitleOf(item),
         note: item.note || '',
         bookingInfo: item.bookingInfo || '',
         fireAtDate: this.toDateStr(item.actionAt || item.fireAt),
@@ -276,6 +303,7 @@ Page({
     try {
       wx.showLoading({ title: '保存中' });
       await api.updateAlarm(editingId, patch);
+      homeCache.clearPage('tickets');
       this.setData({ editingId: null, editForm: null });
       await this.load();
       wx.showToast({ title: '已保存', icon: 'success' });
@@ -293,6 +321,7 @@ Page({
       wx.showLoading({ title: '添加中' });
       const tripId = app.globalData.currentTripId;
       await api.saveAlarms(tripId, [data]);
+      homeCache.clearPage('tickets');
       this.setData({ editingId: null, editForm: null });
       await this.load();
       wx.showToast({ title: '已添加', icon: 'success' });
@@ -315,6 +344,7 @@ Page({
     try {
       const completed = !item.completed;
       await api.updateAlarm(item._id, { completed });
+      homeCache.clearPage('tickets');
       await this.load();
       wx.showToast({ title: completed ? '已完成，仍保留在分类清单' : '已恢复待办', icon: 'none' });
     } catch (err) {
@@ -334,7 +364,7 @@ Page({
   onDelete(e) {
     const item = (e.detail && e.detail.item) || e.currentTarget.dataset.item;
     if (!item) return;
-    this.setData({ delItem: item });
+    this.setData({ delItem: { ...item, displayTitle: alarm.alarmTitleOf(item) } });
   },
 
   onCancelDelete() {
@@ -351,6 +381,7 @@ Page({
     try {
       wx.showLoading({ title: '删除中' });
       await api.deleteAlarm(item._id);
+      homeCache.clearPage('tickets');
       await this.load();
       wx.showToast({ title: '已删除', icon: 'success' });
     } catch (err) {

@@ -17,10 +17,12 @@ const typeOf = (row) => {
   return '';
 };
 const dateShift = (date, offset) => {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) return '';
-  const d = new Date(`${date}T00:00:00+08:00`);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(date || ''));
+  if (!match || !Number.isInteger(Number(offset || 0))) return '';
+  // 这里只移动「日历日期」，不能先把北京时间 00:00 转成前一日的 UTC 16:00。
+  const d = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1,
+    Number(match[3]) + Number(offset || 0)));
   if (isNaN(d.getTime())) return '';
-  d.setUTCDate(d.getUTCDate() + Number(offset || 0));
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
 };
 const sameName = (a, b) => {

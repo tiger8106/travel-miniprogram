@@ -194,6 +194,20 @@ function applyConsume(u, ts) {
   return { patch, source };
 }
 
+/** 特权账号免扣额度，但成功生成次数仍应计入统计。 */
+function applyPrivilegedConsume(u, ts) {
+  const now = ts || Date.now();
+  const x = normalizeUser(u);
+  const st = todayStat(x, now);
+  return {
+    patch: {
+      totalGen: x.totalGen + 1,
+      dayStat: { d: dayKey(now), gen: st.gen + 1, outline: st.outline, tips: st.tips },
+    },
+    source: 'privileged',
+  };
+}
+
 /** 扣错了/生成失败时退回（只退长期额度与赠送，会员次数也回退） */
 function applyRefund(u, ts, source) {
   const now = ts || Date.now();
@@ -204,7 +218,7 @@ function applyRefund(u, ts, source) {
     patch.vipUsed = Math.max(0, (x.vipMonth === monthKey(now) ? x.vipUsed : 0) - 1);
   } else if (source === 'gift') {
     patch.giftQuota = x.giftQuota + 1;
-  } else {
+  } else if (source !== 'privileged') {
     patch.quota = x.quota + 1;
   }
   patch.totalGen = Math.max(0, x.totalGen - 1);
@@ -314,6 +328,6 @@ function inviteReward(inviter, invitee, ts) {
 module.exports = {
   GOODS, LIMITS, SCENES,
   dayKey, monthKey, normalizeUser, isVip, vipLeft, giftLeft, available,
-  todayStat, UNLIMITED_SCENES, canConsume, applyConsume, applyRefund,
+  todayStat, UNLIMITED_SCENES, canConsume, applyConsume, applyPrivilegedConsume, applyRefund,
   canHit, applyHit, goodsById, applyDeliver, genInviteCode, inviteReward,
 };

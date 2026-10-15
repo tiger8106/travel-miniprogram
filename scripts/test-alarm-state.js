@@ -39,6 +39,7 @@ const items = [
     dayIndex: 1,
     activity: '入住成都酒店',
     category: 'hotel',
+    endLocation: '成都酒店',
   },
   {
     dayIndex: 0,
@@ -74,12 +75,30 @@ const inferred = infer.backfillRuleAlarms({ startDate, endDate, items }, []);
 const types = new Set(inferred.map((a) => a.type));
 ok(types.has('train'), '详细行程能补齐车票事项');
 ok(types.has('ticket'), '详细行程能补齐景区门票事项');
-ok(types.has('hotel'), '详细行程能补齐酒店事项');
+ok(require('../cloudfunctions/parseTravelPlan/hotel-reminders').groupHotelReminders(
+  inferred, items, startDate).some((a) => a.type === 'hotel'), '入库时统一补齐酒店事项');
 ok(types.has('other'), '详细行程能补齐证件/药品/装备事项');
 ok(inferred.every((a) => a.fireAt > Date.now() && a.remindAt === a.fireAt - 5 * 60 * 1000),
   '规则提醒均为未来时间且提前 5 分钟');
 const trainAlarm = inferred.find((a) => a.type === 'train');
 ok(trainAlarm && /08:30$/.test(trainAlarm.fireAtStr), '攻略明确起售时间时沿用来源时刻', trainAlarm && trainAlarm.fireAtStr);
+
+const bookedHotelItems = [0, 1, 2].map((dayIndex) => ({
+  dayIndex, category: 'hotel', activity: '入住桂林漓江酒店',
+  endLocation: '桂林漓江酒店', note: '酒店已预订，订单号 GL12345',
+}));
+const bookedHotelAlarms = infer.backfillRuleAlarms({ startDate, endDate, items: bookedHotelItems }, []);
+const stayAlarms = bookedHotelAlarms.filter((a) => a.type === 'hotel');
+ok(stayAlarms.length === 0, '逐日规则不单独建酒店提醒，由入库统一归并');
+const bookedFlagAlarms = infer.backfillRuleAlarms({ startDate, endDate,
+  items: [{ dayIndex: 0, category: 'hotel', activity: '入住桂林漓江酒店', hotelBooked: true }] }, []);
+ok(!bookedFlagAlarms.some((a) => a.type === 'hotel'), '酒店卡片交由统一归并器生成提醒');
+const unbookedHotelAlarms = infer.backfillRuleAlarms({ startDate, endDate,
+  items: [{ dayIndex: 0, category: 'hotel', activity: '入住桂林漓江酒店' }] }, []);
+ok(!unbookedHotelAlarms.some((a) => a.type === 'hotel'), '未订酒店也只由统一归并器生成一条提醒');
+const hotelTransit = infer.backfillRuleAlarms({ startDate, endDate,
+  items: [{ dayIndex: 0, category: 'transport', activity: '打车前往锦江都城酒店乘坐直通车' }] }, []);
+ok(!hotelTransit.some((a) => a.type === 'hotel'), '酒店仅是乘车地点时不误建入住提醒');
 
 const detailed = plan.backfillDetailAlarms(
   { startDate, endDate },

@@ -107,7 +107,10 @@ ok(!!hotelReminder && /随时提前预订/.test(hotelReminder.note) && /酒店�
   '酒店提醒说明可随时预订并指向酒店分类', hotelReminder && hotelReminder.note);
 
 // 4b. 开票日已过但行程未出发 → 降级成"赶紧去抢"的近期提醒（用户临时才规划的常见场景）
-const late = buildFallbackAlarms({ startDate: '2026-09-30', endDate: '2026-10-07' }, mkOutline('2026-09-30', '2026-10-07'));
+const chinaToday = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
+const lateStart = shiftDate(chinaToday, 7);
+const lateEnd = shiftDate(chinaToday, 14);
+const late = buildFallbackAlarms({ startDate: lateStart, endDate: lateEnd }, mkOutline(lateStart, lateEnd));
 ok(late.every((a) => a.fireAt > Date.now()), '开票日已过时，闹钟被顺延到现在之后而不是消失', late.length);
 ok(late.some((a) => ['train', 'plane', 'bus', 'ticket'].includes(a.type)
   && a.fireAt < Date.now() + 10 * 60 * 1000
@@ -118,9 +121,9 @@ ok(late.some((a) => ['train', 'plane', 'bus', 'ticket'].includes(a.type)
 const clean = sanitizeAlarmCandidates([
   { title: '过去的票', fireAt: '2020-01-01 09:00', type: 'train' },
   { title: '行程结束后', fireAt: '2030-01-01 09:00', type: 'train' },
-  { title: '未来的票', fireAt: '2026-10-06 09:00', type: 'train' },
-  { title: '未来的票', fireAt: '2026-10-06 09:00', type: 'train' }, // 重复
-], { startDate: '2026-09-30', endDate: '2026-10-07' });
+  { title: '未来的票', fireAt: `${shiftDate(chinaToday, 9)} 09:00`, type: 'train' },
+  { title: '未来的票', fireAt: `${shiftDate(chinaToday, 9)} 09:00`, type: 'train' }, // 重复
+], { startDate: lateStart, endDate: lateEnd });
 ok(clean.length === 1 && clean[0].title === '未来的票', '闹钟清洗：过去/超期/重复各被拦掉', clean.length);
 const typedBookingAlarms = P.normalizeBookingAlarmKinds([
   { type: 'ticket', title: '预约2027-01-02 乘坐包车前往毕棚沟游客中心', dayIndex: 0, linkedItemId: 'chauffeur' },
@@ -2282,12 +2285,13 @@ llm.chatWithRetry = async (messages) => {
     && item.category === 'transport' && item.endLocation === '重庆西');
   const officialLateTransfer = officialLateHome.find((item) => item.dayIndex === 1
     && item.endLocation === '重庆市金童路');
-  ok(officialLateTrain && officialLateTrain.endTime === '15:20'
-    && !/D1734/.test(officialLateTrain.activity || '')
-    && officialLateTransfer && officialLateTransfer.endTime === '16:00'
-    && officialLateOutline.days[1].moves[0].code === ''
-    && officialLateOutline.days[1].moves[0].schedSource === 'return-deadline-conflict',
-  '官方返程班次赶不上用户到家时间时清除冲突车次并保持末日顺序', JSON.stringify({ officialLateHome, move: officialLateOutline.days[1].moves[0] }));
+  ok(officialLateTrain && officialLateTrain.startTime === '17:35' && officialLateTrain.endTime === '23:00'
+    && /D1734/.test(officialLateTrain.activity || '')
+    && officialLateTransfer && P.toMin(officialLateTransfer.startTime) >= P.toMin(officialLateTrain.endTime)
+    && officialLateOutline.days[1].moves[0].code === 'D1734'
+    && officialLateOutline.days[1].moves[0].schedSource === '12306'
+    && /无法衔接/.test(officialLateTrain.note),
+  '已有班次赶不上到家目标时保留车次及准确时刻并明确冲突，不造更早列车', JSON.stringify({ officialLateHome, move: officialLateOutline.days[1].moves[0] }));
   const waitingRows = P.removeOrphanStationWaitingItems([
     { dayIndex: 0, startTime: '18:30', endTime: '19:00', category: 'other', startLocation: '成都茶店子客运站', endLocation: '理县客运站候车厅', activity: '抵达后进站候车，准备乘坐长途大巴' },
     { dayIndex: 1, startTime: '08:30', endTime: '09:00', category: 'other', startLocation: '成都东站', endLocation: '成都东站候车厅', activity: '到站安检候车' },
@@ -2361,6 +2365,17 @@ llm.chatWithRetry = async (messages) => {
   ok(!wrongNearbyHotelResult.outline.days[0].hotelPoiVerified
     && /南宁.*经济型住宿片区/.test(wrongNearbyHotelResult.outline.days[0].hotel),
   '附近酒店搜索的行政区地址冲突时，不把邻市 POI 冒充当地酒店', wrongNearbyHotelResult.outline.days[0].hotel);
+  const misleadingScopedHotel = { outline: { days: [
+    { city: '甲瀑布', overnight: '乙城', hotel: '甲酒店' }, { overnight: '返程' },
+  ] } };
+  let lodgingSearchScope = '';
+  await validateOutlineHotels(misleadingScopedHotel, {}, async (name, scope) => {
+    lodgingSearchScope = scope;
+    return { matchedName: '甲酒店', city: '甲城市', district: '甲县', address: '边境村',
+      areaSearch: true, areaMatched: true, searchCity: '乙城' };
+  }, async () => null);
+  ok(!misleadingScopedHotel.outline.days[0].hotelPoiVerified && lodgingSearchScope === '乙城',
+    'POI 实际 city/district 冲突不能因搜索范围命中而接受，搜索也不带白天景区');
   const verifiedHotelWithWrongScope = P.normalizeOutlineLodging({ days: [
     { overnight: '南宁青秀区', hotel: '外地真实酒店', hotelPoiVerified: true,
       hotelPoiVerifiedName: '外地真实酒店', hotelPoiAddress: '广西壮族自治区崇左市天等县' },

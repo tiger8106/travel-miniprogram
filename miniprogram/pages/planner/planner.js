@@ -11,6 +11,7 @@ const eta = require('../../utils/eta');
 const quota = require('../../utils/quota');
 const genrunner = require('../../utils/genrunner');
 const alarm = require('../../utils/alarm');
+const { userErrorMessage } = require('../../utils/user-error');
 
 const app = getApp();
 
@@ -95,6 +96,14 @@ function saveInterests(items) {
 }
 
 const MAX_DAYS = 12;
+const OUTLINE_JOB_KEY = 'planner_outline_job';
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+function saveOutlineJob(value) {
+  try { if (value) wx.setStorageSync(OUTLINE_JOB_KEY, value); else wx.removeStorageSync(OUTLINE_JOB_KEY); } catch (e) {}
+}
+function readOutlineJob() {
+  try { return wx.getStorageSync(OUTLINE_JOB_KEY) || null; } catch (e) { return null; }
+}
 
 Page({
   data: {
@@ -145,6 +154,8 @@ Page({
   },
 
   onLoad() {
+    this._outlineToken = 0;
+    this._destroyed = false;
     this._offAuth = auth.watch(this, {});
     // 兴趣偏好从本地恢复：上次 ✕ 掉的不再出现，没删的（选没选都算）全保留
     this.setData({ interestItems: loadInterests() });
@@ -159,6 +170,8 @@ Page({
   },
 
   onUnload() {
+    this._destroyed = true;
+    this._outlineToken++;
     if (this._offAuth) { this._offAuth(); this._offAuth = null; }
     if (this._offGen) { this._offGen(); this._offGen = null; }
     this._left = true;
@@ -212,6 +225,27 @@ Page({
       return;
     }
     if (this.data.needLogin) this.setData({ needLogin: false });
+    const saved = readOutlineJob();
+    if (saved && saved.jobId && !this._outlineDriving && this.data.step === 'form') {
+      this._input = saved.input;
+      this.setData({
+        origin: saved.input.origin, dest: saved.input.dest,
+        startDate: saved.input.startDate, endDate: saved.input.endDate,
+        startRange: pickRange(saved.input.startDate), startVal: pickVal(saved.input.startDate),
+        endRange: pickRange(saved.input.endDate), endVal: pickVal(saved.input.endDate),
+        goTime: saved.input.startTime, backTime: saved.input.endTime,
+        people: saved.input.people,
+        partyIdx: Math.max(0, PARTY.indexOf(saved.input.party)),
+        budgetIdx: Math.max(0, BUDGET.indexOf(saved.input.budget)),
+        paceIdx: Math.max(0, PACE.indexOf(saved.input.pace)),
+        transportIdx: Math.max(0, TRANSPORT.indexOf(saved.input.transport)),
+        interestItems: (this.data.interestItems || []).map((entry) =>
+          Object.assign({}, entry, { on: (saved.input.interests || []).includes(entry.name) })),
+        mustGo: saved.input.mustGo || '', extra: saved.input.extra || '',
+      });
+      this.updateDaysText();
+      return this.genOutline(saved);
+    }
   },
 
   onLoginSuccess() {
@@ -441,18 +475,81 @@ Page({
   },
 
   // 阶段一：出路线大纲
-  async genOutline() {
-    const etaDays = diffDays(this.data.startDate, this.data.endDate);
-    // 预估用"本机历史 + 当前天数"算；跑完按同口径回写实测值，下次就更准
+  async genOutline(saved) {
+    if (this._outlineDriving) return;
+    const etaDays = diffDays(this._input.startDate, this._input.endDate);
+    const token = ++this._outlineToken;
+    this._outlineDriving = true;
     this.setData({ generating: true });
     this.startTicker('AI 正在规划路线', eta.estimate('outline', etaDays));
     const t0 = Date.now();
     try {
-      const res = await api.generateOutline(this._input);
+      const job = saved || await api.startOutline(this._input);
+      if (!job || !job.jobId) throw new Error('大纲任务未创建成功');
+      saveOutlineJob({ jobId: job.jobId, input: this._input });
+      const res = await this.waitForOutline(job.jobId, token);
+      if (!res || token !== this._outlineToken || this._destroyed) return;
+      saveOutlineJob(null);
       eta.record('outline', etaDays, Date.now() - t0);
       this.updateEtaTexts(etaDays);   // 刚量过一次，页脚数字立刻变准
-      const days = (res.outline && res.outline.days) || [];
-      const outlineDays = days.map((d, i) => ({
+      this.showOutline(res);
+    } catch (err) {
+      if (token !== this._outlineToken || this._destroyed) return;
+      this.stopTicker();
+      this.setData({ generating: false, genTip: '' });
+      const msg = (err && err.message) || '';
+      if (/次数|额度|上限/.test(msg)) {
+        wx.showToast({ title: msg.slice(0, 30), icon: 'none' });
+      } else {
+        this.showGenerationError(err);
+      }
+    } finally {
+      this._outlineDriving = false;
+    }
+  },
+
+  async waitForOutline(jobId, token) {
+    const runnerId = `outline-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
+    let status = null;
+    while (token === this._outlineToken && !this._destroyed) {
+      if (!status) {
+        try { status = await api.outlineStatus(jobId); }
+        catch (error) {
+          const message = (error && error.message) || '';
+          if (/不存在|无权|未登录/.test(message)) saveOutlineJob(null);
+          if (!/超时|timeout|TIME_LIMIT|网络|request:fail|EAI_AGAIN|ECONN|暂时/.test(message)) throw error;
+          this.setTipExtra('正在等待云端大纲结果');
+          await wait(3000);
+          continue;
+        }
+      }
+      if (status.status === 'done') {
+        if (!status.outlineResult || !status.outlineResult.outline) throw new Error('大纲结果缺失');
+        return status.outlineResult;
+      }
+      if (status.status === 'failed') {
+        saveOutlineJob(null);
+        throw new Error(status.error || '大纲多次生成失败，请调整需求后重试');
+      }
+      if (status.resumable) {
+        try {
+          status = await api.resumeOutline(jobId, status.round, runnerId);
+          continue;
+        } catch (error) {
+          if (!/超时|timeout|TIME_LIMIT|执行时间/i.test((error && error.message) || '')) throw error;
+          this.setTipExtra('仍在继续生成大纲');
+        }
+      }
+      await wait(3000);
+      status = null;
+    }
+    return null;
+  },
+
+  showOutline(res) {
+    const days = (res.outline && res.outline.days) || [];
+    if (!days.length) throw new Error('AI 没有生成有效的大纲');
+    const outlineDays = days.map((d, i) => ({
         idx: i,
         uid: 'd' + i,
         date: d.d || d.date || '',
@@ -465,9 +562,9 @@ Page({
           return p.filter(Boolean).join(' ');
         }).join('；'),
         highlights: (d.hl || d.highlights || []).join(' · '),
-      }));
-      this.stopTicker();
-      this.setData({
+    }));
+    this.stopTicker();
+    this.setData({
         step: 'outline',
         generating: false,
         genTip: '',
@@ -477,95 +574,15 @@ Page({
         outlineDays,
         title: res.title,
         summary: res.summary,
-      });
-    } catch (err) {
-      this.stopTicker();
-      // 额度/限流类提示不是"云函数坏了"，别去弹体检报告——直接给购买引导
-      const msg = (err && err.message) || '';
-      if (/次数|额度|上限/.test(msg)) {
-        this.setData({ generating: false, genTip: '' });
-        wx.showToast({ title: msg.slice(0, 30), icon: 'none' });
-        return;
-      }
-      // 大纲阶段撞上云函数 60s 上限（长行程大纲本身就可能跑不进单次调用）：
-      // **不当失败处理** —— 整条链路转后台继续跑（云端先补大纲再细化），
-      // 完成后自动入库，用户留着看进度或者直接走都行。
-      if (/超时|timeout|TIME_LIMIT|执行时间/i.test(msg)) {
-        await this.bgGenerateAfterOutlineTimeout();
-        return;
-      }
-      this.setData({ generating: false, genTip: '' });
-      this.showDiag(err);
-    }
-  },
-
-  // 大纲超时 → 转后台生成（不弹报错，继续生成直到跑完）
-  async bgGenerateAfterOutlineTimeout() {
-    this.startTicker('行程较长，已转后台继续生成', 0);
-    this.setTipExtra('可离开，完成后自动保存');
-    const off = genrunner.subscribe((s) => {
-      if (!s || s.status !== 'running') return;
-      const p = s.progress || {};
-      if (p.total) this.setTipExtra(`已排 ${Math.min(p.done || 0, p.total)}/${p.total} 天 · 可离开`);
     });
-    try {
-      // 不带 outline 发起后台任务：云端任务首轮先生成大纲，之后照常细化入库
-      const result = await genrunner.start(this._input);
-      if (!result || !result.tripId) {
-        throw new Error((result && result.error) || '后台生成没有产出行程，请重试');
-      }
-      if (result.partial) {
-        this.stopTicker(); this.setData({ generating: false, genTip: '' });
-        wx.showToast({ title: '仍在后台生成，可到首页查看进度', icon: 'none' });
-        return;
-      }
-      app.globalData.currentTripId = result.tripId;
-      homeCache.clear();
-      quota.clear();
-      this.stopTicker();
-      this.setData({ generating: false, genTip: '' });
-      if (this._left) {
-        wx.showToast({ title: '攻略已生成', icon: 'success' });
-        return;
-      }
-      wx.redirectTo({ url: `/pages/itinerary/itinerary?tripId=${result.tripId}&all=1` });
-    } catch (e2) {
-      this.stopTicker();
-      this.setData({ generating: false, genTip: '' });
-      if (/已有一个行程正在生成/.test((e2 && e2.message) || '')) {
-        wx.showToast({ title: '已有行程在后台生成，请到首页查看', icon: 'none', duration: 2500 });
-        return;
-      }
-      this.showDiag(e2);
-    } finally {
-      if (off) off();
-    }
   },
 
-  // 生成失败时顺手跑一次云函数体检，把"缺哪个环境变量 / 模型连不连得上"
-  // 直接弹给用户看 —— 省掉翻云开发日志、来回截图确认的功夫。
-  async showDiag(err) {
-    const msg = (err && err.message) || '生成失败';
-    let report = '';
-    try {
-      const d = await api.generateDiag();
-      const NEED = ['LLM_PROVIDER', 'LLM_MODEL', 'LLM_API_KEY'];
-      // LLM_BASE_URL 是可选项（配了 provider 就不用配），缺了不算问题
-      const miss = NEED.filter((k) => !(d.env || {})[k]);
-      report = [
-        `云函数版本：${d.version || '未知'}`,
-        `模型：${d.model || '未取到'}`,
-        `端点：${d.baseURL || '未取到'}`,
-        `连通性：${d.ping || '未探测'}`,
-        miss.length ? `❌ 缺少环境变量：${miss.join('、')}（AMAP_KEY 只影响导航，可后补）` : '✅ 必需环境变量已配齐',
-        d.cfgError ? `配置错误：${d.cfgError}` : '',
-      ].filter(Boolean).join('\n');
-    } catch (e) {
-      report = '（云函数体检也失败了，多半是这个云函数还没上传部署）';
-    }
+  // 用户仅看到可执行的提示；诊断保留在日志，不额外调用体检接口。
+  async showGenerationError(err) {
+    console.error('[planner] generation failed:', err);
     wx.showModal({
-      title: msg.slice(0, 20) || '生成失败',
-      content: `${msg}\n\n—— 体检报告 ——\n${report}`,
+      title: '暂未生成成功',
+      content: userErrorMessage(err, '暂时无法生成，请稍后重试。已保存的内容不会丢失。'),
       showCancel: false,
       confirmText: '知道了',
     });
@@ -699,7 +716,6 @@ Page({
       eta.record('detail', totalDays, Date.now() - t0);
       this.updateEtaTexts(totalDays);
 
-      app.globalData.currentTripId = result.tripId;
       homeCache.clear();
       quota.clear();          // 云端已扣 1 次，本地缓存作废，下次进来看到的是最新余额
       this.setData({ generating: false, genTip: '' });
@@ -708,6 +724,11 @@ Page({
         wx.showToast({ title: '攻略已生成', icon: 'success' });
         return;
       }
+      // 只有用户仍停留在本页并准备打开新攻略时，才把它设为首页当前行程。
+      // 离开页面后，即使后台任务完成，也必须保留用户在首页主动切换的行程。
+      app.globalData.currentTripId = result.tripId;
+      app.globalData.currentTrip = null;
+      homeCache.setSelectedTripId(auth.getOpenid(), result.tripId);
       this.gotoTrip(result);
     } catch (err) {
       if (this._offGen) { this._offGen(); this._offGen = null; }
@@ -717,7 +738,7 @@ Page({
         wx.showToast({ title: '已有行程在后台生成，请到首页查看', icon: 'none', duration: 2500 });
         return;
       }
-      this.showDiag(err);
+      this.showGenerationError(err);
     }
   },
 

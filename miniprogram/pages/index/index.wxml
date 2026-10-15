@@ -44,7 +44,7 @@
       </view>
       <view wx:elif="{{trip.genStatus === 'failed'}}" class="trip-generation trip-generation-fail">
         <view class="trip-generation-title">⚠️ 行程生成暂未完成</view>
-        <view class="trip-generation-sub">{{trip.genError || '可到「我的行程」继续生成'}}</view>
+        <view class="trip-generation-sub">生成暂未完成，可到「我的行程」继续生成</view>
       </view>
       <picker wx:if="{{homeTrips.length > 1}}"
               mode="selector"
@@ -56,10 +56,6 @@
           <text>▸</text>
         </view>
       </picker>
-    </view>
-
-    <view wx:if="{{hotelBookingHint}}" class="card hotel-booking-hint">
-      🏨 酒店可随时提前预订，越早确认越好。请到提醒事项的「酒店住宿」分类逐项核对并预订。
     </view>
 
     <!-- 此刻行程：正在进行 / 即将进行，点卡片直接导航 -->

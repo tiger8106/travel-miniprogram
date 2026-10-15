@@ -10,10 +10,10 @@ async function parseTravelPlan(fileID) {
   return callFn('parseTravelPlan', { fileID, leadMinutes: alarm.getAdvanceMin() });
 }
 
-// 攻略分步解析：云函数 60s 上限调不高，把解析拆成六步由前端编排——
+// 攻略分步解析：云函数 60s 上限调不高，把解析拆成六步由云端任务编排——
 // init（读文档切分）→ day（逐天 AI 解析，循环 N 次）→ collect（闹钟+建议）
 // → infer（清洗+反推待办）→ geocode（地图定位，循环到完）→ commit（入库）。
-// 每步都远小于 60s，失败可从断点重试。
+// 页面可在可见时加速续跑，退出后由 parseWorker 接力；失败可从断点重试。
 async function parseTravelPlanStep(payload) {
   return callFn('parseTravelPlan', Object.assign({ leadMinutes: alarm.getAdvanceMin() }, payload));
 }
@@ -106,11 +106,23 @@ async function generateOutline(input) {
   return callFn('generatePlan', Object.assign({ action: 'outline' }, input));
 }
 
+async function startOutline(input) {
+  return callFn('generatePlan', Object.assign({ action: 'outlineStart' }, input));
+}
+
+async function outlineStatus(jobId) {
+  return callFn('generatePlan', { action: 'outlineStatus', jobId });
+}
+
+async function resumeOutline(jobId, round, runnerId) {
+  return resumeGen(jobId, round, runnerId);
+}
+
 async function buildPlan(input, outlineData) {
   return callFn('generatePlan', Object.assign({ action: 'build' }, input, outlineData));
 }
 
-// 云函数体检：环境变量齐不齐、模型连不连得上（生成失败时前端自动调，帮用户自助排查）
+// 仅供显式开发排查；用户生成失败时不调用，也不展示诊断结果。
 async function generateDiag() {
   return callFn('generatePlan', { action: 'diag' });
 }
@@ -131,8 +143,10 @@ async function resumeGen(jobId, expectRound, runnerId) {
 }
 
 // 查当前有没有正在后台生成的任务
-async function genJobStatus() {
-  return callFn('generatePlan', { action: 'jobStatus' });
+async function genJobStatus(options) {
+  options = options || {};
+  return callFn('generatePlan', { action: 'jobStatus',
+    includeCompleted: !!options.includeCompleted, generationRequestId: String(options.requestId || '').slice(0, 100) });
 }
 
 async function dismissGen(jobId) {
@@ -160,6 +174,18 @@ function adminWhoami() {
   return callFn('admin', { action: 'whoami' });
 }
 
+function adminRole() {
+  return callFn('admin', { action: 'role' });
+}
+
+function adminIdentity() {
+  return callFn('admin', { action: 'identity' });
+}
+
+function adminOverview() {
+  return callFn('admin', { action: 'overview' });
+}
+
 /** 最近订单的微信侧支付和结算快照；云端再次校验管理员身份。 */
 function adminPaymentLedger(refresh) {
   return callFn('virtualPay', { action: 'adminLedger', refresh: !!refresh });
@@ -171,8 +197,8 @@ function adminClaim(code) {
 }
 
 /** 按微信号 / 昵称找用户（管理员） */
-function adminSearchUsers(keyword) {
-  return callFn('admin', { action: 'searchUsers', keyword });
+function adminSearchUsers(keyword, page) {
+  return callFn('admin', { action: 'searchUsers', keyword, page: page || 1 });
 }
 
 /** 授权 / 取消授权「不限量使用」 */
@@ -239,6 +265,9 @@ module.exports = {
   refreshSuggestions,
   getDayTips,
   generateOutline,
+  startOutline,
+  outlineStatus,
+  resumeOutline,
   buildPlan,
   generateDiag,
   startGen,
@@ -248,6 +277,9 @@ module.exports = {
   uploadDoc,
   downloadFromCloud,
   adminWhoami,
+  adminRole,
+  adminIdentity,
+  adminOverview,
   adminPaymentLedger,
   adminClaim,
   adminSearchUsers,

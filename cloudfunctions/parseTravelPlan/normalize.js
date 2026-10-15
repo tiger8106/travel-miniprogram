@@ -238,6 +238,10 @@ function sanitizeItems(rawItems) {
         endLocation: end.slice(0, 60),
         transportType: it.transportType || '',
         bookingInfo: String(it.bookingInfo || '').slice(0, 160),
+        ...(typeof it.ticketRequired === 'boolean' ? { ticketRequired: it.ticketRequired } : {}),
+        ...(typeof it.reservationRequired === 'boolean' ? { reservationRequired: it.reservationRequired } : {}),
+        ...(it.ticketPlace ? { ticketPlace: String(it.ticketPlace).slice(0, 80) } : {}),
+        ...(it.ticketProduct ? { ticketProduct: String(it.ticketProduct).slice(0, 80) } : {}),
         note: stripMeta(it.note).slice(0, 300),
       };
     })
@@ -248,6 +252,11 @@ function sanitizeItems(rawItems) {
   // 从 activity 里确定性抽一个目的地当 endLocation；
   // startLocation 留给 Pass 2 按行程连续性继承（人上一站在哪就从哪出发）。
   items.forEach((it) => {
+    // 模型分类不能覆盖明确主动作；去码头/景区的接驳不按备注中的船/索道分类。
+    const boat = it.activity.match(/^(?:乘坐|搭乘|乘|体验)([^，。；]{0,24})(?:游船|竹筏|漂流)/);
+    if (boat && !/网约车|出租车|大巴|公交|直通车|前往|抵达|到达/.test(boat[1])) it.transportType = 'ship';
+    if (/^(?:租|骑|骑行|租用).{0,12}(?:电动车|电动自行车|自行车)/.test(it.activity)
+      && it.transportType === 'train') it.transportType = 'ride';
     if (it.startLocation || it.endLocation) return;
     const dest = inferDestination(it.activity);
     if (dest) it.endLocation = dest;
@@ -371,6 +380,10 @@ function sanitizeItems(rawItems) {
       // 有结束时间且不等于开始时间 → 只做重叠收敛，原样保留（含跨零点 23:30 → 00:30）
       if (et !== null && et !== st) {
         if (nextStart !== null && nextStart > st && et > nextStart) {
+          if (it.transportType === 'train') {
+            it.note = [it.note, '列车运行时间不缩短，请调整后续冲突安排'].filter(Boolean).join('；');
+            return;
+          }
           it.endTime = fmtMin(nextStart);
         }
         return;

@@ -24,11 +24,23 @@ async function parseTravelPlan(/* fileID */) {
 }
 
 // 分步解析（mock）：假装跑完了整个流水线，commit 时一次性给结果
+const mockParseTasks = {};
 async function parseTravelPlanStep(payload) {
   const step = (payload && payload.step) || '';
+  if (payload && (payload.action === 'status' || payload.action === 'resume')) {
+    const task = mockParseTasks[payload.taskId];
+    if (!task) throw new Error('解析任务不存在');
+    if (payload.action === 'resume' && task.status === 'running') {
+      await delay(500);
+      task.progress = Math.min(100, task.progress + 20);
+      task.doneDays = Math.min(task.dayCount, task.doneDays + 1);
+      if (task.progress === 100) { task.status = 'done'; task.result = await parseTravelPlan(); }
+    }
+    return Object.assign({}, task);
+  }
   if (step === 'init') {
     await delay(800);
-    return {
+    const result = {
       code: 0,
       taskId: 'mock_task_' + Date.now(),
       dayCount: 3,
@@ -36,6 +48,9 @@ async function parseTravelPlanStep(payload) {
       startDate: STORE.itinerary.startDate,
       endDate: STORE.itinerary.endDate,
     };
+    mockParseTasks[result.taskId] = { taskId: result.taskId, status: 'running', phase: 'day',
+      dayCount: 3, doneDays: 0, progress: 15, result: null, leaseUntil: 0 };
+    return result;
   }
   if (step === 'day') { await delay(600); return { code: 0, index: payload.index, itemCount: 5 }; }
   if (step === 'collect') { await delay(500); return { code: 0, alarmCount: STORE.alarms.length }; }
@@ -278,6 +293,9 @@ async function buildPlan() {
 
 module.exports = {
   parseTravelPlan,
+  adminRole: async function () { return { isAdmin: false }; },
+  adminIdentity: async function () { return { isAdmin: false, isSuper: false, claimEnabled: false }; },
+  adminOverview: async function () { return { stats: null }; },
   parseTravelPlanStep,
   // mock 模式没有真实地理编码，返回 null 让前端走降级
   geocode: async function (location, city) { await delay(200); return null; },
@@ -301,6 +319,16 @@ module.exports = {
   refreshSuggestions,
   getDayTips,
   generateOutline,
+  startOutline: async function (input) {
+    this._outlineResult = await generateOutline(input);
+    return { jobId: 'mock-outline', status: 'running', round: 0 };
+  },
+  outlineStatus: async function () {
+    return { jobId: 'mock-outline', status: 'done', outlineResult: this._outlineResult };
+  },
+  resumeOutline: async function () {
+    return { jobId: 'mock-outline', status: 'done', outlineResult: this._outlineResult };
+  },
   buildPlan,
   // mock 模式没有真实云函数，体检直接返回"全部就绪"，方便本地跑通界面
   generateDiag: async function () {

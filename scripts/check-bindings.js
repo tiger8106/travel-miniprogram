@@ -36,10 +36,20 @@ const jsFiles = [
   'components/map-button/map-button.js',
   'pages/planner/planner.js',
   'pages/mytrips/mytrips.js',
+  'pages/mine/mine.js',
+  'pages/pay/pay.js',
+  'pages/orders/orders.js',
+  'pages/admin/admin.js',
   'utils/genrunner.js',
+  'utils/admin-role.js',
+  'utils/avatar-cache.js',
+  'utils/auth.js',
+  'utils/quota.js',
   'utils/eta.js',
   'utils/cloud.js',
   'utils/request.js',
+  'utils/alarm-title.js',
+  'utils/user-error.js',
 ];
 jsFiles.forEach((rel) => {
   const err = syntaxOk(path.join(MP, rel));
@@ -54,8 +64,11 @@ fs.readdirSync(CF).forEach((dir) => {
   const err = syntaxOk(abs);
   ok(`JS 语法 cloudfunctions/${dir}/index.js`, !err, err || '');
 });
-['generatePlan/plan.js', 'generatePlan/schedule.js', 'generatePlan/rail12306.js', 'generatePlan/hotel-validation.js',
-  'generatePlan/execution-review.js', 'generatePlan/publication.js', 'generatePlan/route-evidence.js', 'generatePlan/solar-time.js'].forEach((rel) => {
+['generatePlan/plan.js', 'generatePlan/schedule.js', 'generatePlan/rail12306.js', 'generatePlan/hotel-validation.js', 'generatePlan/lodging-location.js',
+  'generatePlan/luggage-plan.js', 'generatePlan/solar-view.js',
+  'generatePlan/execution-review.js', 'generatePlan/llm.js', 'generatePlan/publication.js', 'generatePlan/route-evidence.js', 'generatePlan/solar-time.js',
+  'generatePlan/ticket-products.js', 'parseTravelPlan/ticket-products.js', 'ticketAlarm/ticket-products.js', 'parseTravelPlan/ticket-source.js',
+  'parseTravelPlan/alarm-infer.js', 'parseTravelPlan/llm.js', 'sendAlarm/alarm-title.js', 'sendAlarm/ticket-products.js'].forEach((rel) => {
   const err = syntaxOk(path.join(CF, rel));
   ok(`JS 语法 cloudfunctions/${rel}`, !err, err || '');
 });
@@ -86,6 +99,30 @@ checkPair('pages/mine/mine.wxml', 'pages/mine/mine.js');
 checkPair('pages/planner/planner.wxml', 'pages/planner/planner.js');
 checkPair('pages/mytrips/mytrips.wxml', 'pages/mytrips/mytrips.js');
 checkPair('pages/index/index.wxml', 'pages/index/index.js');
+
+// 和开发者工具质量扫描保持一致：声明不等于使用，遗留组件也会进入包。
+const usedComponents = new Set();
+function scanComponents(dir) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const file = path.join(dir, entry.name);
+    if (entry.isDirectory()) { scanComponents(file); continue; }
+    if (!file.endsWith('.json')) continue;
+    const config = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const wxml = file.slice(0, -5) + '.wxml';
+    const markup = fs.existsSync(wxml) ? fs.readFileSync(wxml, 'utf8') : '';
+    Object.entries(config.usingComponents || {}).forEach(([tag, target]) => {
+      const used = new RegExp(`<${tag}(?:\\s|/?>)`).test(markup);
+      ok(`组件声明实际使用 ${path.relative(MP, file)}:${tag}`, used);
+      if (used && target.startsWith('/')) usedComponents.add(path.join(MP, target + '.json'));
+    });
+  }
+}
+scanComponents(path.join(MP, 'pages'));
+scanComponents(path.join(MP, 'components'));
+for (const dir of fs.readdirSync(path.join(MP, 'components'))) {
+  const component = path.join(MP, 'components', dir, dir + '.json');
+  if (fs.existsSync(component)) ok(`无废弃组件 ${dir}`, usedComponents.has(component));
+}
 
 // ---------- ③ 残留 & 关键改动检查 ----------
 const actWxml = fs.readFileSync(path.join(MP, 'components/activity-item/activity-item.wxml'), 'utf8');
@@ -334,7 +371,7 @@ ok('细化失败/残缺天有骨架重建（skeletonForEmptyDays，只在非 par
     && /skeletonForEmptyDays\(p, outline, detail\.items, detail\.doneDayIndexes\)/.test(planJs));
 ok('门票闹钟按关联行程校正类型，普通接驳不会伪装成门票放票',
   /function normalizeBookingAlarmKinds/.test(planJs)
-    && /alarms = normalizeBookingAlarmKinds\(alarms, items, p\)/.test(planJs)
+    && /alarms = normalizeBookingAlarmKinds\(alarms, items, p[,)]/.test(planJs)
     && /const textualMode/.test(planJs)
     && /releaseDate <= today/.test(planJs));
 ok('包车/大巴段宽松匹配，已有同向交通条目时不重复补（isScheduledMove 分流）',
@@ -348,8 +385,11 @@ ok('跨天同类体验差异化写入两段 prompt（大纲 7.4 + 细化规则 1
     && /19\. \*\*别重复排已安排过的内容\*\*/.test(planJs));
 ok('早餐兜底只在上午补，中午后补午餐而不是早餐',
   /fs <= 11 \* 60 \+ 30/.test(planJs) && /补午餐而不是早餐/.test(planJs));
-ok('细化 prompt 禁止白天回酒店睡觉（15:00 前）',
-  /白天不许回酒店睡觉/.test(planJs) && /15:00 前禁止安排/.test(planJs));
+ok('细化 prompt 不安排无必要午休折返，保留用户明确休息及实际办理例外',
+  /无用户明确休息要求时不在游线中途回酒店/.test(planJs)
+    && /首次新住宿实际入住放行李、必要原地取大件或用户明确休息需求除外/.test(planJs)
+    && /劳逸适中、大纲自动写的休整不是用户要求午休/.test(planJs)
+    && /不能只删休息而保留去酒店的接驳/.test(planJs));
 ok('大纲 prompt：相邻两天核心片区相距超 1 小时必须换基地',
   /必须换基地/.test(planJs) && /来回通勤 4 小时/.test(planJs));
 ok('大纲 prompt：ml 三餐都要点名（店名或片区+招牌菜）',
@@ -401,8 +441,9 @@ ok('人已在目的地时不造 A→A 假移动（保留单头终点给前端导
   /lastKnown !== it\.endLocation/.test(parseNormJs));
 ok('细化 prompt 不再把大纲班次说成"用户可能手工改过"（自家大纲的参考时刻被当成圣旨，模型会写独白抗议）',
   !/用户可能手工改过/.test(planJs) && /今天的大交通（路线既定）/.test(planJs));
-ok('中间天班次时刻允许静默微调，首末日用户指定时刻才锁死',
-  /粗排参考/.test(planJs) && /静默地调/.test(planJs) && /用户指定的硬约束/.test(planJs));
+ok('所有已查询铁路时刻均锁定，首末日另遵守用户启程和到家边界',
+  /含近期运行图参考/.test(planJs) && /都是锁定事实，不可微调/.test(planJs)
+    && /不平移或缩短列车/.test(planJs) && /用户指定的硬约束/.test(planJs));
 ok('整段"内心独白"条目有硬识别（META_HARD）',
   /const META_HARD/.test(genNormJs) && /鉴于上游/.test(genNormJs) && /倒叙/.test(genNormJs));
 ok('有起终点的独白条目抢救成干净交通条目，没起终点的丢弃',
@@ -475,15 +516,16 @@ ok('分步模式：geocode 步限墙钟（35s 预算，单次跑不完下次续�
 ok('分步模式：commit 步幂等（防重复入库）',
   /task\.tripId && task\.resultInfo/.test(parseIdxJs));
 ok('分步模式：地理编码传整串 region（geocodeOne 内部拆候选城市）',
-  /geocodeOne\(addr, region\)/.test(parseIdxJs));
+  /geocodeOne\(addr, region,/.test(parseIdxJs));
 ok('分步模式与单次模式共用同一份文档元信息（docmeta）',
   /require\('\.\/docmeta'\)/.test(fs.readFileSync(path.join(ROOT, 'cloudfunctions/parseTravelPlan/llm.js'), 'utf8'))
     && /require\('\.\/docmeta'\)/.test(parseIdxJs));
 ok('分步模式：step 成功返回必须包 data（callFn 只 resolve res.result.data，平铺字段会让前端拿到 undefined）',
   /code: 0, data: r \}/.test(parseIdxJs));
-ok('upload 页走分步流水线（init→day→collect→infer→geocode→commit，断点重试）',
-  /runParsePipeline/.test(uploadJs) && /parseTravelPlanStep/.test(uploadJs)
-    && /this\._taskState/.test(uploadJs));
+ok('upload 页使用云端可续跑任务，离开页面后由 parseWorker 接力',
+  /driveParse/.test(uploadJs) && /action: 'resume'/.test(uploadJs)
+    && /action: 'status'/.test(uploadJs)
+    && /parsePollEveryMinute/.test(fs.readFileSync(path.join(ROOT, 'cloudfunctions/parseWorker/config.json'), 'utf8')));
 ok('upload 页有分步进度文案（stageText）',
   /stageText/.test(uploadJs) && /stageText/.test(fs.readFileSync(path.join(MP, 'pages/upload/upload.wxml'), 'utf8')));
 ok('无起终点条目有终点回填（inferDestination 挂在 Pass 2 之前）',
@@ -602,19 +644,25 @@ const ordersPageJs = fs.readFileSync(path.join(MP, 'pages/orders/orders.js'), 'u
 ok('订单中心：云函数提供 orderList 且只返回本人订单',
   /action === 'orderList'/.test(payIdx) && /loadOrderByOpenid/.test(payIdx));
 ok('订单中心：订单页已创建并在 app.json 注册，付费页有入口',
-  /quota\.orderList\(\)/.test(ordersPageJs)
+  /quota\.orderList\(\s*1\s*\)/.test(ordersPageJs)
     && /pages\/orders\/orders/.test(appJson2)
     && /onTapOrders/.test(payPageJs) && /onTapOrders/.test(payPageWxml));
 
-// 继续支付必须复用**原订单号**重新签名（新开单号会留两条单、对不上账）；
-// 取消订单 = 软取消（置 cancelled 保留记录），只允许本人待支付订单
-ok('订单中心：待支付订单可继续支付（复用原单号 repay）',
-  /action === 'repay'/.test(payIdx) && /buildPayParams\(g, outTradeNo/.test(payIdx)
+// 虚拟支付号码只能使用一次，续付查证未支付后关联新单，保留对账链。
+// 取消前明确查证未支付，旧核实中订单也需要恢复；采用有条件更新保护支付回调。
+ok('订单中心：续付查证未支付后关联新单号，不复用 SDK 已用号码',
+  /action === 'repay'/.test(payIdx) && /const payOrderNo = genOutTradeNo\(\)/.test(payIdx)
+    && /buildPayParams\(g, payOrderNo/.test(payIdx) && /replacementOrderNo: payOrderNo/.test(payIdx)
     && /quota\.payAgain\(/.test(ordersPageJs) && /onPayAgain/.test(ordersPageJs));
+ok('支付恢复：重复/关闭号码与过期登录态分别只重试一次，旧签名不复用',
+  /code === -15002/.test(quotaUtil) && /code === -15012/.test(quotaUtil)
+    && /!numberRetried/.test(quotaUtil) && /!sessionRetried/.test(quotaUtil)
+    && /prepared\.outTradeNo === current\.outTradeNo/.test(quotaUtil));
 ok('订单中心：取消订单仅允许本人待支付，且软取消保留记录（不物理删除）',
   /action === 'cancelOrder'/.test(payIdx)
     && /order\._openid !== openid/.test(payIdx)
-    && /order\.status !== 'created'/.test(payIdx)
+    && /actionableUnpaid\(order, checked\)/.test(payIdx)
+    && /changeUnpaidOrder\(order, \{ status: 'cancelled'/.test(payIdx)
     && /status: 'cancelled'/.test(payIdx)
     && /quota\.cancelOrder\(/.test(ordersPageJs) && /onCancel/.test(ordersPageJs)
     && !/\.remove\(\)/.test(payIdx.slice(payIdx.indexOf('actionCancelOrder'), payIdx.indexOf('actionConfirm'))));
@@ -626,8 +674,14 @@ ok('付费页已注册且展示计费说明（避免"为什么又扣钱"的投�
   /pages\/pay\/pay/.test(appJson2) && /计费说明/.test(payPageWxml)
     && /一次完整攻略 = 1 次额度/.test(payPageWxml));
 
-ok('付了钱额度没到账有补救入口（sync 补发，幂等不重复加）',
-  /onSync\(\)/.test(payPageJs) && /action: 'sync'/.test(quotaUtil));
+ok('订单自动核对补发，用户界面不出现手动同步订单入口',
+  /syncInBackground\(openid,/.test(ordersPageJs)
+    && /quota\.syncOrders\(nos\)/.test(ordersPageJs)
+    && /action: 'sync'/.test(quotaUtil)
+    && !/onSync\(\)/.test(payPageJs)
+    && !/onSync\(\)/.test(ordersPageJs)
+    && !/同步订单/.test(payPageWxml)
+    && !/同步订单/.test(fs.readFileSync(path.join(MP, 'pages/orders/orders.wxml'), 'utf8')));
 
 // ---------- ⑮ 有额度就不限量 + 后台生成 + 联网班次 ----------
 const rulesJs = fs.readFileSync(path.join(CF, 'quota/rules.js'), 'utf8');
@@ -678,9 +732,10 @@ ok('12306 查不到时清除模型臆造车次（行程可继续但不冒充已�
   /official-unavailable/.test(planJs) && /班次待确认/.test(planJs) && /matched\.code = ''/.test(planJs)
     && /lookupOfficial/.test(schedJs));
 
-ok('大纲超时不报错：云端后台补大纲（失败留下一轮重试）+ 前端转后台继续',
-  /后台大纲完成/.test(gpIdx) && /attempts\.outline/.test(gpIdx)
-    && /bgGenerateAfterOutlineTimeout/.test(plannerJs2));
+ok('大纲超时自动续跑并回到可编辑大纲，不提前生成详情',
+  /runOutlineRound/.test(gpIdx) && /outlineAttempts/.test(gpIdx)
+    && /outlineStatus/.test(gpIdx) && /waitForOutline/.test(plannerJs2)
+    && /this\.showOutline\(res\)/.test(plannerJs2));
 
 ok('gen_jobs / schedule_cache 集合不存在时自动创建（-502005 兜底）',
   /async function ensureCollection/.test(gpIdx) && /createCollection/.test(gpIdx)
@@ -720,7 +775,7 @@ ok('班次缓存 36 小时过期（日期键换了本来就查不到旧缓存）
   /SCHED_TTL_MS = 36 \* 3600 \* 1000/.test(gpIdx));
 
 ok('前台大纲不联网检索（检索塞在大纲尾巴上必撞 60s → 转后台重做一遍）',
-  /generateOutlineWithHotelCheck\(event, \{\}\)/.test(gpIdx)
+  /generateOutline\(event, \{\}\)/.test(gpIdx)
     && /前台大纲\*\*不做联网检索/.test(gpIdx)
     && !/scheduleLookup: makeScheduleLookup/.test(gpIdx));
 const hotelValidation = fs.readFileSync(path.join(CF, 'generatePlan/hotel-validation.js'), 'utf8');
@@ -798,12 +853,22 @@ ok('大纲只按日期展示，不再绑定长按拖动或重排日期',
 ok('候选隔离，进度以整天检查后的实际发布内容为准',
   /publicationState/.test(genIndex2) && /genDraftItems/.test(genIndex2) && /delete out.genDraftItems/.test(itineraryFn2)
     && /publication.progress.done < publication.progress.total/.test(genIndex2));
-ok('局部重复失败带警示收尾，已发布日期保留、不终止整单',
+ok('资料未知有界警示收尾；实际执行矛盾拦截，已发布日期保留',
   /finalizeWithWarnings/.test(planJs) && /needs_confirmation/.test(fs.readFileSync(path.join(CF, 'generatePlan/execution-review.js'), 'utf8'))
     && /preservePublishedDays: true/.test(genIndex2) && /finalizePending/.test(genIndex2));
 
 // ---------- ⑬ 管理后台：管理员身份 / 授权不限量 / 在线配置下发 ----------
 const cfgRel = ['generatePlan', 'parseTravelPlan', 'suggestions', 'admin'];
+ok('客户端/订阅消息标题展示规则副本一致',
+  fs.readFileSync(path.join(MP, 'utils/alarm-title.js'), 'utf8')
+    === fs.readFileSync(path.join(CF, 'sendAlarm/alarm-title.js'), 'utf8'));
+ok('生成/上传票务产品证据规则副本一致',
+  fs.readFileSync(path.join(CF, 'generatePlan/ticket-products.js'), 'utf8')
+    === fs.readFileSync(path.join(CF, 'parseTravelPlan/ticket-products.js'), 'utf8')
+    && fs.readFileSync(path.join(CF, 'generatePlan/ticket-products.js'), 'utf8')
+      === fs.readFileSync(path.join(CF, 'ticketAlarm/ticket-products.js'), 'utf8')
+    && fs.readFileSync(path.join(CF, 'generatePlan/ticket-products.js'), 'utf8')
+      === fs.readFileSync(path.join(CF, 'sendAlarm/ticket-products.js'), 'utf8'));
 const cfgBodies = cfgRel.map((n) => fs.readFileSync(path.join(CF, n, 'cloudCfg.js'), 'utf8'));
 ok('配置下发模块 4 份副本完全一致（generatePlan/parseTravelPlan/suggestions/admin）',
   cfgBodies.every((b) => b === cfgBodies[0]));
@@ -845,7 +910,7 @@ ok('小程序端不内置任何第三方密钥（KEY 只经云端下发）',
 const adminPageJs = fs.readFileSync(path.join(MP, 'pages/admin/admin.js'), 'utf8');
 const minePageJs = fs.readFileSync(path.join(MP, 'pages/mine/mine.js'), 'utf8');
 ok('管理入口正确解包云函数返回（callFn 直接给业务体，严禁写 (r && r.data)）',
-  /function bodyOf/.test(adminPageJs) && /function bodyOf/.test(minePageJs)
+  /function bodyOf/.test(adminPageJs) && /adminRole\.refresh\(openid\)/.test(minePageJs)
     && !/\(r && r\.data\)/.test(adminPageJs) && !/\(r && r\.data\)/.test(minePageJs));
 
 const adminFnSrc = fs.readFileSync(path.join(CF, 'admin/index.js'), 'utf8');

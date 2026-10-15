@@ -5,22 +5,9 @@ const homeCache = require('../../utils/homecache');
 const env = require('../../utils/env');
 const privacy = require('../../utils/privacy');
 const quota = require('../../utils/quota');
-const api = require('../../services/api');
+const adminRole = require('../../utils/admin-role');
+const avatarCache = require('../../utils/avatar-cache');
 const config = require('../../config');
-
-/**
- * api 层有两种封装，返回形态不一样：
- *   callFn         → 成功时直接给业务体（如 {isAdmin, me, items}）
- *   callFnKeepCode → 给 {code, data, msg}
- * 这里两种都吃掉，统一返回业务体。
- * ⚠️ 踩过的坑：直接写 r.data 时，走 callFn 的接口恒为 undefined，
- *    管理员菜单就永远显示不出来（后台列表/配置也一样全空）。
- */
-function bodyOf(r) {
-  if (!r || typeof r !== "object") return {};
-  if (r.data && typeof r.data === 'object') return r.data;
-  return r;
-}
 
 const app = getApp();
 
@@ -29,6 +16,7 @@ Page({
     loggedIn: false,
     loggingIn: false,
     profile: {},       // { nickname, avatarUrl }
+    avatarView: '',     // 优先用持久本地文件，云头像后台校准
     saving: false,
     showPrivacy: false, // 隐私保护授权弹窗（点头像/填昵称被微信拦截时触发）
     quotaText: '查看剩余次数与套餐',
@@ -71,28 +59,44 @@ Page({
 
   refresh() {
     const profile = auth.getProfile() || {};
+    const openid = auth.getOpenid();
+    const paySnap = openid && homeCache.readPage('pay');
+    const quotaInfo = paySnap && paySnap.openid === openid ? paySnap.info : null;
+    const quotaText = quotaInfo ? this.quotaTextOf(quotaInfo)
+      : (openid && this._quotaAccount === openid ? this.data.quotaText : '查看剩余次数与套餐');
+    this._quotaAccount = openid;
     // 记住云端已保存的值：昵称 bindinput 实时写入 data 后，
     // blur 时要用「云端值」而不是 data 判断是否有改动，否则永远存不进去
     this._saved = { nickname: profile.nickname || '', avatarUrl: profile.avatarUrl || '' };
     this.setData({
-      loggedIn: !!auth.getOpenid(),
+      loggedIn: !!openid,
       profile,
+      avatarView: avatarCache.cached(openid, profile.avatarUrl) || profile.avatarUrl || '',
+      isAdmin: adminRole.cached(openid),
+      quotaText,
     });
+    if (openid && profile.avatarUrl) {
+      avatarCache.warm(openid, profile.avatarUrl).then((path) => {
+        if (path && auth.getOpenid() === openid && auth.getProfile()
+          && auth.getProfile().avatarUrl === profile.avatarUrl && this.data.avatarView !== path) {
+          this.setData({ avatarView: path });
+        }
+      });
+    }
     this.loadQuota();
     this.loadAdminRole();
   },
 
   /**
-   * 查一次身份：管理员才显示「管理后台」菜单。
-   * 失败/没部署都静默 —— 这只是一份额外的入口，不该因为它报什么错吓到用户。
+   * 首帧已经显示按账号缓存的入口；后台只发轻量身份请求更新提示。
+   * 失败时保留上次服务端确认结果，管理操作仍由云端二次鉴权。
    */
   async loadAdminRole() {
-    this.setData({ isAdmin: false });
-    if (!auth.isLoggedIn() || !api.adminWhoami) return;
+    const openid = auth.getOpenid();
+    if (!openid) { this.setData({ isAdmin: false }); return; }
     try {
-      const r = await api.adminWhoami();
-      const d = bodyOf(r);
-      this.setData({ isAdmin: !!d.isAdmin });
+      const isAdmin = await adminRole.refresh(openid);
+      if (auth.getOpenid() === openid && this.data.isAdmin !== isAdmin) this.setData({ isAdmin });
     } catch (e) {
       console.warn('[mine] 管理员身份不可用（不影响使用）:', (e && e.message) || e);
     }
@@ -154,8 +158,13 @@ Page({
       return;
     }
     // 先用临时路径立刻预览，再上传云存储换永久地址
-    this.setData({ 'profile.avatarUrl': temp });
+    this.setData({ 'profile.avatarUrl': temp, avatarView: temp });
     this.saveProfile({ avatarTemp: temp });
+  },
+
+  onAvatarError() {
+    // 图片首次下载失败时保留底层占位头像，避免出现空白圆圈。
+    this.setData({ avatarView: '' });
   },
 
   onNickInput(e) {
@@ -177,6 +186,7 @@ Page({
     this.setData({ saving: true });
     wx.showLoading({ title: '保存中…', mask: true });
     try {
+      const avatarTemp = patch.avatarTemp || '';
       // chooseAvatar 返回的是临时路径 → 传云存储换成永久 fileID
       if (patch.avatarTemp) {
         const openid = auth.getOpenid() || 'user';
@@ -186,7 +196,10 @@ Page({
         delete patch.avatarTemp;
       }
       const profile = await auth.updateProfile(patch);
-      this.setData({ profile });
+      const openid = auth.getOpenid();
+      // 云端资料保存成功后把刚选的临时头像持久化；不再冷启动时重新下载。
+      const localAvatar = avatarTemp ? await avatarCache.save(openid, profile.avatarUrl, avatarTemp) : '';
+      this.setData({ profile, avatarView: localAvatar || avatarCache.cached(openid, profile.avatarUrl) || profile.avatarUrl || '' });
       this._saved = { nickname: profile.nickname || '', avatarUrl: profile.avatarUrl || '' };
       wx.hideLoading();
       wx.showToast({ title: '已保存', icon: 'success' });
@@ -194,7 +207,8 @@ Page({
       wx.hideLoading();
       console.error('[mine] 保存资料失败', err);
       // 失败时回读本地缓存，避免界面与云端不一致
-      this.setData({ profile: auth.getProfile() || {} });
+      const saved = auth.getProfile() || {};
+      this.setData({ profile: saved, avatarView: avatarCache.cached(auth.getOpenid(), saved.avatarUrl) || saved.avatarUrl || '' });
       wx.showToast({ title: err.message || '保存失败', icon: 'none' });
     } finally {
       this.setData({ saving: false });
@@ -221,17 +235,21 @@ Page({
   },
 
   // 额度概览：只做展示，失败也不影响本页其它功能
+  quotaTextOf(info) {
+    return info.vip
+      ? `月卡会员 · 本月还剩 ${info.vipLeft} 次`
+      : `剩余 ${info.total} 次 · 今日已生成 ${info.dayGen || 0} 次`;
+  },
+
   async loadQuota() {
-    if (!auth.isLoggedIn()) {
+    const openid = auth.getOpenid();
+    if (!openid) {
       this.setData({ quotaText: '查看剩余次数与套餐' });
       return;
     }
     const info = await quota.info();
-    if (!info) return;
-    const txt = info.vip
-      ? `月卡会员 · 本月还剩 ${info.vipLeft} 次`
-      : `剩余 ${info.total} 次 · 今日已生成 ${info.dayGen || 0} 次`;
-    this.setData({ quotaText: txt });
+    if (!info || auth.getOpenid() !== openid) return;
+    this.setData({ quotaText: this.quotaTextOf(info) });
   },
 
   onTapAbout() {

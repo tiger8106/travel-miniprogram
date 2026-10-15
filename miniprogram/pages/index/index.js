@@ -101,11 +101,9 @@ Page({
     const trip = this._trip || this.data.trip;
     if (!trip) return;
     const nowItems = this.buildNowItems(trip);
-    const hotelBookingHint = (trip.items || []).some((it) => it && it.category === 'hotel');
     // 内容没变就别 setData，避免无谓的渲染
-    if (JSON.stringify(nowItems) === JSON.stringify(this.data.nowItems)
-        && hotelBookingHint === this.data.hotelBookingHint) return;
-    this.setData({ nowItems, nowTitle: this.nowTitleOf(nowItems), hotelBookingHint });
+    if (JSON.stringify(nowItems) === JSON.stringify(this.data.nowItems)) return;
+    this.setData({ nowItems, nowTitle: this.nowTitleOf(nowItems) });
   },
 
   nowTitleOf(list) {
@@ -186,6 +184,8 @@ Page({
     }
     // 已登录：把可能残留的门禁卡收起来
     if (this.data.needLogin) this.setData({ needLogin: false });
+    const openid = auth.getOpenid();
+    if (!app.globalData.currentTripId) app.globalData.currentTripId = homeCache.selectedTripId(openid) || null;
 
     // ① 先渲染本地快照
     if (!this._snapSig) {
@@ -208,6 +208,8 @@ Page({
       this._trips = trips || [];
       if (!trips || !trips.length) {
         this._trip = null;
+        app.globalData.currentTripId = null;
+        homeCache.setSelectedTripId(openid, null);
         this.stopGenerationPolling();
         homeCache.clear();
         this.applySnapshot({
@@ -229,6 +231,7 @@ Page({
         tripId = homeList.length ? homeList[0]._id : null;
         app.globalData.currentTripId = tripId;
       }
+      homeCache.setSelectedTripId(openid, tripId);
 
       // 没有任何可展示的攻略（全结束且都没置顶）
       if (!tripId) {
@@ -289,7 +292,6 @@ Page({
       todayIdx: this.findTodayIdx(days),
       nowItems,
       nowTitle: this.nowTitleOf(nowItems),
-      hotelBookingHint: (trip.items || []).some((it) => it && it.category === 'hotel'),
       homeTrips: homeList.map((t) => ({
         _id: t._id,
         title: t.title,
@@ -337,6 +339,7 @@ Page({
     const t = this.data.homeTrips[idx];
     if (!t || t._id === app.globalData.currentTripId) return;
     app.globalData.currentTripId = t._id;
+    homeCache.setSelectedTripId(auth.getOpenid(), t._id);
     this.setData({ tripIdx: idx, tripMenuOpen: false });
 
     // 本地已有一份完整数据 → 先秒切渲染，再后台校准，不等网络

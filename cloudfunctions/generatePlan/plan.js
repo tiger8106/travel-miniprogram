@@ -19,9 +19,18 @@ const { parseJSONFromText, asArray, SYS_PROMPT } = require('./llm');
 const { sanitizeItems, META_PAT, META_HARD, parseDurationMin } = require('./normalize');
 const { parseCnTime, tsToDateStr, tsToCnDateTimeStr } = require('./cn-time');
 const { cacheKeyOf: scheduleKeyOf, sameStation } = require('./schedule');
-const { reviewExecutionItems, executionIssues, invalidateRepeatedMeals, invalidateUnsafeAcceptedDays, syncAcceptedMoves, finalizeWithWarnings, REVIEW_VERSION } = require('./execution-review');
+const { reviewExecutionItems, executionIssues, previousStoragePlaces, collectMealNames, requiredPlacesForDay,
+  invalidateRepeatedMeals, invalidateUnsafeAcceptedDays, syncAcceptedMoves, finalizeWithWarnings,
+  sameEndpoint: exactExecutionEndpoint, REVIEW_VERSION } = require('./execution-review');
 const { finalizedDays } = require('./publication');
+const { fallbackHotelLabel, prepareFallbackLodging } = require('./lodging-location');
+const { TRANSFER_LUGGAGE_RULE } = require('./luggage-plan');
+const { solarViewingAction } = require('./solar-view');
 const { solarEventMinute } = require('./solar-time');
+const { knownTicketProducts, ticketAccessOnly, actualTicketExperience, freeAdmissionFor, openLeisureVisit, filterTicketAlarms, includedAdmission } = require('./ticket-products');
+
+// 近期运行图虽不是未来开行承诺，其车次到发时刻同样不能被时间线修补移动。
+const fixedSchedule = (item) => item && ['12306', 'reference'].includes(item.schedSource);
 
 const MAX_DAYS = 12;
 const DAY_MS = 86400000;
@@ -173,7 +182,7 @@ function compactBookingText(value) {
 }
 
 function bookingKindOf(value) {
-  const text = String(value || '');
+  const text = String(value || '').replace(/电动车|电动自行车/g, '自行车');
   if (/(?:火车票|高铁票|动车票|火车|高铁|动车|列车|车次|12306|铁路)/i.test(text)) return 'train';
   if (/(?:机票|航班|飞机票|飞机|航空)/i.test(text)) return 'plane';
   if (/(?:汽车票|大巴票|客运票|旅游专线|直通车)/i.test(text)) return 'bus';
@@ -507,7 +516,7 @@ function ensureSelfDriveParking(items, p) {
 
 const LODGING_WORD_RE = /酒店|民宿|客栈|宾馆|青旅|住宿|度假村|招待所/;
 const ADMIN_SUFFIX_RE = /(省|自治区|自治州|地区|盟|市|自治县|县|区|旗|镇|乡)$/;
-const HOTEL_PLACEHOLDER_RE = /^(?:同上|同前|上一家(?:酒店)?|原酒店|酒店|住宿地)$/;
+const HOTEL_PLACEHOLDER_RE = /^(?:同上|同前|上一家(?:酒店)?|原酒店|酒店|住宿地)(?:[（(](?:连住|续住|同一家|同一酒店)[）)])?$/;
 
 /** 从地址里提取带行政后缀的词根，例如「石家庄市」「桥西区」。 */
 function adminRootsOf(value) {
@@ -623,9 +632,16 @@ function safeHotelOf(day) {
 }
 
 function normalizeOutlineLodging(outline) {
-  asArray(outline && outline.days).forEach((day, di) => {
+  asArray(outline && outline.days).forEach((day, di, days) => {
     const hotel = String((day && day.hotel) || '').trim();
     if (hotel && HOTEL_PLACEHOLDER_RE.test(hotel)) {
+      const previous = days[di - 1];
+      if (/^(?:同上|同前|上一家|原酒店)/.test(hotel) && previous && safeHotelOf(previous)
+        && dayScope(day) && dayScope(day).replace(/\s/g, '') === dayScope(previous).replace(/\s/g, '')) {
+        day.hotel = previous.hotel;
+        Object.keys(previous).filter((key) => /^hotel[A-Z]/.test(key)).forEach((key) => { day[key] = previous[key]; });
+        return;
+      }
       console.warn('[generatePlan] 第%d天住宿使用占位词，改用可搜索住宿片区：%s', di + 1, hotel);
       day.hotel = '';
       day.hotelPoiVerified = false;
@@ -659,10 +675,11 @@ function ensureOutlineHotelFallbacks(outline, p) {
   const budget = String(p && (p.budget || p.budgetLevel) || '');
   const grade = /经济/.test(budget) ? '经济型' : /品质/.test(budget) ? '品质型' : '舒适型';
   asArray(outline && outline.days).forEach((day, index, days) => {
+    if (day) prepareFallbackLodging(day);
     if (index === days.length - 1 || !day || String(day.hotel || '').trim()) return;
     const place = String(day.overnight || day.city || '').trim();
     if (!place) return;
-    day.hotel = `${place} ${grade}住宿片区`;
+    day.hotel = fallbackHotelLabel(place, grade);
     day.hotelPoiVerified = false;
     day.hotelPoiVerifiedName = '';
     day.hotelPoiAddress = '';
@@ -717,8 +734,8 @@ function alignOutlineMoveTimes(outline) {
       const earliestStart = previousEnd + transferBuffer;
       if (currentStart >= earliestStart) continue;
 
-      const previousOfficial = previous.schedSource === '12306';
-      const currentOfficial = current.schedSource === '12306';
+      const previousOfficial = fixedSchedule(previous);
+      const currentOfficial = fixedSchedule(current);
       const durationOf = (move) => {
         const start = toMin(move.startTime);
         const end = toMin(move.endTime);
@@ -1003,7 +1020,7 @@ function removeOutlineBacktracks(outline) {
           && !same(a.from, a.to) && !same(c.from, c.to);
         if (!immediateLoop) continue;
         // 有官方核验的真实铁路段不随意删除；无核验的修订占位/反向接驳才清。
-        if (a.schedSource === '12306' && b.schedSource === '12306') continue;
+        if (fixedSchedule(a) && fixedSchedule(b)) continue;
         moves.splice(i, 2);
         changed = true;
         console.warn('[generatePlan] 第%d天清理大纲即时折返：%s→%s→%s',
@@ -1110,7 +1127,7 @@ function removeOrphanTransportRows(items, outline) {
   const days = asArray(outline && outline.days);
   const drop = new Set();
   const isHardMove = (item) => item && (item.outlineMove === true
-    || item.schedSource === '12306'
+    || fixedSchedule(item)
     || /train|plane|ship|高铁|动车|火车|列车|飞机|航班|游船|轮渡/.test(
       `${item.transportType || ''} ${item.activity || ''}`));
   const isLodging = (value) => LODGING_WORD_RE.test(String(value || ''));
@@ -1553,7 +1570,7 @@ function warnDetourTransfers(outline) {
   return outline;
 }
 
-async function genOutline(p) {
+async function genOutline(p, opts = {}) {
   // 交通偏好的硬约束：用户选了「高铁/动车优先」就全程不许飞（长距离也一样），
   // 改走近目的地的高铁站 + 短途接驳；选了自驾出行则全程由用户本人驾驶。
   const railFirst = /高铁|动车/.test(p.transport);
@@ -1634,15 +1651,30 @@ ${lijiangCruiseRule ? `0.8 **漓江游船专门约束**：${lijiangCruiseRule}` 
    7.4 **全程体验要差异化（铁律）**：同一类餐饮（如火锅、烧烤、米粉、小吃）全程**最多安排 2 次**，同一类游览体验（如古镇老街、博物馆、夜市、山岳徒步、主题乐园）也**最多 2 次**。多天行程时每天换花样：逛了老街就换个公园/展馆，吃了火锅就换家常菜/地方菜，让用户每天有新鲜感，而不是换了个地方重复同一种玩法。
    7.3 **市内/短途交通按预算选型**：预算以用户填写的「${p.budget}」为准。经济实惠→ 3km 内步行、地铁/公交/景区接驳优先，打车只留给公共交通到不了或明显不便的路段；舒适适中→ 轨道交通优先，赶时间或携带行李且公共交通不便时打车/包车；品质优选→ 可增加打车/包车。除用户选择「自驾出行」或补充要求点名路段外，不安排用户本人开车。选定的基调写进当天 n 提示。
 8. ov 写住宿城市或片区（最后一天写"返程"）；h 每晚一家；nt 长度 = ${p.days - 1} 晚。
-9. 所有文本简体中文，n 字段控制在 30 字以内。只输出 JSON 对象。`;
+9. 所有文本简体中文，n 字段控制在 30 字以内。只输出 JSON 对象。
+${opts.compact ? '【本轮限时续跑】优先确保所有日期和路线完整：每一天 hl 至多 2 个，ml 置空数组，h 置空字符串，n 控制在 12 字以内；保持用户点名地点覆盖、每日住宿地和跨城交通完整。' : ''}`;
 
-  // 大纲是单独一次云函数调用（60s 上限），留 8s 给返回，单次最多等 52s
+  // 长行程或超时续跑改用真正的短提示词与短输出，避免重发上一轮同样的
+  // 大请求并再次撞上 60 秒。详细餐饮、酒店与执行信息在用户确认后补齐。
+  const requestPrompt = opts.compact || p.days >= 10
+    ? `为旅行需求生成完整路线大纲，只输出 JSON，不要解释。
+需求：${profileText(p)}
+日期：${p.startDate} 至 ${p.endDate}，恰好 ${p.days} 天。出发地 ${p.origin}，末日返回出发地。
+路线按地理顺序单向串联；每天住宿地 ov 是次日出发地，同片区可连住；用户点名地点都必须安排游玩，不得跨天重复景点。${modeRule}
+${p.mustVisit && p.mustVisit.length ? `必去：${p.mustVisit.join('、')}。` : ''}
+${p.extra ? `补充要求：${p.extra}` : ''}
+去程从家出发 ${p.goTime || '合理时刻'}，返程到家 ${p.backTime || '合理时刻'}；列车车次不确定就留空。
+输出格式：{"t":"标题","s":"路线概览","ds":[{"d":"YYYY-MM-DD","city":"城市","t":"主题","mv":[{"f":"起点","to":"终点","m":"train/plane/car/bus/ship","c":"车次或空","s":"HH:mm","e":"HH:mm"}],"hl":["具体景点1","具体景点2"],"ml":[],"ov":"当晚住宿地；末日填返程","h":"","n":"12字内提示"}]}。
+ds 必须包含连续全部 ${p.days} 天；每一天最多 2 个 hl，ml 为空数组、h 为空字符串，减少输出篇幅。`
+    : prompt;
+
+  // 大纲是单独一次云函数调用（60s 上限），给解析与返回留足时间。
   // 注意：不传 max_tokens —— 天数多的时候大纲本来就长，封顶会把后面几天从中间掐断
-  const outlineDeadline = Date.now() + 52 * 1000;
+  const outlineDeadline = Date.now() + 50 * 1000;
   const text = await llm.chatWithRetry([
     { role: 'system', content: SYS_PROMPT },
-    { role: 'user', content: prompt },
-  ], { deadline: outlineDeadline });
+    { role: 'user', content: requestPrompt },
+  ], { deadline: outlineDeadline, temperature: 0.2 });
 
   // 去程开始 / 返程到达时刻由代码兜底对齐（LLM 自己常常不照办）
   const outline = normalizeOutlineLodging(
@@ -1908,7 +1940,7 @@ function reconcileTransportOrigins(items, outline) {
     const reachedWithinDay = firstMove && firstMoveIndex > 0
       && sorted.slice(0, firstMoveIndex).some((item) => item.endLocation
         && sameTravelArea(item.endLocation, firstMove.startLocation));
-    if (firstMove && firstMove.schedSource !== '12306'
+    if (firstMove && !fixedSchedule(firstMove)
         && !/train|plane|ship/.test(String(firstMove.transportType || ''))
         && LODGING_WORD_RE.test(String(firstMove.startLocation || ''))
         && firstMove.startLocation && !firstMoveStartsAtPreviousNight && !reachedWithinDay) {
@@ -1926,7 +1958,7 @@ function reconcileTransportOrigins(items, outline) {
     sorted.forEach((item) => {
       const outlineRoute = asArray(days[dayIndex] && days[dayIndex].moves).some((move) =>
         samePlace(move.from, item.startLocation) && samePlace(move.to, item.endLocation));
-      if (item.schedSource === '12306' || outlineRoute
+      if (fixedSchedule(item) || outlineRoute
           || /train|plane|ship/.test(String(item.transportType || ''))) { priorMoves.push(item); return; }
       const activity = String(item.activity || '');
       const movementRow = item.category === 'transport' || item.transportType
@@ -1972,7 +2004,9 @@ function removeZeroDistanceTransports(items) {
     if (!item || item.category !== 'transport') return true;
     const start = String(item.startLocation || '').trim();
     const end = String(item.endLocation || '').trim();
-    if (!start || !end || (!samePlace(start, end) && !sameStationVicinity(start, end))
+    const sameNode = item.executionReview === REVIEW_VERSION ? exactExecutionEndpoint(start, end)
+      : samePlace(start, end) || sameStationVicinity(start, end);
+    if (!start || !end || !sameNode
         || loopLike.test(String(item.activity || ''))) return true;
     console.warn('[generatePlan] 移除起终点相同的无效交通条目：%s', String(item.activity || '').slice(0, 64));
     return false;
@@ -2006,7 +2040,7 @@ function removeAfterHomeArrival(items, p, outline) {
   if (!arrivals.length) return rows;
   const requested = toMin(p && p.backTime);
   const arrival = arrivals.find((row) => requested !== null && row.end === requested) || arrivals[arrivals.length - 1];
-  if (requested !== null && arrival.item.schedSource !== '12306' && arrival.end !== requested) {
+  if (requested !== null && !fixedSchedule(arrival.item) && arrival.end !== requested) {
     const start = toMin(arrival.item.startTime);
     if (start !== null && start >= requested) arrival.item.startTime = fmtMin(Math.max(0, requested - 30));
     arrival.item.endTime = fmtMin(requested);
@@ -2738,7 +2772,7 @@ function removeRedundantDirectTransports(items) {
     const dayAllRows = rows.filter((item) => Number(item && item.dayIndex || 0) === Number(list[0] && list[0].dayIndex || 0));
     const sorted = list.slice().sort((a, b) => (toMin(a.startTime) ?? 1440) - (toMin(b.startTime) ?? 1440));
     sorted.forEach((direct) => {
-      if (direct.schedSource === '12306') return;
+      if (fixedSchedule(direct)) return;
       // 大纲直达段也可能只是粗粒度骨架。如果详细结果已经给出“景区→
       // 原住宿地取行李→下一城市”的完整多跳链，保留两者会制造两条同时
       // 发生的路线；官方核验车次仍由上面的 12306 保护条件保留。
@@ -2841,7 +2875,7 @@ function enforceTransportChainOrder(items) {
   const sameArea = (a, b) => sameTravelArea(a, b) || samePlace(a, b);
   byDay.forEach((dayRows) => {
     const transports = dayRows.filter((row) => row && row.category === 'transport'
-      && row.startLocation && row.endLocation && row.schedSource !== '12306');
+      && row.startLocation && row.endLocation && !fixedSchedule(row));
     transports.forEach((direct) => {
       const directStart = toMin(direct.startTime);
       if (directStart === null) return;
@@ -2852,7 +2886,7 @@ function enforceTransportChainOrder(items) {
       if (!feeder) return;
       const anchor = dayRows.filter((row) => row !== direct && row !== feeder
         && row.category === 'transport' && row.endLocation
-        && (row.schedSource === '12306' || /train|plane|ship|列车|高铁|动车|飞机|航班|游船/.test(
+        && (fixedSchedule(row) || /train|plane|ship|列车|高铁|动车|飞机|航班|游船/.test(
           `${row.transportType || ''} ${row.activity || ''}`))
         && sameArea(row.endLocation, feeder.startLocation)
         && toMin(row.endTime) !== null && toMin(row.endTime) <= directStart)
@@ -2998,7 +3032,10 @@ function dedupeDuplicateHotelItems(items) {
         const exactDuplicate = sameText && aStart !== null && aEnd !== null
           && aStart === bStart && aEnd === bEnd;
         const untimedDuplicate = sameText && (aStart === null || bStart === null);
-        if ((sameText && samePlace) || sameWindow || exactDuplicate || untimedDuplicate) drop.add(candidate);
+        const repeatedCheckin = sameText && samePlace && /入住|放下(?:大件)?行李/.test(kept.activity || '');
+        // 不重叠的回房窗口不是复制记录。非必要午休交执行审计重排，
+        // 不能删掉其晚间收尾来掩盖问题并破坏回房闭环。
+        if (repeatedCheckin || sameWindow || exactDuplicate || untimedDuplicate) drop.add(candidate);
       }
     }
   });
@@ -3356,7 +3393,7 @@ function ensureOvernightHotelItems(items, outline, p) {
   const days = asArray(outline && outline.days);
   const dropInvalidHotels = new Set();
   const isHardTimedRow = (item) => item && (
-    item.schedSource === '12306'
+    fixedSchedule(item)
       || item.scheduleRequired === true
   );
   days.forEach((day, di) => {
@@ -4332,6 +4369,7 @@ function samePlace(a, b) {
 function explicitCarryLuggagePreference(p) {
   const text = String(p && p.extra || '').trim();
   if (!text) return false;
+  if (/无大件行李|只(?:带|携带).{0,10}(?:小包|小背包|背包)/.test(text)) return true;
   // 只有补充要求明确说“随身携带方便/不需要寄存”才跳过临时寄存建议；
   // “行李不方便随身带”不能被误判成例外。
   if (/不方便|不便|不能|不想|不希望|避免/.test(text) && /随身|携带|寄存/.test(text)) return false;
@@ -4490,9 +4528,9 @@ function enforceLuggageRules(items, outline, p) {
         .trim();
       // 不能只追加“带走”，正文里仍留着“寄存在旧酒店”会让用户继续误解；
       // 仅移除存放动作的局部文字，保留其它交通/景点说明。
-      it.note = String(it.note || '')
-        .replace(/寄存|暂存|存放|寄放|存包/g, '随身携带')
-        .replace(/酒店前台|酒店房间|房间|前台/g, '')
+      it.note = String(it.note || '').split(/[。；;]/)
+        .filter((part) => !/寄存|暂存|存放|寄放|存包|返回取件|取回.*行李|允许.*至下午/.test(part))
+        .join('；')
         .replace(/[；;]\s*[；;]/g, '；')
         .replace(/^[；;]|[；;]$/g, '')
         .trim();
@@ -5557,7 +5595,7 @@ function enforceScenicRouteTiming(items) {
     if (duration && start !== null && end !== null && end - start < duration) {
       const barrier = asArray(items).filter((row) => row !== item
         && Number(row.dayIndex || 0) === Number(item.dayIndex || 0)
-        && (row.schedSource === '12306' || row.scheduleRequired)
+        && (fixedSchedule(row) || row.scheduleRequired)
         && toMin(row.startTime) >= start)
         .reduce((limit, row) => Math.min(limit, toMin(row.startTime)), 24 * 60);
       if (start + duration <= barrier && start + duration < 1440) item.endTime = fmtMin(start + duration);
@@ -5856,7 +5894,7 @@ function ensureLongjiSunriseDetail(items, outline) {
     const nextRows = rows.filter((item) => Number(item && item.dayIndex || 0) === index + 1);
     const sunriseRows = nextRows
       .filter((item) => /西山韶乐/.test(String(item.activity || ''))
-        && /日出/.test(String(item.activity || '')))
+        && solarViewingAction(item, '日出'))
       .sort((a, b) => (toMin(a.startTime) ?? 1440) - (toMin(b.startTime) ?? 1440));
     if (sunriseRows.length) {
       // 详细阶段和续跑审计都可能各自尝试补齐同一条日出。按天只保留
@@ -6072,9 +6110,19 @@ function ensureFinalHomeArrival(items, p, outline) {
       && sameTravelArea(anchor.endLocation, move.to);
     return moveToHome && (!anchor || anchorRoute || (move.code && String(anchor.activity || '').includes(move.code)));
   });
-  const officialReturn = returnMove && (returnMove.schedSource === '12306'
+  if (anchor && fixedSchedule(returnMove)) {
+    enforceOfficialRailItems([anchor], outline);
+    anchorEnd = toMin(anchor.endTime);
+  }
+  const officialReturn = returnMove && (fixedSchedule(returnMove)
     || asArray(returnMove.sched).some((candidate) => String(candidate && candidate.source || '') === '12306'));
-  if (anchor && anchorEnd !== null && targetStart !== null && anchorEnd > targetStart && officialReturn) {
+  if (anchor && fixedSchedule(anchor) && anchorEnd > targetStart) {
+    const warning = `所选真实班次无法衔接${p.backTime}到家目标，需另选已有班次或调整到家时间；不改变列车运行时刻`;
+    anchor.note = [anchor.note, warning].filter(Boolean).join('；');
+    anchor.validationWarnings = [...new Set([...(anchor.validationWarnings || []), warning])];
+  }
+  if (anchor && anchorEnd !== null && targetStart !== null && anchorEnd > targetStart && officialReturn
+    && !fixedSchedule(anchor) && !fixedSchedule(returnMove)) {
     const returnFrom = String(returnMove.from || anchor.startLocation || '').trim();
     const returnTo = String(returnMove.to || anchor.endLocation || '').trim();
     const conflictNote = `未找到能在${fmtMin(targetStart)}前到站、并衔接${p.backTime}到家的官方班次；返程车次与时刻待核实`;
@@ -6117,7 +6165,7 @@ function ensureFinalHomeArrival(items, p, outline) {
       returnFrom, returnTo, p.backTime);
   }
   if (anchor && anchorEnd !== null && targetStart !== null && anchorEnd > targetStart
-      && anchor.schedSource !== '12306') {
+      && !fixedSchedule(anchor)) {
     const oldStart = toMin(anchor.startTime);
     const duration = oldStart !== null && anchorEnd > oldStart ? anchorEnd - oldStart : 90;
     const newStart = Math.max(0, targetStart - duration);
@@ -6244,7 +6292,7 @@ function fitFinalReturnWindow(items, p, outline) {
   if (anchor) {
     const anchorStart = toMin(anchor.startTime);
     const anchorEnd = toMin(anchor.endTime);
-    const official = anchor.schedSource === '12306'
+    const official = fixedSchedule(anchor)
       || String(anchor.scheduleSource || '').toLowerCase() === '12306';
     if (!official) {
       const duration = anchorStart !== null && anchorEnd !== null && anchorEnd > anchorStart
@@ -6374,7 +6422,7 @@ function removeScenicReentryBacktracks(items) {
     sorted.forEach((row) => {
       if (dropped.has(row)) return;
       const previous = kept[kept.length - 1];
-      const confirmedRail = row.schedSource === '12306'
+      const confirmedRail = fixedSchedule(row)
         || /train|rail|高铁|动车|列车|火车/.test(`${row.transportType || ''} ${row.activity || ''}`);
       if (row.category === 'transport' && row.startLocation && row.endLocation
           && !purposeful(row) && !confirmedRail && row.outlineMove !== true) {
@@ -6427,11 +6475,11 @@ function dedupeDirectedTransportRoutes(items) {
       (toMin(a.startTime) ?? 1440) - (toMin(b.startTime) ?? 1440));
     for (let i = 0; i < sorted.length; i++) {
       const first = sorted[i];
-      if (dropped.has(first) || first.schedSource === '12306' || first.outlineMove === true) continue;
+      if (dropped.has(first) || fixedSchedule(first) || first.outlineMove === true) continue;
       for (let j = i + 1; j < sorted.length; j++) {
         const second = sorted[j];
         if (dropped.has(second) || second.outlineMove === true || !sameRoute(first, second)) continue;
-        if (second.schedSource === '12306') { dropped.add(first); break; }
+        if (fixedSchedule(second)) { dropped.add(first); break; }
         const firstAuto = first.autoConnector === true || first.timingEstimated === true;
         const secondAuto = second.autoConnector === true || second.timingEstimated === true;
         if (!firstAuto && !secondAuto) continue;
@@ -8013,7 +8061,7 @@ function repairLongjiCoreTimeline(items, outline) {
         let cursor = goldenEnd + 10;
         dayRows.filter((item) => item && item !== golden && !drop.has(item)
           && (toMin(item.startTime) ?? 1440) >= goldenEnd
-          && item.schedSource !== '12306' && item.scheduleRequired !== true)
+          && !fixedSchedule(item) && item.scheduleRequired !== true)
           .sort((a, b) => (toMin(a.startTime) ?? 1440) - (toMin(b.startTime) ?? 1440))
           .forEach((item) => {
             const start = toMin(item.startTime);
@@ -8142,7 +8190,7 @@ function finalizeExecutionEdges(items, outline, p) {
       && item.category === 'transport'
       && sameStation(item.startLocation, move.from) && sameStation(item.endLocation, move.to));
     const item = matches[0];
-    if (!item || item.schedSource === '12306') return;
+    if (!item || fixedSchedule(item)) return;
     item.startTime = move.startTime;
     item.endTime = move.endTime;
     item.timingEstimated = true;
@@ -8160,7 +8208,7 @@ function finalizeExecutionEdges(items, outline, p) {
       && /train|plane/.test(item.transportType || ''));
     const buffer = main && main.transportType === 'plane' ? 90 : 45;
     const earliest = departure + duration + buffer;
-    if (main && main.schedSource !== '12306' && (toMin(main.startTime) ?? earliest) < earliest) {
+    if (main && !['12306', 'reference'].includes(main.schedSource) && (toMin(main.startTime) ?? earliest) < earliest) {
       const moveDuration = Math.max(30, (toMin(main.endTime) ?? earliest + 120)
         - (toMin(main.startTime) ?? earliest));
       main.startTime = fmtMin(earliest);
@@ -8360,9 +8408,11 @@ function prematureOriginDays(p, outline) {
     const day = days[i] || {};
     const returnLabel = /返程|回家|到家/.test(String(day.overnight || ''));
     const moves = asArray(day.moves);
-    const movesHome = moves.some((move) => matchesOriginCity(move && move.to, origin));
+    const movesHome = moves.some((move) => !samePlace(move && move.to, day.hotel)
+      && matchesOriginCity(move && move.to, origin));
     // 出发之后的中间日又从家附近坐车去别的城市，通常表示首末日/中途返程顺序被模型颠倒。
-    const leavesHomeAgain = moves.some((move) => matchesOriginCity(move && move.from, origin)
+    const leavesHomeAgain = moves.some((move) => !samePlace(move && move.from, day.hotel)
+      && matchesOriginCity(move && move.from, origin)
       && !matchesOriginCity(move && move.to, origin));
     if (returnLabel || movesHome || leavesHomeAgain
         || matchesOriginCity(day.city, origin) || matchesOriginCity(day.overnight, origin)) out.push(i);
@@ -8458,6 +8508,11 @@ function deferPrematureReturn(p, outline, indexes) {
 
   const last = days[days.length - 1];
   const base = areaBefore(days.length - 1) || returnBase;
+  const existingMoves = asArray(last.moves);
+  const existingReturn = existingMoves.filter((move) => move.mode === 'train').pop();
+  const keepVerifiedReturn = existingReturn && /^(?:12306|reference)$/.test(existingReturn.schedSource || '')
+    && existingReturn.code && existingReturn.startTime && existingReturn.endTime
+    && sameTravelArea(existingReturn.from, base) && matchesOriginCity(existingReturn.to, p.origin);
   const transport = String(p.transport || '');
   const mode = drivingAllowed(p) ? 'car'
     : /高铁|动车|铁路|火车/.test(transport) ? 'train'
@@ -8470,7 +8525,9 @@ function deferPrematureReturn(p, outline, indexes) {
   last.meals = [];
   last.overnight = '返程';
   last.hotel = '';
-  last.moves = [{
+  // 修中途错误不能覆盖末日已查询的合法枢纽/车次，或将起点退化成酒店。
+  // 保留的是真实选路证据；用户到家边界及接续仍交详细复核，不提前发布。
+  last.moves = keepVerifiedReturn ? existingMoves : [{
     from: base,
     to: returnTo,
     mode,
@@ -8579,7 +8636,7 @@ ${JSON.stringify(outlineToShortJson(outline))}
 // ============================================================
 
 const ITEM_SCHEMA =
-  '{"dayIndex":0,"startTime":"HH:mm","endTime":"HH:mm","activity":"行程描述","category":"sight/food/hotel/transport/ticket/other","startLocation":"","endLocation":"","transportType":"car/walk/ride/train/plane","note":""}';
+  '{"dayIndex":0,"startTime":"HH:mm","endTime":"HH:mm","activity":"行程描述","category":"sight/food/hotel/transport/ticket/other","startLocation":"","endLocation":"","transportType":"car/walk/ride/train/plane/bus/ship","note":""}';
 
 function dayDetailPrompt(p, day, idx, outline) {
   const prev = idx > 0 ? outline.days[idx - 1] : null;
@@ -8592,7 +8649,8 @@ function dayDetailPrompt(p, day, idx, outline) {
   const moveList = asArray(day.moves).filter((move) => move && move.from && move.to);
   const activityArea = String(day.overnight || (moveList.length ? moveList[moveList.length - 1].to : '')
     || day.city || '').trim();
-  const sameBase = samePlace(lastNight, tonight);
+  const sameBase = prev && prev.hotel && day.hotel
+    ? samePlace(prev.hotel, day.hotel) : samePlace(lastNight, tonight);
   const explicitCarry = explicitCarryLuggagePreference(p);
   const temporaryStorageRule = !sameBase && !isLast && !explicitCarry
     ? `若上午仍在${lastNight || '昨晚住宿片区'}进行竹筏、骑行或景点游玩、下午才去${tonight || '下一站'}，把大件行李寄存在昨晚酒店前台，轻装游玩；在离开${lastNight || '原住宿片区'}前返回酒店取回，再去乘车。`
@@ -8642,7 +8700,7 @@ function dayDetailPrompt(p, day, idx, outline) {
     `全程餐饮分配：${JSON.stringify(asArray(outline.days).map((entry) => ({ date: entry.date, meals: entry.meals })))}。每天更换当地代表菜，不连续多天重复同一道主菜；用户明确要求重复的除外。\n` +
     (day.note ? `提示：${day.note}\n` : '') +
     `当晚住宿：${day.overnight || day.city}${day.hotel ? `（推荐酒店：${day.hotel}${day.hotelPoiAddress ? `；核验地址：${day.hotelPoiAddress}` : ''}，已按用户预算「${p.budget}」档挑选，最后的入住条目用它）` : ''}\n\n` +
-    (prev ? `【昨天】${prev.date}｜${prev.theme}，昨晚住${prev.overnight || prev.city} —— 今天第一条行程从这里出发。\n` : '') +
+    (prev ? `【昨天】${prev.date}｜${prev.theme}，昨晚住${prev.hotel || prev.overnight || prev.city} —— 今天第一条行程从这里出发。\n` : '') +
     (next ? `【明天】${next.date}｜${next.theme}（今天的行程要为明天的移动留出余量）\n\n` : '\n');
 
   const rules =
@@ -8661,8 +8719,8 @@ dayIndex 全部填 ${idx}。
 3. 时间分配要符合常识和${p.pace}节奏：早餐 07:00 前后；午餐 12:00-13:00；晚餐 18:30-20:00；景区游览至少 1-2 小时；晚上安排到 21:30-22:30 之间收尾回酒店。${/轻松|慢游/.test(p.pace) ? '每天最多 2 个主景点，留出休息和慢逛时间。' : /紧凑|充实/.test(p.pace) ? '行程可以更满，但必须保证吃饭和必要的交通接驳时间。' : '劳逸适中：把交通、排队、步行和休息都计入，避免连续高强度安排。'}
 4. activity 要写得像真人行程："14:44 乘 G2249 前往桂林西（约 4 小时 54 分）"、"20:10 去崇善米粉吃第一顿桂林米粉，点卤菜粉/锅烧粉"、"21:00 步行前往杉湖，看日月双塔夜景"。**要有具体名称**（店名/菜品/景点具体区域/观景台），不要写"吃晚饭""逛逛"这种空话；餐饮条目统一写"店名/片区 + 招牌菜"。路线背景里若出现“甲→乙”，甲只是出发/中转地，除非今天大纲要点明确列出甲，否则不要在甲安排景点、餐饮或夜游；游玩应围绕“今天主要游玩/入住片区”和明确的大纲要点。
 4.1 **每个主要景点展开成完整链条**：抵达 → 游览（写清到底玩什么：哪段索道/哪个观景台/乘船还是徒步/核心体验与拍照点，可拆 1~3 条）→ 前往下一站。禁止只写一条"游览XX"就凭空跳到下一个景点；景区内的移动（乘索道/换观景台）也要单独成条。**【大纲要点必须落地】今天“大纲要点”里列出的每个用户点名景点，都必须在今天的详细行程中出现至少一条真实的抵达/游览/体验条目；不能只写在备注、餐饮建议或“可选”里。时间不够时删掉非核心活动，保留点名景点并重新安排时段。**
-5. 涉及移动的动作必须填 startLocation / endLocation（起点空着时，用上一条的位置或昨晚住宿地），并填 transportType：步行=walk，公共交通/公交地铁/景区接驳=ride，火车=train，飞机=plane。${accessInstruction}没有移动（吃饭、休息、游览）三项都留空。
-6. 备注写进 note：预约要求、末班车时间、门票信息、行李寄存、拍照机位、当地支付/语言提示等实用信息。
+5. 涉及移动的动作必须填 startLocation / endLocation（起点空着时，用上一条的位置或昨晚准确酒店），并填 transportType：步行=walk，公共交通/公交地铁/景区接驳=bus，网约车=ride，火车=train，飞机=plane，船=ship。${accessInstruction}吃饭、休息、游览也填写实际 endLocation；无移动时起点和交通方式可为空，不能省略实际游览地点。
+6. note 只写该条必要的预约、票务、运营窗口、行李服务及安全要点，通常80字以内，不重复 activity 或叙述推理；关键约束较多时允许更长，不能删事实凑字数。实际寄存和取件必须在 activity 分条，不只写备注。无需固定条数，不截断后半天或省略必要接驳。
 7. ${isFirst ? drivingAllowed(p)
       ? `第一天第 1 条必须是从${p.origin || '出发地'}自行驾驶前往当天目的地，startLocation=${p.origin || '出发地'}，transportType=car；${p.goTime ? `在 ${p.goTime} 准时启程。` : ''}抵达后先停车再开始任何活动。`
       : `第一天：**第 1 条必须是出发接驳**——「${p.goTime || '按大交通倒推'} 从${p.origin || '出发地'}出发，前往${(asArray(day.moves)[0] && asArray(day.moves)[0].from) || '车站/机场'}」，startLocation 填${p.origin || '出发地'}、endLocation 填车站/机场、transportType=${accessMode}；${accessInstruction}随后安排候车并乘坐既定大交通。${p.goTime ? `**${p.goTime} 是离开${p.origin || '出发地'}的时刻（去程开始时间），不是发车时刻**；大交通发车时刻以【今天的大交通】给的 s 为准。` : ''}` : ''}
@@ -8676,14 +8734,14 @@ dayIndex 全部填 ${idx}。
     - 大交通条目必须排在它**真实被乘坐的时刻位置**（15:00 的车就写在 15:00 前后的时段），严禁为了"衔接顺"把它提前写成"倒叙/桥接/预告"。
     - ${((isFirst && p.goTime) || (isLast && p.backTime))
       ? '起止时刻是**用户指定的硬约束**，必须原样照抄，不许微调（首日照抄发车时刻、末日照抄到达时刻，用户指定的启程/到家时刻用来安排前后接驳）。'
-      : '大纲里的起止时刻只是**粗排参考**：若你确知该车次实际时刻与之不符、或与今天其他安排衔接不上，就按实际/合理的时刻微调，前后条目跟着顺移，保证全天时间线首尾相接；'}
+      : '已查询的铁路车次、站点及到发时刻（含近期运行图参考）都是锁定事实，不可微调；只有未锁定的道路接驳和普通活动可按真实耗时调整。冲突时重排前后接驳，不平移或缩短列车；'}
     - 时刻要调就**静默地调**，绝不允许在 activity / note 里解释、质疑、论证冲突（"鉴于…必须原样执行…""此为错误约束""修正…"这类字样一概不许出现）——用户看不见你的思考过程，只看得见行程。
     - 写的是 train/高铁/动车 → 按火车站流程安排（提前 45 分钟到站、安检、候车、上车），全程不得出现"机场""航站楼""航班""值机"等字样，transportType 填 train。
     - 写的是 plane/航班 → 按机场流程安排（提前 2 小时到机场），transportType 填 plane。不要自作主张把火车改飞机、把飞机改火车；即便你觉得另一种方式更快也不行，这是用户的选择。
 ${/高铁|动车/.test(p.transport) ? '12. 用户交通偏好是「高铁/动车优先」：后续所有城际段一律按高铁或动车安排（优先高铁，没有合适高铁就走动车/城际），不要生成任何航班。' : ''}
 ${drivingAllowed(p) ? '12. 用户已选「自驾出行」：今天所有交通都由用户本人驾驶，禁止生成火车、飞机、包车或公共交通；抵达每个目的地后先安排停车，再做其他事情。' : ''}
 13. **activity 里只写"要做什么"，禁止写你的推理过程**：不要出现"注：根据大纲…""此处假设…""若用户…""我无法/我需要"这类自我纠错或向我的解释。这段文字会原样显示在用户的行程里，写了就很难看。
-14. **住宿闭环（铁律）**：昨晚住哪，今天第 1 条就从哪出发——${prev ? `昨晚住「${prev.overnight || prev.city}」，第 1 条应写成"从该住宿地出发"，startLocation 填它` : '今天从出发地启程'}；${isLast ? '返程日以回到出发地结束，禁止安排回酒店或虚构返程日晚住宿。' : `当天最后 1 条必须是"回到${day.overnight || day.city}住宿地休息"（category=hotel，endLocation 填住宿地）。`}绝不允许昨晚住 A 今早却凭空从 B 出发、或晚上收在 C 但住宿地是 D。${sameBase ? '当晚回同一家酒店时，早上可加一条"大件行李留在房间/寄存前台，轻装出发"（note 写明回来续住）。' : temporaryStorageRule || (explicitCarry ? '用户明确表示行李方便随身携带，今天行李全程随人走。' : '**今晚不回昨晚这家酒店，常规情况下行李随身走**（见第 16 条；若上午仍在原住宿片区、下午才换城，可按第 16 条临时寄存并取回）。')}
+14. **住宿闭环（铁律）**：昨晚住哪，今天第 1 条就从哪出发——${prev ? `昨晚住「${prev.hotel || prev.overnight || prev.city}」，第 1 条应写成"从该住宿地出发"，startLocation 填它` : '今天从出发地启程'}；${isLast ? '返程日以回到出发地结束，禁止虚构返程日晚住宿，必要取件可回到实际寄存处后转场。' : `当天最后 1 条必须是"回到${day.hotel || day.overnight || day.city}住宿地休息"（category=hotel，endLocation 填该准确住宿地）。`}绝不允许昨晚住 A 今早却凭空从 B 出发、或晚上收在 C 但住宿地是 D。${sameBase ? '当晚回同一家酒店时，早上可加一条"大件行李留在房间/寄存前台，轻装出发"（note 写明回来续住）。' : temporaryStorageRule || (explicitCarry ? '用户明确表示行李方便随身携带，今天行李全程随人走。' : '**今晚不回昨晚这家酒店，常规情况下行李随身走**（见第 16 条；若上午仍在原住宿片区、下午才换城，可按第 16 条临时寄存并取回）。')}
 15. **地点名要用地图搜得到的通用叫法**：startLocation / endLocation 只写地点真名，别自造"XX公园""XX景区大门"这种后缀（"象鼻山"不要写成"象鼻山公园"——地图上真有另一个"象鼻山公园"在别的省，导航会导错）；也不要带括号补注、不要写"附近/周边"这类模糊词。车站写标准站名（如"桂林北站""南宁东站"）。` +
     `\n16. **行李处理（铁律，为游客方便着想，必须落实到今天的行程条目里）**：昨晚「${lastNight || '出发地'}」→ 今晚「${tonight || '返程'}」——${sameBase
       ? '**今晚回同一家酒店**：大件行李留在房间或寄存在前台，轻装出门，晚上回来续住同一家。'
@@ -8692,10 +8750,11 @@ ${drivingAllowed(p) ? '12. 用户已选「自驾出行」：今天所有交通�
           ? '**用户明确说明行李方便随身携带**：行李全程随人走，不另加酒店寄存。'
           : `**今天允许临时寄存**：早上离开${lastNight || '昨晚住宿地'}前把大件行李寄存在酒店前台，轻装完成白天活动；去${tonight || '下一站'}前必须返回取回，严禁把寄存行李留在原地。`)
       : `**今晚不回昨晚那家酒店，行李必须随身走**：\n    - 早上写一条"退房，携带全部行李出发"；**禁止写"把大件行李寄存在${lastNight || '酒店'}前台"**——今晚不回来取，寄存等于逼游客折返取件。\n    - ${isLast
-        ? '返程日行李全程随身；需要轻装时用车站/机场的寄存柜，上车前记得取回。'
+        ? '返程日取箱退房后带走全部行李；游览需要轻装时可用沿途车站或游客中心的具体寄存处，游览后原地取回再乘车。'
         : `抵达「${tonight}」后**先到当晚酒店放行李**（写一条"到酒店放行李、轻装出门"，category=hotel），再出去游玩。`}`
-    }\n    - 带着行李游玩时：写一条"在游客中心/寄存柜寄存行李"，并在**离开景区前往下一站的那一条**的 note 里写明"取回寄存的行李，别落下"。
-17. **白天不许回酒店睡觉**：15:00 前禁止安排"回酒店休息/午休/回房间"（仅换住处当天的"到酒店放行李/办理入住"除外）。游客白天在外面玩，想歇脚就写景区内的茶座/长椅/观光车，回酒店只属于晚上。
+    }\n    - 取昨晚客房里的箱子直接办理退房，无需虚构当天寄存。需要轻装游览时单列实际寄存办理处，再单列原地取回行李；前往寄存处的接驳只写前往，不重复写成第二次取件。取件后直接转场；继续长时散步、登山、竹筏、骑行须先落实新的存放处。不能只在 note 声称已取回，更不能把大件解释成随身小包。
+    - ${TRANSFER_LUGGAGE_RULE}
+17. **无用户明确休息要求时不在游线中途回酒店**：不安排"回酒店休息/午休/回房间"后再外出游玩（首次新住宿实际入住放行李、必要原地取大件或用户明确休息需求除外）。劳逸适中、大纲自动写的休整不是用户要求午休。离场后直接接下一游览或沿途用餐，就近休息，早起时晚上提前收尾，不能只删休息而保留去酒店的接驳。
 18. **市内/短途交通按用户预算「${p.budget}」选型（用户预算和偏好优先于个人习惯）**：
     - ${/^经济/.test(p.budget) ? '经济实惠：3km 内步行；更远优先地铁/公交/景区接驳。公共交通没有或明显不便时才打车/包车。' : /^品质/.test(p.budget) ? '品质优选：可用打车/包车提升舒适度，仍须尊重用户是否选择自驾出行。' : '舒适适中：地铁/公交/景区接驳优先；赶时间、携带行李或公共交通不便时可打车/包车。'}
     - ${accessInstruction}
@@ -8730,6 +8789,7 @@ ${drivingAllowed(p) ? '12. 用户已选「自驾出行」：今天所有交通�
  *                        deadline: 本次调用的截止时间戳 }
  */
 const MAX_DAY_RETRY = 3;
+const MIN_DAY_DRAFT_BUDGET_MS = 20000;
 
 async function genDayItems(p, outline, opts = {}) {
   const days = outline.days;
@@ -8740,31 +8800,25 @@ async function genDayItems(p, outline, opts = {}) {
     .filter((i) => !done.has(i) && (attempts[i] || 0) < MAX_DAY_RETRY);
   const deadline = opts.deadline || (Date.now() + 40 * 1000);
   // 一批最多 4 天（并行，耗时 ≈ 最慢那一天而不是 4 天相加，实测 ~25-35s）；
-  // 剩余时间不够时自动缩批 —— 固定大批次时预算只剩 20s 就整批放弃，
-  // 实测返程日因此整天空掉，兜底只剩"17:40 高铁 + 17:00 吃早餐"。
+  // 剩余时间够完成整天输出时缩批；不足则保留未起草日期交下一轮，不能
+  // 用几秒启动整天请求并消耗重试次数，更不能因此丢掉后续日期。
   const WAVE = 4;
-  const FIRST_PER_DAY_ESTIMATE = 8500;   // 首轮按单天 ~8.5s 估
 
   const items = [];
   const finished = [];
   const failed = [];
   let lastCost = 0;
-  let prevWave = WAVE;
 
   for (let k = 0; k < pending.length;) {
     // 批大小自适应：剩余预算 >30s 开满 4 天，>19s 缩到 2 天，再紧就 1 天
-    // （细化预算默认 38s：首轮 rem≈38s → 4 天；跑完一批剩几秒 → 收尾 1 天）
+    // （细化预算默认38s；剩余不足整天输出预算时保存接力，不强发请求）
     const rem = deadline - Date.now();
     const wave = Math.max(1, Math.min(WAVE, pending.length - k,
       rem > 30 * 1000 ? 4 : rem > 19 * 1000 ? 2 : 1));
     const batch = pending.slice(k, k + wave);
-    // 单天耗时估算：首轮用默认值，之后按上一批均摊 ×1.2（单天封顶 15s）
-    const perDay = lastCost
-      ? Math.min(Math.ceil((lastCost / prevWave) * 1.2), 15 * 1000)
-      : FIRST_PER_DAY_ESTIMATE;
-    // batch 内请求是 Promise.all 并发，估算应接近最慢的一天；按天数相加会让
-    // 4 天首批在剩余 38 秒时被误判为 34 秒甚至更高，提前少跑一波。
-    const estimate = perDay + 1000;
+    // Promise.all的墙钟接近最慢一天，不可除以批大小来当单天耗时。
+    // 也不按天数相加；首批保留整天输出下限，之后用实测墙钟加余量。
+    const estimate = Math.max(MIN_DAY_DRAFT_BUDGET_MS, Math.ceil(lastCost * 1.2)) + 1000;
     if (Date.now() + estimate > deadline) {
       console.log('[generatePlan] 时间预算不足，停止在已完成部分（续跑）: 已完成=%d 剩余=%d',
         finished.length, pending.length - finished.length - failed.length);
@@ -8775,13 +8829,13 @@ async function genDayItems(p, outline, opts = {}) {
       // 把本轮 deadline 传进去：单次超时会按剩余时间收敛，重试也会先问时间够不够
       // 这里同样不设 max_tokens：一天 10~15 条细化的正常输出就接近 3000 token，
       // 封顶会让当天的后半段（晚餐 + 夜间 + 回酒店）凭空消失
-      llm.chatWithRetry(dayDetailPrompt(p, days[idx], idx, outline), { deadline })
+      llm.chatWithRetry(dayDetailPrompt(p, days[idx], idx, outline), { deadline, temperature: 0.2 })
         .then((t) => ({ i: idx, items: asArray(parseJSONFromText(t)) }))
-        .catch((e) => ({ i: idx, error: e.message }))
+        .catch((e) => ({ i: idx, items: [], error: String(e && e.message || e || 'LLM 请求失败，未返回错误说明') }))
     ));
     lastCost = Date.now() - waveStart;
     rs.forEach((r) => {
-      if (r.error || !r.items.length) {
+      if (r.error || !Array.isArray(r.items) || !r.items.length) {
         failed.push(r.i);
         attempts[r.i] = (attempts[r.i] || 0) + 1;   // 记一次失败，续跑时才知道还能不能再试
         console.error(`[generatePlan] 第${r.i + 1}天细化失败（第${attempts[r.i]}次）:`,
@@ -8820,7 +8874,6 @@ async function genDayItems(p, outline, opts = {}) {
       finished.push(r.i);
     });
     k += wave;
-    prevWave = wave;
   }
 
   const doneAll = Array.from(done).concat(finished);
@@ -8898,6 +8951,13 @@ function makeRuleAlarmPusher(list, tripStartTs, tripEndTs) {
   let overdueCount = 0; // 已经过了开票日的条数：错开提醒时间，别一堆闹钟挤在同一分钟
   const nowMs = () => Date.now();
   return function push(title, dateStr, timeStr, type, note, meta = {}) {
+    const ticketMeta = {};
+    ['ticketPlace', 'ticketProduct', 'sourceUrl'].forEach((key) => {
+      if (meta[key]) ticketMeta[key] = String(meta[key]).slice(0, key === 'sourceUrl' ? 500 : 100);
+    });
+    ['ticketRequired', 'reservationRequired'].forEach((key) => {
+      if (typeof meta[key] === 'boolean') ticketMeta[key] = meta[key];
+    });
     let ts = parseCnTime(`${dateStr}T${timeStr}:00`);
     if (!ts || isNaN(ts)) return;
     const finalTitle = String(title || '提醒');
@@ -8929,6 +8989,7 @@ function makeRuleAlarmPusher(list, tripStartTs, tripEndTs) {
       const action = type === 'ticket' ? '立即查看并预约' : '立即查看并购买';
       list.push({
         title: (action + '：' + finalTitle.replace(/^(?:开抢|抢|开始盯|关注|查询|预约)+/, '')).slice(0, 100),
+        ...ticketMeta,
         note: '原定提醒日 ' + dateStr + ' 已过，请现在打开官方售票/预约渠道核实是否已开售；若已放票请立即购买，不要等待下一次提醒。' + String(note || ''),
         fireAt: immediateAt,
         fireAtStr: tsToCnDateTimeStr(immediateAt),
@@ -8960,6 +9021,7 @@ function makeRuleAlarmPusher(list, tripStartTs, tripEndTs) {
     }
     list.push({
       title: title.slice(0, 100),
+      ...ticketMeta,
       note: finalNote,
       fireAt: ts,
       fireAtStr: tsToCnDateTimeStr(ts),
@@ -9012,6 +9074,41 @@ function hotelTaskNote(task) {
       task.hotelRecommendationReason || '已核验完整名称，可复制到主流平台核对后预订。'].filter(Boolean).join('');
   }
   return [base, task && task.hotelRecommendationReason].filter(Boolean).join('');
+}
+
+// 酒店提醒按完整名称归并：同一酒店即使非连续入住，也只有一个可查看的标题。
+function canonicalHotelReminders(alarms, outline) {
+  const groups = new Map();
+  hotelBookingTasks(outline).forEach((task) => {
+    const name = String(task.hotel || '').trim() || '住宿待确认';
+    const key = task.hotel ? name : `待确认|${task.place || task.dayIndex}`;
+    if (!groups.has(key)) groups.set(key, { name, stays: [], task });
+    const group = groups.get(key);
+    const checkout = task.checkIn ? shiftDate(task.checkIn, task.nights) : '';
+    group.stays.push(`${task.checkIn || '日期待确认'}至${checkout || '日期待确认'}`);
+  });
+  const oldHotels = asArray(alarms).filter((alarm) => alarm.type === 'hotel');
+  const now = Date.now();
+  const canonical = [...groups.values()].map((group) => {
+    const match = oldHotels.find((alarm) => group.task.hotel
+      ? String(alarm.bookingInfo || alarm.title || '').includes(group.name)
+      : Number(alarm.dayIndex) === Number(group.task.dayIndex));
+    const checkIn = parseCnTime(`${group.task.checkIn}T14:00:00`);
+    const fireAt = match && Number(match.fireAt) > now ? Number(match.fireAt)
+      : checkIn > now ? now + 5 * 60000 : checkIn;
+    const extra = [!group.task.hotel && group.task.place && `住宿区域：${group.task.place}`,
+      group.task.hotelPoiAddress && `地址：${group.task.hotelPoiAddress}`,
+      group.task.hotelRecommendationReason].filter(Boolean)
+      .map((part) => String(part).split(group.name).join('')).join('；');
+    return Object.assign({}, match || {}, {
+      title: group.name,
+      note: `住宿时间：${group.stays.join('；')}；请核对订单、位置、房型与退改规则。${extra ? `其他注意事项：${extra}` : ''}`.slice(0, 500),
+      usageInfo: `住宿时间：${group.stays.join('；')}`.slice(0, 180),
+      fireAt, fireAtStr: tsToCnDateTimeStr(fireAt), type: 'hotel',
+      dayIndex: group.task.dayIndex, bookingInfo: group.name, source: 'ai',
+    });
+  });
+  return asArray(alarms).filter((alarm) => alarm.type !== 'hotel').concat(canonical);
 }
 
 function hotelRecommendationNote(day) {
@@ -9088,19 +9185,28 @@ function syncHotelReferences(items, outline) {
       .flatMap((move) => [move.from, move.to]).filter(Boolean);
     const statedDestination = knownDestinations.find((name) =>
       ['前往', '赶往', '去往', '赴'].some((verb) => activity.includes(`${verb}${name}`)));
-    if (statedDestination && statedDestination !== end && /退房/.test(activity)) {
+    // 只纠正把退房接驳终点写成酒店的旧错误；不能把已核验的具体寄存处
+    // 降格为大纲中的码头/景区节点，否则复核通过后的存取闭环会被破坏。
+    if (statedDestination && statedDestination !== end && /退房/.test(activity)
+      && (!end || LODGING_WORD_RE.test(end))) {
       end = out.endLocation = statedDestination;
       out.endLon = ''; out.endLat = '';
     }
-    const morningDeparture = String(item.category || '') === 'food'
+    const morningDeparture = (String(item.category || '') === 'food' && (toMin(item.startTime) ?? 1440) < 10 * 60 + 30)
       || /早餐|早饭|早餐店|退房|收拾行李|整理行李/.test(`${activity} ${item.note || ''}`)
       || ((toMin(item.startTime) ?? 1440) < 10 * 60 + 30 && /出发|离开/.test(activity));
+    const diningAfterArrival = item.category === 'food' && /酒店|民宿|客栈|住宿/.test(activity)
+      && asArray(items).some((entry) => Number(entry.dayIndex || 0) === dayIndex && entry.category === 'hotel'
+        && /入住|放(?:下|置).*行李/.test(entry.activity || '') && !/退房/.test(entry.activity || '')
+        && (toMin(entry.startTime) ?? 1440) <= (toMin(item.startTime) ?? 0));
     const replacements = [];
 
     // 第二天早上的早餐/退房仍发生在前一晚酒店；其余普通住宿起点也优先
     // 使用上一晚的已核验名称，避免“酒店 A→酒店 B”被旧文本切断。
     let startTarget = '';
-    if (start && previousTarget && matches(start, dayIndex - 1)
+    if (start && currentTarget && diningAfterArrival && LODGING_WORD_RE.test(start)) {
+      startTarget = currentTarget;
+    } else if (start && previousTarget && matches(start, dayIndex - 1)
         && (morningDeparture || !matches(start, dayIndex))) {
       startTarget = previousTarget;
     } else if (start && currentTarget && matches(start, dayIndex)) {
@@ -9119,7 +9225,9 @@ function syncHotelReferences(items, outline) {
     const checkingOut = /退房/.test(activity) && !/不退房|无需退房/.test(activity);
     const hotelArrival = !checkingOut && /入住|回房|回到|返回|休息/.test(activity)
       && (!end || LODGING_WORD_RE.test(end));
-    if (String(item.category || '') === 'hotel' && currentTarget && hotelArrival) {
+    if (currentTarget && diningAfterArrival && end && LODGING_WORD_RE.test(end)) {
+      endTarget = currentTarget;
+    } else if (String(item.category || '') === 'hotel' && currentTarget && hotelArrival) {
       endTarget = currentTarget;
     } else if (end && previousTarget && matches(end, dayIndex - 1)
         && (morningDeparture || !matches(end, dayIndex))) {
@@ -9134,7 +9242,18 @@ function syncHotelReferences(items, outline) {
       out.endLat = '';
     }
 
-    if (replacements.length) out.activity = replaceExact(activity, replacements);
+    if (replacements.length) {
+      out.activity = replaceExact(activity, replacements);
+      out.note = replaceExact(out.note, replacements);
+      out.bookingInfo = replaceExact(out.bookingInfo, replacements);
+    }
+    // 导航地址已经正确时，正文中仍可能留有另一个城市的同名分店。
+    // 只规范到实际住宿终点的入住/回房动作，不改寄存点、饭店或旧酒店出发点。
+    const lodgingTarget = [currentTarget, previousTarget].find((name) => name && out.endLocation === name);
+    if (lodgingTarget && !checkingOut && /入住|回房|返回|回到/.test(out.activity || '')) {
+      out.activity = String(out.activity || '').replace(/(入住|回到|返回|前往|在|至)([^，。；]{2,80}?(?:酒店|民宿|客栈|宾馆|青旅)(?:[（(][^）)]{1,50}[）)])?)/g,
+        (whole, verb) => `${verb}${lodgingTarget}`);
+    }
     if (String(item.category || '') === 'hotel') {
       out.bookingInfo = checkingOut ? previousTarget : currentTarget;
       // 分类不能覆盖动作语义：退房后去交通枢纽仍是移动，不是今晚入住。
@@ -9150,8 +9269,14 @@ function annotateHotelItems(items, outline) {
   const days = asArray(outline && outline.days);
   // Canonicalizing aliases can collapse a hotel-to-hotel leg into no movement.
   // Clean those legs after the rewrite, before IDs and alarms are linked.
-  const synced = removeCheckoutBacktracks(removeZeroDistanceTransports(syncHotelReferences(items, outline)));
+  // 已验收日期不再运行基于hotel分类猜别名的初稿清洗。退房卡里的旧酒店
+  // 曾被误收入“今晚酒店别名”，使后续已验收交通起点瞬移，并删除真实跨城段。
+  const reviewed = asArray(items).filter((item) => item.executionReview === REVIEW_VERSION);
+  const drafts = asArray(items).filter((item) => item.executionReview !== REVIEW_VERSION);
+  const synced = reviewed.concat(removeCheckoutBacktracks(removeZeroDistanceTransports(syncHotelReferences(drafts, outline))))
+    .sort((a, b) => Number(a.dayIndex || 0) - Number(b.dayIndex || 0) || (toMin(a.startTime) ?? 1440) - (toMin(b.startTime) ?? 1440));
   return synced.map((item) => {
+    if (item.executionReview === REVIEW_VERSION) return item;
     if (!item || String(item.category || '') !== 'hotel') return item;
     const offset = /退房/.test(item.activity || '') && !/不退房|无需退房/.test(item.activity || '') ? -1 : 0;
     const day = days[Number(item.dayIndex || 0) + offset] || {};
@@ -9374,6 +9499,21 @@ function backfillDetailAlarms(p, outline, items, existing) {
   const push = makeRuleAlarmPusher(list, tripStartTs, tripEndTs);
   const base = asArray(existing);
   const days = asArray(outline.days);
+  const paidProducts = knownTicketProducts(items, days.flatMap((day, dayIndex) =>
+    asArray(day.ticketProducts).concat(asArray(day.executionEvidence && day.executionEvidence.ticketProducts))
+      .map((fact) => ({ ...fact, dayIndex }))));
+  paidProducts.forEach((fact) => {
+    const date = days[fact.dayIndex] && days[fact.dayIndex].date || shiftDate(p.startDate, fact.dayIndex);
+    const normalizeProduct = (value) => String(value || '').replace(/[\s（）()]/g, '').replace(/景区|风景区|门票|预约|放票/g, '');
+    const old = base.concat(list).find((alarm) => alarm.type === 'ticket'
+      && bookingProductKind(alarm) === bookingProductKind({ type: 'ticket', ticketProduct: fact.product })
+      && normalizeProduct(alarm.bookingInfo || alarm.title).includes(normalizeProduct(fact.product)));
+    if (old) return;
+    push(`${fact.product}${fact.ticketRequired ? '预订' : '预约提醒'}`, shiftDate(date, -TICKET_PRESALE_DAYS), '09:00', 'ticket',
+      [fact.note, fact.sourceUrl ? `票务来源：${fact.sourceUrl}` : '', '关注时间非官方起售时刻，办理前确认规则'].filter(Boolean).join('；'),
+      { dayIndex: fact.dayIndex, bookingInfo: fact.product, linkedItemId: fact.item.itemId,
+        ticketPlace: fact.place, ticketProduct: fact.product, ticketRequired: fact.ticketRequired, sourceUrl: fact.sourceUrl });
+  });
   // 父景区入园与内部观景点是同一购票事项；真正的竹筏、演出等另行提醒。
   const scenicEntries = new Set();
   const normalize = (s) => String(s || '').replace(/[\s\u3000→（）()：:，,。；;]/g, '').toLowerCase();
@@ -9404,21 +9544,36 @@ function backfillDetailAlarms(p, outline, items, existing) {
     const waitingOnly = /取票|安检|候车|候船|检票/.test(action) && !actualBooking;
     const baggageOnly = it.category !== 'sight' && /行李|箱子|大件/.test(action)
       && /寄存|暂存|取回|退房|整理/.test(action) && !actualBooking;
-    if (waitingOnly || baggageOnly) return;
+    if (waitingOnly || baggageOnly || ticketAccessOnly(it)) return;
     const day = days[Number(it.dayIndex || 0)] || {};
     const date = validDate(day.date) ? day.date : shiftDate(p.startDate, Number(it.dayIndex || 0));
+    if (it.category === 'transport' && /^(?:乘坐|搭乘|乘|坐).{0,16}(?:景区)?观光车/.test(action)
+      && !base.concat(list).some((alarm) => alarm.type === 'ticket' && bookingProductKind(alarm) === 'shuttle'
+        && alarm.linkedItemId === it.itemId)) {
+      const place = it.ticketPlace || it.visitScope || it.startLocation || it.endLocation;
+      const product = it.ticketProduct || `${place}观光车票`;
+      push(`核验${date} ${product}`, shiftDate(date, -TICKET_PRESALE_DAYS), '09:00', 'ticket',
+        '核对独立观光车票或通票包含范围；具体收费、办理和运营规则以运营方为准，不代表已确认另收费。',
+        { dayIndex: Number(it.dayIndex || 0), bookingInfo: product, linkedItemId: it.itemId,
+          ticketPlace: place, ticketProduct: product, reservationRequired: true });
+      return;
+    }
     const titleText = String(it.activity || it.endLocation || it.startLocation || '该项目').slice(0, 28);
+    if (!actualTicketExperience(it) && (freeAdmissionFor(it, day.ticketPolicies)
+      || openLeisureVisit(it) && it.ticketRequired !== true && it.reservationRequired !== true)) return;
     const statusType = it.category === 'transport' ? bookingKindOf(text) : it.category === 'ticket' ? 'ticket' : '';
     if (BOOKING_DONE_RE.test(text)
       || (statusType && bookingStatusMatches(p, `${titleText} ${text}`, statusType))) return;
-    const entryLocation = String(it.endLocation || '').replace(/(?:正门|大门|门口|出口|入口).*$/, '').trim();
+    const entryLocation = String(it.endLocation || it.startLocation || '').replace(/(?:正门|大门|门口|出口|入口).*$/, '').trim();
     const scoped = String(it.visitScope || '').trim();
     const scenicScope = scoped && `${action} ${it.startLocation || ''} ${it.endLocation || ''}`.includes(`${scoped}景区`)
       ? `${scoped}景区` : '';
     const parent = /景区|梯田|瀑布|山|公园|沟|田园|博物馆|祠|寺|宫/.test(scoped) ? scoped
-      : scenicScope || (/景区|公园|博物馆|祠$|寺$|宫$/.test(entryLocation) ? entryLocation
-        : /(?:^|[\s，,：:])(?:游览|参观)([^\s，,。；;（）()与及]{1,20}(?:祠|寺|宫))/.exec(action)?.[1] || '');
-    if (it.category === 'sight' && /景区|梯田|瀑布|山|公园|沟|田园|博物馆|祠|寺|宫/.test(parent)
+      : scenicScope || (/景区|梯田|瀑布|公园|博物馆|祠$|寺$|宫$/.test(entryLocation) ? entryLocation.replace(/(?:游客|旅游|售票|服务)中心$/, '')
+        : /(?:^|[\s，,：:])(?:游览|参观)([^\s，,。；;（）()与及]{1,20}(?:祠|寺|宫))/.exec(action)?.[1]
+          || (/^(?:游览|参观|游玩|进入)/.test(action) && entryLocation && entryLocation !== day.city
+            && !/附近|夜景|夜市|步行街|街区|街$|商圈|码头|酒店|餐厅|观景台|观景点|^观景台$/.test(entryLocation) ? entryLocation : ''));
+    if (it.category === 'sight' && parent
       && !scenicEntries.has(parent)) {
       scenicEntries.add(parent);
       const entryKey = (value) => normalize(value).replace(/风景区|景区|门票|预约|放票/g, '');
@@ -9436,7 +9591,9 @@ function backfillDetailAlarms(p, outline, items, existing) {
     const movementOnly = it.category === 'transport'
       || /^(walk|ride|bus|train|plane|car)$/.test(String(it.transportType || '').toLowerCase())
       || /步行|打车|网约车|乘车|乘坐|前往|接驳/.test(String(it.activity || ''));
-    const ticketLike = ticketEvidence && (!movementOnly || /门票|购票|放票|入园预约|实名预约|船票|游船|竹筏|漂流|演出|缆车|索道|温泉票|跟拍/.test(String(it.activity || '')))
+    const accessOnly = /^(?:步行|骑行|骑|打车|前往|到达|抵达|返回|租赁)/.test(action)
+      && !/乘坐.{0,15}(?:游船|竹筏|索道|缆车)|购票|购买|预约|体验|漂流/.test(action);
+    const ticketLike = !accessOnly && ticketEvidence && (!movementOnly || /门票|购票|放票|入园预约|实名预约|船票|游船|竹筏|漂流|演出|缆车|索道|温泉票|跟拍/.test(String(it.activity || '')))
       || it.category === 'ticket' && !movementOnly;
     if (ticketLike) {
       const clock = actionClockOf(text, '09:00');
@@ -9718,7 +9875,7 @@ function resolveOfficialRailTimeline(outline) {
   const days = asArray(outline && outline.days);
   days.forEach((day, dayIndex) => {
     const moves = asArray(day && day.moves).filter((m) =>
-      m && m.schedSource === '12306' && asArray(m.sched).some((c) =>
+      m && ['12306', 'reference'].includes(m.schedSource) && asArray(m.sched).some((c) =>
         toMin(c && c.s) !== null && toMin(c && c.e) !== null && toMin(c.e) > toMin(c.s)));
     if (moves.length < 2) return;
 
@@ -9873,9 +10030,21 @@ function applyRealSchedules(outline, found, tripContext) {
           x.code === c.code && x.s === c.s && x.e === c.e
           && sameStation(x.from, c.from) && sameStation(x.to, c.to)) === i)
         .slice(0, 16);
+      const firstRail = dayIndex === 0 && m === asArray(d.moves).find((move) => /train|高铁|动车/.test(move.mode || ''));
+      const homeDeparture = toMin(context && (context.goTime || context.startTime));
+      const accessMoves = firstRail ? asArray(d.moves).slice(0, asArray(d.moves).indexOf(m)) : [];
+      const accessDuration = Math.max(20, accessMoves.reduce((sum, move) =>
+        sum + Math.max(0, (toMin(move.endTime) ?? 0) - (toMin(move.startTime) ?? 0)), 0));
+      const earliest = firstRail && homeDeparture !== null ? homeDeparture + accessDuration + 40 : null;
+      const feasibleList = earliest === null ? list : list.filter((candidate) => toMin(candidate.s) >= earliest);
+      if (firstRail) m.sched = feasibleList;
       const pick = dayIndex === lastDayIndex && m === returnMove && stationArrivalDeadline !== null
         ? pickReturnSchedule(list, m.startTime, stationArrivalDeadline)
-        : pickSchedule(list, m.startTime);
+        : pickSchedule(feasibleList, m.startTime);
+      if (!pick && firstRail) {
+        m.scheduleRequired = true; m.code = ''; m.sched = [];
+        m.transfer = '近期候选均赶不上用户出发与进站缓冲，需调整出发时间或另选班次，不可强行套用';
+      }
       if (!pick) return;
       if (m.code !== pick.code || m.startTime !== pick.s) replaced += 1;
       m.code = pick.code;
@@ -9884,7 +10053,10 @@ function applyRealSchedules(outline, found, tripContext) {
       // routeMatch 已经要求出发站/到达站分别对得上，这里才允许采用官方结果的标准站名。
       m.from = pick.from;
       m.to = pick.to;
-      m.schedSource = data.meta && data.meta.official ? '12306' : 'search';
+      m.schedSource = data.meta && data.meta.reference ? 'reference' : data.meta && data.meta.official ? '12306' : 'search';
+      m.referenceDate = pick.referenceDate || data.meta && data.meta.referenceDate || '';
+      m.sourceUrl = pick.sourceUrl || data.meta && data.meta.sourceUrl || '';
+      m.timingEstimated = m.schedSource === 'reference';
       m.scheduleRequired = false;
     });
   });
@@ -9975,6 +10147,14 @@ function enforceRealSchedule(items, outline) {
       it.startLocation = pick.from;
       it.endLocation = pick.to;
       it.schedSource = data.move && data.move.schedSource ? data.move.schedSource : 'search';
+      if (it.schedSource === 'reference') {
+        it.referenceDate = data.move.referenceDate;
+        it.sourceUrl = data.move.sourceUrl;
+        it.timingEstimated = true;
+        const warning = `参考${it.referenceDate}运行图规划，非出行当天确认班次；开售后在12306核对车次、车站和时间`;
+        if (!String(it.note || '').includes(warning)) it.note = [it.note, warning].filter(Boolean).join('；');
+        if (!it.activity.includes('参考')) it.activity += '（运行图参考）';
+      }
       if (!exact) {
         console.warn('[generatePlan] 第%d天车次 %s 不在联网检索结果里，拽回真实班次 %s', di + 1, old || '(缺失)', pick.code);
       }
@@ -9997,7 +10177,7 @@ function enforceOfficialRailItems(items, outline) {
     if (!old.includes(text)) it.note = old ? `${old}；${text}` : text;
   };
   days.forEach((day, di) => {
-    const moves = asArray(day && day.moves).filter((m) => m && m.schedSource === '12306' && asArray(m.sched).length);
+    const moves = asArray(day && day.moves).filter((m) => fixedSchedule(m) && asArray(m.sched).length);
     if (!moves.length) return;
     out.forEach((it) => {
       if (Number(it.dayIndex || 0) !== di || String(it.category || '') !== 'transport' || !railish(it)) return;
@@ -10039,7 +10219,11 @@ function enforceOfficialRailItems(items, outline) {
       it.endTime = pick.e;
       it.startLocation = pick.from;
       it.endLocation = pick.to;
-      it.schedSource = '12306';
+      it.schedSource = move.schedSource;
+      if (move.schedSource === 'reference') {
+        it.referenceDate = move.referenceDate; it.sourceUrl = move.sourceUrl; it.timingEstimated = true;
+        append(it, `参考${move.referenceDate}运行图，开售后在12306确认；按该车次准确时刻安排接驳`);
+      }
     });
   });
   return out;
@@ -10050,7 +10234,7 @@ function dedupeOfficialRailItems(items, outline) {
   const out = asArray(items).slice();
   const drop = new Set();
   asArray(outline && outline.days).forEach((day, di) => {
-    asArray(day && day.moves).filter((m) => m && m.schedSource === '12306').forEach((move) => {
+    asArray(day && day.moves).filter(fixedSchedule).forEach((move) => {
       const bound = out.filter((it) => {
         if (Number(it.dayIndex || 0) !== di || String(it.category || '') !== 'transport') return false;
         if (!/train|高铁|动车|火车|列车/.test(`${it.transportType || ''}${it.activity || ''}`)) return false;
@@ -10082,7 +10266,7 @@ async function generateOutline(rawInput, opts = {}) {
   const p = normalizeInput(rawInput);
   if (!p.dest) throw new Error('请填写目的地');
   const t0 = Date.now();
-  const outline = await genOutline(p);
+  const outline = await genOutline(p, opts);
   ensureOvernightMoveContinuity(outline, p);
   enforceLongjiSameDayRoute(outline, p);
   alignOutlineMoveTimes(outline);
@@ -10222,7 +10406,7 @@ function fixDayTimeOverlaps(items) {
           parseDurationMin(`${current.note || ''} ${current.activity || ''}`) || 30));
         current.endTime = fmtMin(Math.min(curStart + duration, 23 * 60 + 59));
       }
-      if (currentEnd !== null && currentEnd <= curStart && current.schedSource !== '12306') {
+      if (currentEnd !== null && currentEnd <= curStart && !fixedSchedule(current)) {
         // 归一化到当天最后一分钟后已没有可执行时长；保留零时长条目会
         // 伪造一个“已完成”的景点/收尾，也会让下一段的地点链失真。
         dropped.add(current);
@@ -10246,8 +10430,8 @@ function fixDayTimeOverlaps(items) {
       // 官方班次的发到时刻是事实，任何时间线修复都不能改它。
       // 前一条若只是普通接驳/游览，可以提前收尾让路；两条已核对大交通
       // 真正冲突时保留两条官方时刻，交给用户重新选班次，不伪造第三个时刻。
-      if (list[i].schedSource === '12306') {
-        if (list[i - 1].schedSource !== '12306') list[i - 1].endTime = list[i].startTime;
+      if (fixedSchedule(list[i])) {
+        if (!fixedSchedule(list[i - 1])) list[i - 1].endTime = list[i].startTime;
         continue;
       }
       // 交通条目（尤其有真实班次的火车/飞机）**不许顺延**：把时刻一挪，
@@ -10422,7 +10606,7 @@ function linkBookingAlarms(alarms, items) {
 }
 
 /** 修正 LLM 把普通接驳误标成门票提醒的情况，并按实际交通类型归类。 */
-function normalizeBookingAlarmKinds(alarms, items, p) {
+function normalizeBookingAlarmKinds(alarms, items, p, policies = []) {
   const rows = asArray(items);
   const experienceTicket = /门票|购票|放票|入园预约|实名预约|竹筏|游船|漂流|缆车|索道|温泉|演出|跟拍/;
   const scenicEntry = /景区|景点|瀑布|梯田|古镇|公园|博物馆|游客中心|观光车|园区|游览基地/;
@@ -10433,7 +10617,7 @@ function normalizeBookingAlarmKinds(alarms, items, p) {
       ? note : [hotelNote, note].filter(Boolean).join('');
   };
   const filtered = [];
-  asArray(alarms).forEach((alarm) => {
+  filterTicketAlarms(alarms, rows, policies).forEach((alarm) => {
     const current = Object.assign({}, alarm);
     const workflow = rows.find((row) => row.itemId && row.itemId === current.linkedItemId);
     if (workflow && current.type !== 'hotel') {
@@ -10460,14 +10644,22 @@ function normalizeBookingAlarmKinds(alarms, items, p) {
       const statusType = alarmType === 'ticket' ? (bookingKindOf(targetText) || 'ticket') : alarmType;
       if (bookingStatusMatches(p, targetText, statusType)) return;
     }
-    if (String(current.type || '') !== 'ticket') { filtered.push(current); return; }
+    if (String(current.type || '') !== 'ticket') {
+      if (current.type === 'bus' && workflow && /地铁|轨道|公交|观光车|景区.*接驳|接驳车/.test(workflow.activity || '')
+        && !/高铁专线|机场大巴|城际|长途|旅游专线|直通车/.test(workflow.activity || '')) return;
+      filtered.push(current); return;
+    }
     const linked = current.linkedItemId
       ? rows.find((it) => String(it.itemId || '') === String(current.linkedItemId))
       : null;
     const title = `${current.title || ''} ${current.bookingInfo || ''}`;
     const targetText = linked ? `${linked.activity || ''} ${linked.note || ''} ${linked.startLocation || ''} ${linked.endLocation || ''}` : '';
     const text = `${title} ${targetText}`;
-    const textualMode = /(?:12306|火车票|车次|铁路|高铁|动车|列车)/i.test(text) ? 'train'
+    if (current.type === 'ticket' && current.ticketProduct
+      && (current.ticketRequired === true || current.reservationRequired === true)) {
+      filtered.push(current); return; // 已核实独立票务产品不随其关联接驳误归车票。
+    }
+    const textualMode = /(?:12306|火车票|车次|铁路|高铁|(?<!电)动车|列车)/i.test(text) ? 'train'
       : /(?:机票|航班|飞机票|航空)/i.test(text) ? 'plane'
         : /(?:汽车票|大巴票|客运票|旅游专线|直通车)/i.test(text) ? 'bus' : '';
     const linkedActivity = String(linked && linked.activity || '');
@@ -10489,7 +10681,7 @@ function normalizeBookingAlarmKinds(alarms, items, p) {
     const movement = linked && String(linked.category || '') === 'transport';
     if (movement) {
       const modeText = `${linked.transportType || ''} ${linked.activity || ''}`;
-      if (/train|火车|列车|高铁|动车|车次/i.test(modeText)) current.type = 'train';
+      if (/train|火车|列车|高铁|(?<!电)动车|车次/i.test(modeText)) current.type = 'train';
       else if (/plane|航班|飞机/i.test(modeText)) current.type = 'plane';
       else if (/bus|大巴|班车|旅游专线|客运/i.test(modeText)) current.type = 'bus';
       else if (linkedMode === 'ship'
@@ -10511,7 +10703,10 @@ function normalizeBookingAlarmKinds(alarms, items, p) {
       filtered.push(current);
       return;
     }
-    if (!experienceTicket.test(text) && !(scenicEntry.test(text) && /预约|购票|门票/.test(title))) return;
+    const explicitProduct = current.ticketRequired === true || current.reservationRequired === true;
+    const namedAdmission = linked && ['sight', 'ticket'].includes(linked.category) && /门票|入园票|成人票|预约/.test(title);
+    if (!explicitProduct && !namedAdmission && !experienceTicket.test(text)
+      && !(scenicEntry.test(text) && /预约|购票|门票/.test(title))) return;
     filtered.push(current);
   });
   // 按出行日核对常见预售窗口。窗口已过就提醒现在查售票平台，不保留模型编出的未来抢票时刻。
@@ -10526,6 +10721,7 @@ function normalizeBookingAlarmKinds(alarms, items, p) {
     const releaseDate = shiftDate(travelDate, -presaleDays);
     const isTicket = alarm.type === 'ticket';
     const cleanTitle = String(alarm.title || alarm.bookingInfo || (isTicket ? '景区门票/体验预约' : '车票'))
+      .replace(/^(?:(?:预计开放预约\/购票|预计开售|立即查看并预约|立即查看并购买)[：:]\s*)+/, '')
       .replace(/^(?:开抢|抢|开始盯|关注|查询|预约|购票|购买|立即查看并(?:预约|购买)[：:]?)+\s*/, '').trim();
     if (releaseDate <= today) {
       alarm.title = `${isTicket ? '立即查看并预约' : '立即查看并购买'}：${cleanTitle}`.slice(0, 100);
@@ -10544,19 +10740,49 @@ function normalizeBookingAlarmKinds(alarms, items, p) {
     alarm.title = `${isTicket ? '预计开放预约/购票' : '预计开售'}：${cleanTitle}`.slice(0, 100);
     alarm.note = `按常见预售规则估算 ${releaseDate} 开放；请在该日查看官方 App/景区渠道，具体时间以官方公告为准。${String(alarm.note || '')}`.slice(0, 200);
   });
-  const seen = new Set();
-  return filtered.filter((alarm) => {
-    const key = alarm.linkedItemId
-      ? `${alarm.type}|${alarm.linkedItemId}`
-      : `${alarm.type}|${Number(alarm.dayIndex || 0)}|${String(alarm.bookingInfo || alarm.title || '').replace(/\s/g, '')}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  // 归并必须保留具名产品和来源，不先留下泛称就丢掉后续证据。
+  return dedupeBookingAlarmRecords(filtered, items);
 }
 
 /** 同一购票/预约事项只保留一条记录，提前量由统一提醒设置负责。 */
-function dedupeBookingAlarmRecords(alarms) {
+function bookingProductKind(alarm, items = []) {
+  if (alarm.type !== 'ticket') return alarm.type;
+  let text = `${alarm.ticketProduct || ''} ${alarm.title || ''} ${alarm.bookingInfo || ''}`;
+  if (includedAdmission(alarm.ticketProduct || alarm.bookingInfo || alarm.title)) return 'admission';
+  // 泛称“A码头→B码头票”不含体验名，用准确关联的实际动作归类，
+  // 才能与该船筏产品归并；明确入园票和独立产品不能据此改类。
+  if (!alarm.ticketProduct && !/门票|入园|索道|缆车|竹筏|漂流|游船|船票|轮渡|演出|剧场|观光车|接驳车|魔毯|滑道/.test(text)) {
+    const linked = items.find((row) => alarm.linkedItemId
+      && String(row.itemId || row._id || '') === String(alarm.linkedItemId));
+    if (linked && actualTicketExperience(linked)) text += ` ${linked.activity || ''}`;
+  }
+  return /索道|缆车/.test(text) ? 'cable' : /竹筏|漂流/.test(text) ? 'raft'
+    : /游船|船票|轮渡/.test(text) ? 'cruise' : /演出|剧场/.test(text) ? 'show'
+      : /观光车|接驳车/.test(text) ? 'shuttle' : /魔毯|滑道/.test(text) ? 'scenic-extra' : 'admission';
+}
+
+function bookingIdentityPart(alarm, alarms, items = []) {
+  const kind = bookingProductKind(alarm, items);
+  if (alarm.type !== 'ticket') return kind;
+  const nameOf = (entry) => {
+    const linked = items.find((row) => String(row.itemId || row._id || '') === String(entry.linkedItemId || ''));
+    const city = String(linked && linked.city || '').replace(/市$/, '').trim();
+    const local = (value) => city && String(value || '').startsWith(city) ? String(value).slice(city.length) : String(value || '');
+    const place = local(entry.ticketPlace).replace(/风景区|景区|游客中心/g, '');
+    // 同日同一入园票的成人/大门票及季节价格标签不是独立产品；
+    // 保留前后山、区域、时段等差异，索道/船筏仍按不同 kind 独立保存。
+    const product = local(entry.ticketProduct).replace(/[（(](?:淡季|旺季|平季)[）)]/g, '')
+      .replace(/风景区|景区|游客中心|入园|成人|全价|大门票|门票|预约|票/g, '').replace(/\s/g, '');
+    return product.includes(place) ? product : place + product;
+  };
+  if (alarm.ticketProduct) return `${kind}:${nameOf(alarm)}`;
+  const candidates = [...new Set(asArray(alarms).filter((entry) => entry.ticketProduct
+    && entry.linkedItemId === alarm.linkedItemId && bookingProductKind(entry, items) === kind).map(nameOf))];
+  // 一个明确产品可归并旧泛称；同类多个产品不可凭同一个行程ID互相覆盖。
+  return candidates.length === 1 ? `${kind}:${candidates[0]}` : kind;
+}
+
+function dedupeBookingAlarmRecords(alarms, items = []) {
   const groups = new Map();
   const clean = (value) => String(value || '')
     .replace(/(?:提前\s*\d+\s*分钟|提前准备|准备|即将到点|到点提醒|开抢|预计开售|预计开放预约\/购票|立即查看并(?:预约|购买)|开始盯|关注|查询|预约|购票|购买|预订)/g, '')
@@ -10565,7 +10791,7 @@ function dedupeBookingAlarmRecords(alarms) {
   asArray(alarms).forEach((alarm) => {
     const a = Object.assign({}, alarm);
     const identity = a.linkedItemId
-      ? `linked|${a.linkedItemId}`
+      ? `linked|${a.type}|${a.linkedItemId}|${bookingIdentityPart(a, alarms, items)}`
       : `text|${a.type}|${Number(a.dayIndex || 0)}|${clean(a.bookingInfo || a.title)}`;
     const old = groups.get(identity);
     if (!old) {
@@ -10576,9 +10802,18 @@ function dedupeBookingAlarmRecords(alarms) {
     // 前端/系统日历只会按 leadMinutes 生成一个提前提醒。
     const winner = Number(a.fireAt || 0) >= Number(old.fireAt || 0) ? a : old;
     const loser = winner === a ? old : a;
+    if (!winner.ticketProduct && loser.ticketProduct) {
+      // 保留实际办理时刻，同时展示具名产品，不让后来的泛称覆盖证据摘要。
+      winner.title = loser.title || winner.title;
+      winner.bookingInfo = loser.bookingInfo || loser.ticketProduct;
+      winner.ticketProduct = loser.ticketProduct;
+    }
     winner.note = [winner.note, loser.note].filter(Boolean).filter((value, index, list) => list.indexOf(value) === index).join('；').slice(0, 500);
     winner.bookingInfo = winner.bookingInfo || loser.bookingInfo || '';
     winner.linkedItemId = winner.linkedItemId || loser.linkedItemId || '';
+    ['ticketPlace', 'ticketProduct', 'ticketRequired', 'reservationRequired', 'sourceUrl'].forEach((key) => {
+      if (winner[key] == null && loser[key] != null) winner[key] = loser[key];
+    });
     groups.set(identity, winner);
   });
   return [...groups.values()];
@@ -10635,11 +10870,22 @@ function annotateAlarmUsage(alarms, items, outline) {
 }
 
 /** 详情生成和联网执行复核分轮进行，已通过日期绝不重复生成。 */
-function warningContext(profile, outline, di) {
+function warningContext(profile, outline, di, items = []) {
   const day = outline.days[di], previous = outline.days[di - 1] || {};
+  const nextRows = items.filter((row) => Number(row.dayIndex || 0) === di + 1);
   return { isFirst: di === 0, isLast: di === outline.days.length - 1,
-    origin: profile.origin, goTime: profile.goTime, backTime: profile.backTime, date: day.date,
+    origin: profile.origin, goTime: profile.goTime, backTime: profile.backTime, date: day.date, city: day.city,
     hotel: day.hotel, overnight: day.overnight, previousHotel: previous.hotel,
+    hotelLocationAliases: day.hotelLocationAliases || [], hotelPoiVerified: day.hotelPoiVerified,
+    previousHotelLocationAliases: previous.hotelLocationAliases || [],
+    previousStorage: previousStoragePlaces(items, di),
+    required: requiredPlacesForDay(profile, outline.days, di),
+    knownMeals: day.meals || [], previousMeals: previous.executionMealNames || [],
+    followingMeals: nextRows.length && nextRows.every((row) => row.executionReview === REVIEW_VERSION)
+      ? collectMealNames(nextRows, (outline.days[di + 1] || {}).meals || []) : [],
+    repeatMeals: profile.extra || '',
+    middayRest: /(?:每天|中午|午间).{0,10}(?:回酒店|回民宿|午休)/.test(profile.extra || '')
+      && !/不(?:要|用|必)?(?:午休|回酒店)/.test(profile.extra || ''),
     sameHotel: !!day.hotel && day.hotel === previous.hotel,
     noDrive: !drivingAllowed(profile), selfDriveAllowed: (row) => explicitSelfDriveSegment(profile, row),
     lightLuggage: explicitCarryLuggagePreference(profile), points: day.executionPoints || {},
@@ -10648,13 +10894,25 @@ function warningContext(profile, outline, di) {
       ...(day.executionRoadFacts || []), ...(day.executionTransitFacts || [])],
     visitWindows: (day.executionEvidence || {}).visitWindows || [],
     sailingWindows: (day.executionEvidence || {}).sailingWindows || [],
+    solar: items.filter((row) => Number(row.dayIndex || 0) === di && row.timingLocked && solarViewingAction(row))
+      .map((row) => ({ activity: row.activity, startTime: row.startTime, endTime: row.endTime,
+        startLocation: row.startLocation, endLocation: row.endLocation, note: row.note })),
+    aliases: (day.executionEvidence || {}).aliases || [],
+    localMobility: (day.executionEvidence || {}).localMobility || [],
+    highlights: day.highlights || [],
+    scheduleChoices: day.executionScheduleChoices || [],
+    references: asArray(day.moves).filter((move) => move.schedSource === 'reference').map((move) => ({
+      startLocation: move.from, endLocation: move.to, startTime: move.startTime, endTime: move.endTime,
+      code: move.code, referenceDate: move.referenceDate, sourceUrl: move.sourceUrl,
+    })),
+    enforceRailSchedules: true,
     official: asArray(day.moves).filter((move) => move.schedSource === '12306').map((move) => ({
       startLocation: move.from, endLocation: move.to, startTime: move.startTime, endTime: move.endTime, code: move.code,
     })),
   };
 }
 
-function fallbackDayWithWarnings(profile, outline, di) {
+function fallbackDayCandidate(profile, outline, di) {
   profile = Object.assign({}, profile, { goTime: profile.goTime || '08:00', backTime: profile.backTime || '20:00' });
   const copy = JSON.parse(JSON.stringify(outline));
   let rows = skeletonDayItems(profile, copy.days[di], di, copy);
@@ -10663,7 +10921,11 @@ function fallbackDayWithWarnings(profile, outline, di) {
   rows = enforceOriginAccess(rows, profile, copy, [di]);
   rows = enforceTripEdgeOrder(rows, profile, copy, [di]);
   rows = finalizeExecutionEdges(stripUnverifiedSchedules(enforceTransportPreference(rows, profile), copy), copy, profile);
-  return finalizeWithWarnings(rows, di, outline.days[di],
+  return rows;
+}
+
+function fallbackDayWithWarnings(profile, outline, di) {
+  return finalizeWithWarnings(fallbackDayCandidate(profile, outline, di), di, outline.days[di],
     ['此日详细生成多次未返回有效内容，已按大纲补全估算安排；请确认各段交通、景区路线、开放时间和行李服务后执行。'],
     warningContext(profile, outline, di));
 }
@@ -10673,6 +10935,8 @@ async function buildExecutionReview(rawInput, outlineData, opts) {
   const outline = (outlineData && outlineData.outline) || outlineData || {};
   const days = asArray(outline.days);
   const all = asArray(opts.reviewItems);
+  const published = finalizedDays(all);
+  days.forEach((day, di) => { if (!published.has(di)) prepareFallbackLodging(day); });
   const pending = days.map((_, di) => di).filter((di) => {
     const rows = all.filter((row) => Number(row.dayIndex || 0) === di);
     return rows.length && rows.some((row) => row.executionReview !== REVIEW_VERSION);
@@ -10688,7 +10952,15 @@ async function buildExecutionReview(rawInput, outlineData, opts) {
       return value;
     }).catch(() => ({})) : Promise.resolve({});
   const candidates = all.filter((row) => selected.includes(Number(row.dayIndex || 0)));
+  // 三次局修仍不通过，自动转完整重排；不是直接宣布整单失败。
+  selected.forEach((di) => {
+    if (Number(attempts[`review-${di}`] || 0) >= 3) {
+      days[di].executionForceReroute = true;
+      days[di].executionRepairFailures = Math.max(2, Number(days[di].executionRepairFailures || 0));
+    }
+  });
   let reviewed = await reviewExecutionItems(p, outline, candidates, deadline, {
+    allItems: all,
     selfDriveAllowed: (row) => explicitSelfDriveSegment(p, row),
   });
   const combined = all.filter((row) => !selected.includes(Number(row.dayIndex || 0))).concat(reviewed);
@@ -10702,22 +10974,25 @@ async function buildExecutionReview(rawInput, outlineData, opts) {
     const key = `review-${di}`;
     if (accepted.has(di)) delete attempts[key];
     else if (days[di].executionReviewAttempted && asArray(days[di].executionReviewIssues).length) attempts[key] = Number(attempts[key] || 0) + 1;
-    if (!accepted.has(di)) attempts[`review-round-${di}`] = Number(attempts[`review-round-${di}`] || 0) + 1;
+    if (!accepted.has(di) && days[di].executionReviewPhase !== 'deferred')
+      attempts[`review-round-${di}`] = Number(attempts[`review-round-${di}`] || 0) + 1;
+    if (accepted.has(di)) delete attempts[`review-round-${di}`];
   });
-  // 独立运营检索占一轮，失败日期还需至少三次真正的重排机会。
+  // 查询/超时不消耗语义修订次数；真正失败有局修和完整重排两阶段，仍有总预算。
   const exhausted = selected.filter((di) => !accepted.has(di)
-    && (Number(attempts[`review-${di}`] || 0) >= 3 || Number(attempts[`review-round-${di}`] || 0) >= 8));
+    && (Number(attempts[`review-${di}`] || 0) >= 6 || Number(attempts[`review-round-${di}`] || 0) >= 12));
   exhausted.forEach((di) => {
     const day = days[di];
     const rows = day.executionCandidate || reviewed.filter((row) => Number(row.dayIndex || 0) === di);
-    const done = finalizeWithWarnings(rows, di, day, day.executionReviewIssues, warningContext(p, outline, di));
+    const done = finalizeWithWarnings(rows, di, day, day.executionReviewIssues, warningContext(p, outline, di, all));
     reviewed = reviewed.filter((row) => Number(row.dayIndex || 0) !== di).concat(done);
-    delete attempts[`review-${di}`]; delete attempts[`review-round-${di}`];
+    if (done.length) { delete attempts[`review-${di}`]; delete attempts[`review-round-${di}`]; }
   });
   accepted = finalizedDays(reviewed);
   const ready = days.map((_, di) => di).filter((di) => accepted.has(di)
     || (!mealChanged.has(di) && finalizedDays(all).has(di)));
-  const reviewError = '';
+  const unsafeDays = exhausted.filter((di) => !accepted.has(di));
+  const reviewError = unsafeDays.length ? `第${unsafeDays.map((di) => di + 1).join('、')}天执行校验未通过，请续跑重排交通、入住或行李；已完成日期保留，不发布不安全候选` : '';
   const items = ensureStableItemIds(annotateHotelItems(reviewed, outline));
   const complete = ready.length === days.length;
   const returnedDays = new Set(items.map((row) => Number(row.dayIndex || 0)));
@@ -10741,8 +11016,8 @@ async function buildExecutionReview(rawInput, outlineData, opts) {
     alarms = fallbackAlarms(p, outline);
     alarms = alarms.concat(backfillDetailAlarms(p, outline, merged, alarms));
     alarms = annotateAlarmUsage(dedupeBookingAlarmRecords(normalizeBookingAlarmKinds(
-      linkBookingAlarms(alarms, merged), merged, p,
-    )), merged, outline).map((alarm) => Object.assign({}, alarm, {
+      linkBookingAlarms(alarms, merged), merged, p, days.flatMap((day) => day.ticketPolicies || []),
+    ), merged), merged, outline).map((alarm) => Object.assign({}, alarm, {
       leadMinutes: p.leadMinutes, remindAt: Number(alarm.fireAt) - p.leadMinutes * 60000,
     }));
   }
@@ -10773,7 +11048,7 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
       if (ready.has(di)) return;
       const rows = day.executionCandidate || all.filter((row) => Number(row.dayIndex || 0) === di);
       items.push(...(rows.length ? finalizeWithWarnings(rows, di, day,
-        day.executionReviewIssues || ['自动复核已达到时间预算，此段运营信息需出行前确认。'], warningContext(profile, outline, di))
+        day.executionReviewIssues || ['自动复核已达到时间预算，此段运营信息需出行前确认。'], warningContext(profile, outline, di, all))
         : fallbackDayWithWarnings(profile, outline, di)));
     });
     if (!outline.executionSuggestions) outline.executionSuggestions = {};
@@ -10782,6 +11057,11 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
     result.items = ensureStableItemIds(annotateHotelItems(items.filter((row) => !ready.has(Number(row.dayIndex || 0))), outline));
     result.items.forEach((row) => [row.startLocation, row.endLocation].filter(Boolean)
       .forEach((addr) => result.addrDay.set(addr, Number(row.dayIndex || 0))));
+    if (result.partial && !result.reviewError) {
+      const completed = finalizedDays(items);
+      const blocked = outline.days.map((_, di) => di).filter((di) => !completed.has(di));
+      result.reviewError = `第${blocked.map((di) => di + 1).join('、')}天达到生成预算但执行校验未通过，请续跑；已完成日期保留`;
+    }
     return result;
   }
   if (Array.isArray(opts.reviewItems)) {
@@ -10797,7 +11077,12 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
     }
     const generated = new Set(opts.reviewItems.map((row) => Number(row.dayIndex || 0)));
     opts = Object.assign({}, opts, { doneDayIndexes: [...new Set([...(opts.doneDayIndexes || []), ...generated])] });
-    if (generated.size >= days.length || opts.reviewItems.some((row) => row.executionReview !== REVIEW_VERSION)) {
+    const waiting = [...generated].filter((di) => opts.reviewItems.some((row) => Number(row.dayIndex || 0) === di
+      && row.executionReview !== REVIEW_VERSION));
+    const firstReview = waiting.length && waiting.every((di) => !days[di].executionReviewPhase);
+    // 新批次允许先复核一次以尽快发布；进入查询/修订后先补未起草日期，
+    // 不能让难修候选长期占住入口。新草稿仍只存私有区，完整复核后才发布。
+    if (generated.size >= days.length || firstReview) {
       return buildExecutionReview(rawInput, outlineData, opts);
     }
   }
@@ -10806,7 +11091,9 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
   const acceptedSnapshots = new Map();
   asArray(opts.reviewItems).forEach((row) => {
     const di = Number(row.dayIndex || 0);
-    if (row.executionReview === REVIEW_VERSION && !acceptedSnapshots.has(di) && asArray(normalizedOutline.days)[di]) {
+    // 仅起草缺少的日期；已起草日期（含私有修订候选）的原大纲、选路
+    // 状态和证据也保留，不被另一天的全局初稿兜底顺带改写。
+    if (!acceptedSnapshots.has(di) && asArray(normalizedOutline.days)[di]) {
       acceptedSnapshots.set(di, JSON.parse(JSON.stringify(normalizedOutline.days[di])));
     }
   });
@@ -10831,6 +11118,15 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
   normalizeLijiangCruiseOutline(outline);
   restoreAcceptedDays(outline);
   if (!asArray(outline.days).length) throw new Error('缺少行程大纲，无法展开详情');
+  // 路线清洗可能改变过夜城市；不能沿用清洗前另一城市的已核验酒店。
+  if (process.env.AMAP_KEY && outline.days.some((day, di) => di < outline.days.length - 1
+    && day.hotelPoiVerified && day.hotelPoiOvernight !== String(day.overnight || day.city || '').trim()
+    && !acceptedSnapshots.has(di))) {
+    const { validateOutlineHotels } = require('./hotel-validation');
+    const { searchHotelPoi, searchHotelsNearby } = require('./geocode');
+    await validateOutlineHotels({ outline }, rawInput, searchHotelPoi, searchHotelsNearby);
+    restoreAcceptedDays(outline);
+  }
 
   const t1 = Date.now();
   // 时间预算：细化默认 38s；整轮硬上限 55s（云函数 60s，留 5s 给写库和返回）
@@ -10867,7 +11163,9 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
     attempts: opts.attempts,     // 上一轮回传的失败次数，决定哪些天还能再试
     deadline,
   });
-  const fallbackRows = opts.skipExecutionReview ? [] : detail.gaveUpDayIndexes.flatMap((di) => fallbackDayWithWarnings(p, outline, di));
+  // 连续模型超时后只补私有草稿，仍进独立运营查询和完整执行审计。
+  // 不能将缺少首日接驳/内部连接的骨架直接打完成标记发布。
+  const fallbackRows = opts.skipExecutionReview ? [] : detail.gaveUpDayIndexes.flatMap((di) => fallbackDayCandidate(p, outline, di));
   if (fallbackRows.length) {
     detail.doneDayIndexes = [...new Set(detail.doneDayIndexes.concat(fallbackRows.map((row) => Number(row.dayIndex || 0))))];
     detail.gaveUpDayIndexes = [];
@@ -11117,8 +11415,8 @@ async function buildPlan(rawInput, outlineData, opts = {}) {
     console.log('[generatePlan] 详细行程规则查漏补齐 %d 条待办', detailBackfill.length);
   }
   alarms = linkBookingAlarms(alarms, items);
-  alarms = normalizeBookingAlarmKinds(alarms, items, p);
-  alarms = dedupeBookingAlarmRecords(alarms);
+  alarms = normalizeBookingAlarmKinds(alarms, items, p, outline.days.flatMap((day) => day.ticketPolicies || []));
+  alarms = dedupeBookingAlarmRecords(alarms, items);
   alarms = annotateAlarmUsage(alarms, items, outline);
   alarms = alarms.map((alarm) => Object.assign({}, alarm, {
     leadMinutes: p.leadMinutes,
@@ -11210,7 +11508,7 @@ module.exports = {
   fixDayTimeOverlaps, enforceFinalTimelineIntegrity, samePlace, toMin, fmtMin, solarEventMinute, longjiSolarMinute,
   enforceTripEdgeOrder, enforceTransportPreference, drivingAllowed, taxiAllowed, taxiPreferred,
   explicitSelfDriveSegment, defaultTransferMode, ensureSelfDriveParking, enforceOutlineTransportPreference,
-  hotelBookingTasks, hotelTaskNote, syncHotelReferences, annotateHotelItems, linkBookingAlarms, normalizeBookingAlarmKinds, dedupeBookingAlarmRecords, alarmUsageInfo, annotateAlarmUsage, bookingStatusMatches, ensureStableItemIds,
+  hotelBookingTasks, hotelTaskNote, canonicalHotelReminders, syncHotelReferences, annotateHotelItems, linkBookingAlarms, normalizeBookingAlarmKinds, dedupeBookingAlarmRecords, alarmUsageInfo, annotateAlarmUsage, bookingStatusMatches, ensureStableItemIds,
   collectSegments, applyRealSchedules, resolveOfficialRailTimeline,
   enforceRealSchedule, stripUnverifiedSchedules, enforceOfficialRailItems, dedupeOfficialRailItems,
   pickSchedule, shareStem,

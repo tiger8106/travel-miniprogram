@@ -24,7 +24,9 @@ function splitDocument(text) {
   let inBooking = false;
 
   for (const raw of lines) {
-    const line = raw.trim();
+    const original = raw.trim();
+    const explicitYear = original.match(/^(20\d{2})年(?=\d{1,2}月\d{1,2}日)/);
+    const line = explicitYear ? original.slice(5) : original;
 
     // 进入预订章节
     if (!inBooking && BOOKING_HEADER.test(line)) {
@@ -55,7 +57,8 @@ function splitDocument(text) {
       }
     }
     if (m) {
-      cur = { month: +m[1], day: +m[2], title: line, lines: [] };
+      cur = { month: +m[1], day: +m[2], title: original, lines: [] };
+      if (explicitYear) cur.year = Number(explicitYear[1]);
       // 范围标题（1月1日至1月3日）记录结束日期
       const rm = line.match(DAY_RANGE);
       if (rm) {
@@ -81,9 +84,8 @@ function inferYear(days) {
   // 服务器是 UTC，"今天"按北京时间（UTC+8）计算，避免凌晨时段差一天
   const now = new Date(Date.now() + 8 * 3600 * 1000);
   if (!days.length) return now.getUTCFullYear();
-  const anchorMD = days.reduce((a, b) =>
-    a.month * 100 + a.day <= b.month * 100 + b.day ? a : b
-  );
+  // 文档顺序的第一天才是起点；跨年行程不能拿次年一月推断起始年。
+  const anchorMD = days[0];
   let y = now.getUTCFullYear();
   const anchor = Date.UTC(y, anchorMD.month - 1, anchorMD.day);
   const today0 = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
